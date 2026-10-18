@@ -100,7 +100,7 @@ python -m pip install -r requirements-dev.txt
 
 测试使用生成的通用样本，结果写入 `tests/output/`。安全测试会对其创建并核实身份的任务进程注入故障，运行期间请勿手动操作测试窗口。
 
-构建结果位于 `build/bin/`。执行 `.\package.ps1` 可在 `dist/` 中生成包含 EXE 和简要使用说明的 ZIP 包。目录约定、实现细节及新增文件的提交规则见[开发说明](docs/轻量化转换大纲.md)。
+构建结果位于 `build/bin/`。首版版本号为 `v0.1`，执行 `.\package.ps1 -Version v0.1` 可在 `dist/` 中生成 `DocxMathTypeBatch-v0.1-win-x64.zip`，内含 EXE、简要使用说明和许可证。目录约定、实现细节及新增文件的提交规则见[开发说明](docs/轻量化转换大纲.md)。
 
 ## 问题反馈
 
@@ -108,4 +108,4 @@ python -m pip install -r requirements-dev.txt
 
 ## 许可
 
-项目目前未提供开源许可证。
+本项目采用 [MIT 许可证](LICENSE)，允许使用、修改、分发和商用，须保留版权及许可声明。Microsoft Word 和 MathType 的使用遵循各自的许可条款。

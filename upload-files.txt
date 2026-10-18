@@ -1,6 +1,7 @@
 # 公开文件清单：仅使用项目相对路径。
 .gitattributes
 .gitignore
+LICENSE
 README.md
 assets/app.rc
 assets/app_icon.ico
