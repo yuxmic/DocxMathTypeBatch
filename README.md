@@ -4,7 +4,15 @@
 
 DocxMathTypeBatch 是一款 Windows 桌面工具，适合在 Word 中使用 LaTeX 编写公式、需要统一转换或整理公式格式的场景。程序调用本机的 Word 和 MathType 完成转换，将结果保存为新的 `.docx` 文件，保留原文档。
 
-[使用说明](docs/使用说明.md) · [公式书写与兼容性](docs/MathType兼容LaTeX书写规范.md) · [开发说明](docs/轻量化转换大纲.md)
+[使用说明](docs/使用说明.md) · [公式书写与兼容性](docs/MathType兼容LaTeX书写规范.md)
+
+## 下载 v0.1
+
+- **[下载 Windows x64 ZIP](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1/DocxMathTypeBatch-v0.1-win-x64.zip)**：推荐，包含程序、简要使用说明和 MIT 许可证，解压后运行。
+- [下载单文件 EXE](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1/DocxMathTypeBatch.exe)
+- [版本说明与校验文件](https://github.com/yuxmic/DocxMathTypeBatch/releases/tag/v0.1)
+
+运行前请安装下方列出的 Word 和 MathType。程序尚未进行代码签名，首次运行可能出现 Windows 安全提示。
 
 ## 主要功能
 
@@ -25,27 +33,13 @@ DocxMathTypeBatch 是一款 Windows 桌面工具，适合在 Word 中使用 LaTe
 
 运行编译后的程序无需安装 Python、PowerShell 或 .NET。
 
-## 快速开始
+## 使用方法
 
-### 从源码构建
-
-构建需要 **PowerShell 7、MSVC C++ 工具链和 Windows SDK**。MSVC 可通过 Visual Studio 或 Visual Studio Build Tools 安装，需包含 x64 C++ 编译工具。
-
-可使用 Git 克隆仓库，也可下载并解压源码。以下命令使用 Git，在 PowerShell 7 中执行：
-
-```powershell
-git clone https://github.com/yuxmic/DocxMathTypeBatch.git
-cd DocxMathTypeBatch
-.\build.ps1 -Target Gui
-.\build\bin\DocxMathTypeBatch.exe
-```
-
-### 转换文档
-
-1. 保存并关闭待转换文档，将一个或多个 `.docx` 文件拖入程序。
-2. 选择转换方向和公式范围，按需调整字号、行距与右编号。默认转换全部公式，字号和行距跟随原文，不添加编号。
-3. 选择输出位置，点击“开始转换”。结果另存为新文件，重名时自动添加序号。
-4. 在列表中查看完成状态，通过“日志”查看具体原因。打开结果文档后，可双击新生成的 MathType 对象继续编辑。
+1. 下载上方 ZIP，解压后运行 `DocxMathTypeBatch.exe`。
+2. 保存并关闭待转换文档，将一个或多个 `.docx` 文件拖入程序。
+3. 选择转换方向和公式范围，按需调整字号、行距与右编号。默认转换全部公式，字号和行距跟随原文，不添加编号。
+4. 选择输出位置，点击“开始转换”。结果另存为新文件，重名时自动添加序号。
+5. 在列表中查看完成状态，通过“日志”查看具体原因。打开结果文档后，可双击新生成的 MathType 对象继续编辑。
 
 反向转换时，切换到 **MathType → LaTeX**，可选择行外公式的输出定界符。详细设置见[使用说明](docs/使用说明.md)。
 
@@ -70,38 +64,6 @@ cd DocxMathTypeBatch
 
 公式代码目前以 **ASCII LaTeX** 为支持范围，包含中文等非 ASCII 字符的公式会保留原式；中文正文可正常保留。程序不自动拆分或缩放过长公式，也不将缺少定界符的裸 LaTeX 作为转换目标。兼容写法与示例见[公式书写与兼容性](docs/MathType兼容LaTeX书写规范.md)。
 
-## 开发与测试
-
-项目采用原生 C++ / Win32 实现。`src/` 为程序源码，`assets/` 为图标与资源，`tests/` 为测试工具，`docs/` 为详细文档。
-
-Python 仅用于生成测试文档和检查 DOCX、PDF。进行开发测试时，先安装测试依赖并构建全部开发工具：
-
-```powershell
-python -m pip install -r requirements-dev.txt
-.\build.ps1 -Target All
-.\test.ps1 -Suite Core -SkipBuild
-```
-
-测试入口支持以下分组：
-
-| 分组 | 检查内容 |
-| --- | --- |
-| `Static` | 脚本语法、合成样本和提交内容检查，不启动 Office |
-| `Core` | 正反向转换、公式范围、布局、编号和高级设置 |
-| `Safety` | 取消、故障、超时、安装路径和外链保持 |
-| `UI` | 界面、队列和诊断 |
-| `All` | 依次运行 Core、Safety 和 UI |
-
-例如，运行全部回归：
-
-```powershell
-.\test.ps1 -Suite All -SkipBuild
-```
-
-测试使用生成的通用样本，结果写入 `tests/output/`。安全测试会对其创建并核实身份的任务进程注入故障，运行期间请勿手动操作测试窗口。
-
-构建结果位于 `build/bin/`。首版版本号为 `v0.1`，执行 `.\package.ps1 -Version v0.1` 可在 `dist/` 中生成 `DocxMathTypeBatch-v0.1-win-x64.zip`，内含 EXE、简要使用说明和许可证。目录约定、实现细节及新增文件的提交规则见[开发说明](docs/轻量化转换大纲.md)。
-
 ## 问题反馈
 
 反馈时请提供 Windows、Word 和 MathType 版本、复现步骤，以及脱敏后的最小公式或文档示例。遇到转换失败，可附上“转换详情”中的相关日志，并先移除其中的文档内容和个人路径。
@@ -109,3 +71,5 @@ python -m pip install -r requirements-dev.txt
 ## 许可
 
 本项目采用 [MIT 许可证](LICENSE)，允许使用、修改、分发和商用，须保留版权及许可声明。Microsoft Word 和 MathType 的使用遵循各自的许可条款。
+
+源码构建和开发约定见[开发说明](docs/轻量化转换大纲.md)。
