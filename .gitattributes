@@ -1,0 +1,10 @@
+# 源码统一按 UTF-8 文本和 LF 换行管理，图标保留二进制。
+* text=auto eol=lf
+*.ps1 text eol=lf
+*.py text eol=lf
+*.cpp text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.md text eol=lf
+*.png binary
+*.ico binary

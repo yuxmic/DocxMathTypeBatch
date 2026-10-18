@@ -1,0 +1,17 @@
+{
+  "Source": "项目图标的绿色变体；构建输入为本目录内的 PNG 与 ICO",
+  "Tool": "Built-in image_gen",
+  "Date": "2026-10-18",
+  "Output": "app_icon.png",
+  "IconSizes": [
+    16,
+    24,
+    32,
+    48,
+    64,
+    128,
+    256
+  ],
+  "Prompt": "Use case: precise-object-edit. Asset type: Windows desktop application icon for a LaTeX / MathType document converter. Edit target: supplied existing icon. Preserve the exact composition and recognizable shapes: large white folded-corner document on the left with dark mathematical Sigma/integral marks, small white document on the lower right with the same marks, cyan/teal rightward conversion arrow between them. Change only the blue/navy outlines, fold accents, mathematical symbols and document-edge accents to coordinated deep green/teal with primary teal #008F96 and darker green #005D61 for legible mathematical symbols and thin outlines. White page fill remains white. The conversion arrow should use vivid medium teal/green. Keep transparent empty background and keep the entire icon within square canvas with small even margin. Clean sharp desktop icon artwork, no new text, no additional elements, no shadows outside silhouette, no framing or decorative background. Output a square transparent PNG.",
+  "SourceSHA256": "2A3B9012B87D179DD46EEEA26B1AD4016F048512955DB757268775CB818913BB"
+}
