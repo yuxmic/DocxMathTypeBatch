@@ -1,59 +1,111 @@
 # DocxMathTypeBatch
 
-原生 C++ / Win32 的 Word 公式转换工具。将正文中的 LaTeX 转换为可编辑 MathType，并生成独立 DOCX；支持多文档队列、公式范围、字号、行距及可选行外右编号，保留基本反向导出。
+将 Word 文档中的 LaTeX 公式批量转换为可编辑的 MathType 对象。
 
-## 运行和开发
+DocxMathTypeBatch 是一款 Windows 桌面工具，适合在 Word 中使用 LaTeX 编写公式、需要统一转换或整理公式格式的场景。程序调用本机的 Word 和 MathType 完成转换，将结果保存为新的 `.docx` 文件，保留原文档。
 
-运行成品需要 Windows x64、64 位桌面 Word 和完整 MathType。开发构建需要 PowerShell 7、MSVC C++ 工具和 Windows SDK。Python 只用于测试，成品不依赖 Python、PowerShell 或 .NET。
+[使用说明](docs/使用说明.md) · [公式书写与兼容性](docs/MathType兼容LaTeX书写规范.md) · [开发说明](docs/轻量化转换大纲.md)
 
-在项目根目录运行：
+## 主要功能
+
+- **批量转换**：拖入多个文档，或添加文件夹中的 DOCX，按队列依次处理。
+- **选择公式范围**：转换全部公式、仅行内公式或仅行外公式。
+- **调整公式格式**：字号和段落行距默认跟随原文，也可分别指定。
+- **添加行外编号**：支持章号、节号、起始序号和编号格式，可补充或更新已有 MathType 原生编号。
+- **基本反向导出**：将正文中的 MathType 公式导出为 LaTeX 文本。
+- **查看处理结果**：逐文档查看转换详情；无法转换的公式保留原式，并记录原因。支持安全停止当前批次。
+
+## 运行环境
+
+| 项目 | 要求 |
+| --- | --- |
+| 操作系统 | Windows x64 |
+| Word | 已安装并正确注册的 64 位桌面版 Microsoft Word |
+| MathType | 完整桌面版，包含适配 64 位 Word 的组件 |
+
+运行编译后的程序无需安装 Python、PowerShell 或 .NET。
+
+## 快速开始
+
+### 从源码构建
+
+构建需要 **PowerShell 7、MSVC C++ 工具链和 Windows SDK**。MSVC 可通过 Visual Studio 或 Visual Studio Build Tools 安装，需包含 x64 C++ 编译工具。
+
+可使用 Git 克隆仓库，也可下载并解压源码。以下命令使用 Git，在 PowerShell 7 中执行：
+
+```powershell
+git clone https://github.com/yuxmic/DocxMathTypeBatch.git
+cd DocxMathTypeBatch
+.\build.ps1 -Target Gui
+.\build\bin\DocxMathTypeBatch.exe
+```
+
+### 转换文档
+
+1. 保存并关闭待转换文档，将一个或多个 `.docx` 文件拖入程序。
+2. 选择转换方向和公式范围，按需调整字号、行距与右编号。默认转换全部公式，字号和行距跟随原文，不添加编号。
+3. 选择输出位置，点击“开始转换”。结果另存为新文件，重名时自动添加序号。
+4. 在列表中查看完成状态，通过“日志”查看具体原因。打开结果文档后，可双击新生成的 MathType 对象继续编辑。
+
+反向转换时，切换到 **MathType → LaTeX**，可选择行外公式的输出定界符。详细设置见[使用说明](docs/使用说明.md)。
+
+## 公式格式与支持范围
+
+支持 `$...$`、`$$...$$`、`\(...\)` 和 `\[...\]`。例如，Word 正文可以写为：
+
+```latex
+正文中的 $a+b=c$ 作为行内公式处理。
+
+\[\frac{x+1}{y+2}\]
+```
+
+公式独占段落时按行外处理，夹在普通文字中时按行内处理。支持 `cases`、`array`、矩阵等完整多行结构；`aligned` 会在导入时转换为 MathType 兼容的形式。
+
+| 文档内容 | 当前处理方式 |
+| --- | --- |
+| 正文中带定界符的 LaTeX | 按所选范围转换 |
+| 正向转换时已有的 MathType 对象 | 保留公式内容，可统一独立行外对象的布局并补充或更新编号 |
+| Word 自带公式（OMML） | 保持原样 |
+| 表格、文本框、页眉页脚、脚注尾注 | 不转换 |
+
+公式代码目前以 **ASCII LaTeX** 为支持范围，包含中文等非 ASCII 字符的公式会保留原式；中文正文可正常保留。程序不自动拆分或缩放过长公式，也不将缺少定界符的裸 LaTeX 作为转换目标。兼容写法与示例见[公式书写与兼容性](docs/MathType兼容LaTeX书写规范.md)。
+
+## 开发与测试
+
+项目采用原生 C++ / Win32 实现。`src/` 为程序源码，`assets/` 为图标与资源，`tests/` 为测试工具，`docs/` 为详细文档。
+
+Python 仅用于生成测试文档和检查 DOCX、PDF。进行开发测试时，先安装测试依赖并构建全部开发工具：
 
 ```powershell
 python -m pip install -r requirements-dev.txt
 .\build.ps1 -Target All
-.\test.ps1 -Suite Static
 .\test.ps1 -Suite Core -SkipBuild
-.\package.ps1
 ```
 
-程序生成到 `build/bin/DocxMathTypeBatch.exe`，发布包生成到 `dist/`。打包只包含程序和简要使用说明，不自动运行转换测试，也不把历史测试结果视为当前版本验收。
+测试入口支持以下分组：
 
-## 目录约定
+| 分组 | 检查内容 |
+| --- | --- |
+| `Static` | 脚本语法、合成样本和提交内容检查，不启动 Office |
+| `Core` | 正反向转换、公式范围、布局、编号和高级设置 |
+| `Safety` | 取消、故障、超时、安装路径和外链保持 |
+| `UI` | 界面、队列和诊断 |
+| `All` | 依次运行 Core、Safety 和 UI |
 
-| 目录 | 内容 | 提交到 Git |
-| --- | --- | --- |
-| `src/` | 程序源码和共用头文件 | 是 |
-| `assets/` | 图标、资源和生成脚本 | 是 |
-| `docs/` | 使用说明、当前开发约定和说明原稿 | 是 |
-| `tests/` | 测试脚本、合成样本生成器和原生测试工具 | 是，排除输出 |
-| `tests/output/` | 本轮合成 DOCX、日志、截图、PDF 和报告 | 否 |
-| `build/` | 编译中间文件、生成头文件、EXE 和构建记录 | 否 |
-| `dist/` | 发布包和经过检查的源码导出包 | 否 |
-| `.local/` | 私人输入、私人结果及本机维护记录 | 否 |
-| `临时文件夹/` | 本轮临时材料及待手动清理的旧资料 | 否 |
-
-整个源码目录可移动到其他位置；构建和公开测试不读取旁边的项目、旧版本目录或私人样本。Word、MathType 和编译工具通过系统安装信息定位。
-
-## 测试
-
-`Static` 检查公开文件、脚本语法和合成样本；`Core` 检查正反向、扫描范围、布局、编号和高级设置；`Safety` 检查取消、故障、超时、安装路径和外链；`UI` 检查界面、队列和诊断；`All` 顺序运行后三组。
+例如，运行全部回归：
 
 ```powershell
-.\test.ps1 -Suite Safety -SkipBuild
-.\test.ps1 -Suite UI -SkipBuild
+.\test.ps1 -Suite All -SkipBuild
 ```
 
-测试输入来自代码生成的通用公式，不包含个人论文。每个专项自行准备所需输入，不要求预先保存的 JSON 报告。性能比较需单独指定项目内的本地基线成品，日常功能测试跳过性能比较。安全测试会操作它核实身份的任务进程，运行期间请勿手动操作这些测试窗口。
+测试使用生成的通用样本，结果写入 `tests/output/`。安全测试会对其创建并核实身份的任务进程注入故障，运行期间请勿手动操作测试窗口。
 
-## GitHub 上传范围
+构建结果位于 `build/bin/`。执行 `.\package.ps1` 可在 `dist/` 中生成包含 EXE 和简要使用说明的 ZIP 包。目录约定、实现细节及新增文件的提交规则见[开发说明](docs/轻量化转换大纲.md)。
 
-`upload-files.txt` 是唯一公开文件清单，`.gitignore` 按该清单逐个放行。新增公开文件时同时更新这两个文件；本地目录和文档格式始终排除。
+## 问题反馈
 
-```powershell
-.\check-upload.ps1
-.\check-upload.ps1 -Export
-```
+反馈时请提供 Windows、Word 和 MathType 版本、复现步骤，以及脱敏后的最小公式或文档示例。遇到转换失败，可附上“转换详情”中的相关日志，并先移除其中的文档内容和个人路径。
 
-检查会拒绝本机身份、绝对文件路径、私人样本名称、疑似密钥和清单外的已跟踪文件。`-Export` 只导出清单中的源码与资源，并回读 ZIP 校验文件名和哈希。不要把完整工作目录压缩上传；本地日志和截图可能包含文档内容、窗口标题或路径。
+## 许可
 
-使用方法见 [使用说明](docs/使用说明.md)，实现约定见 [轻量化转换大纲](docs/轻量化转换大纲.md)，公式兼容约定见 [MathType兼容LaTeX书写规范](docs/MathType兼容LaTeX书写规范.md)。项目暂不添加开源许可证，授权方式待定。
+项目目前未提供开源许可证。
