@@ -586,7 +586,9 @@ struct DisplayLayout {
         if(!style){
             auto styles=get(document,L"Styles");
             if(stylePresent)style=asObject(invoke(styles.Get(),L"Item",DISPATCH_METHOD,{L"MTDisplayEquation"}));
-            else{style=asObject(invoke(styles.Get(),L"Add",DISPATCH_METHOD,{L"MTDisplayEquation",1L}));auto base=get(range,L"Style");invoke(style.Get(),L"BaseStyle",DISPATCH_PROPERTYPUT,{base.Get()});}
+            // 新建样式前先把选区放到公式所在段落：Styles.Add 会复制当前选区的字符格式，不能沿用它打开文档时的开头选区。
+            else{auto paragraph=collectionItem(get(range,L"Paragraphs").Get(),1);invoke(get(paragraph.Get(),L"Range").Get(),L"Select",DISPATCH_METHOD);
+                style=asObject(invoke(styles.Get(),L"Add",DISPATCH_METHOD,{L"MTDisplayEquation",1L}));auto base=get(range,L"Style");invoke(style.Get(),L"BaseStyle",DISPATCH_PROPERTYPUT,{base.Get()});}
             if(!addRightNumbers){nativeProperty(document,L"MTEquationSection",L"1");if(!stylePresent){nativeProperty(document,L"MTEquationNumber2",numbering.format);nativeProperty(document,L"MTCustomEquationNumber",numbering.custom?L"1":L"0");}}
             singleSection=integer(get(document,L"Sections").Get(),L"Count")==1;
         }

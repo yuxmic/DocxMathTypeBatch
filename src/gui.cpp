@@ -860,7 +860,7 @@ struct App {
                 auto style=add(224+row,L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP,104,y,132,180);
                 for(const auto* label:styleLabels)SendMessageW(style,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(label));
                 SendMessageW(style,CB_SETCURSEL,row==0?app->chapterStyle:row==1?app->sectionStyle:app->equationStyle,0);
-                add(214+row,L"STATIC",row==2?L"起始值":L"数值",0,252,y,54,34);
+                add(214+row,L"STATIC",L"起始值",0,252,y,54,34);
                 add(230+row,L"EDIT",std::to_wstring(row==0?app->numbering.chapter:row==1?app->numbering.section:app->numbering.start).c_str(),WS_BORDER|WS_TABSTOP|ES_AUTOHSCROLL,320,y,96,34);
             }
             add(217,L"STATIC",L"括号",0,24,368,76,34);auto enclosure=add(227,L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP,104,368,132,180);
