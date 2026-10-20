@@ -8,7 +8,7 @@ if($LASTEXITCODE -ne 0){throw '项目静态检查失败。'}
 if($Suite -eq 'Static'){return}
 if(-not $SkipBuild){& (Join-Path $PSScriptRoot 'build.ps1') -Target All}
 $groups=[ordered]@{
-    Core=@('lightweight','advanced','native-display','native-numbering')
+    Core=@('lightweight','advanced','native-display','native-numbering','experimental','agent')
     Safety=@('cancel','faults','timeouts','installation','link-updates')
     UI=@('gui','diagnostics','batch','ui-style','ui-experience')
 }

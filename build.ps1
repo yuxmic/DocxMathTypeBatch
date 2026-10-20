@@ -40,8 +40,8 @@ try{
     $programs=@(
         @{Target='Native';Source=@('tests/native/native_api_probe.cpp');Name='native-api-probe';Info='build-info.json'},
         @{Target='Scan';Source=@('src/scan_docx.cpp');Name='docx-math-scan';Info='scan-build-info.json'},
-        @{Target='Convert';Source=@('src/convert_docx.cpp');Name='docx-math-convert';Info='convert-build-info.json'},
-        @{Target='Gui';Source=@('src/gui.cpp','src/convert_docx.cpp');Name='DocxMathTypeBatch';Info='gui-build-info.json'}
+        @{Target='Convert';Source=@('src/convert_docx.cpp','src/experimental_conversion.cpp');Name='docx-math-convert';Info='convert-build-info.json'},
+        @{Target='Gui';Source=@('src/gui.cpp','src/convert_docx.cpp','src/experimental_conversion.cpp');Name='DocxMathTypeBatch';Info='gui-build-info.json'}
     )
     foreach($program in ($programs|Where-Object {$Target -eq 'All' -or $_.Target -eq $Target})){
         $exe=Join-Path $bin ($program.Name+'.exe')

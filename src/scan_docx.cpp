@@ -46,7 +46,7 @@ static void makeFixture(WordSession& word, const std::wstring& base, const std::
     invoke(para.Get(), L"SpaceAfter", DISPATCH_PROPERTYPUT, {0L});
     invoke(para.Get(), L"CharacterUnitFirstLineIndent", DISPATCH_PROPERTYPUT, {2L});
     auto locate = [&](const wchar_t* source) {
-        auto found = findLiteral(document, start, integer(get(document, L"Content").Get(), L"End"), source);
+        auto found = findLiteral(ScanRangeContext{document}, start, integer(get(document, L"Content").Get(), L"End"), source);
         require(found != nullptr, "Find fixture marker"); return found;
     };
     invoke(get(locate(L"split_1").Get(), L"Font").Get(), L"Bold", DISPATCH_PROPERTYPUT, {true});

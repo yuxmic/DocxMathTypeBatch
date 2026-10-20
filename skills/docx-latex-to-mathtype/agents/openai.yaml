@@ -1,0 +1,4 @@
+interface:
+  display_name: "DOCX LaTeX ↔ MathType"
+  short_description: "连接独立安装的转换器，转换 Word 公式、处理额外位置并检查部分完成结果"
+  default_prompt: "使用 $docx-latex-to-mathtype 连接本机 DocxMathTypeBatch，按要求转换这份 DOCX 的公式和编号，检查并交付结果。"

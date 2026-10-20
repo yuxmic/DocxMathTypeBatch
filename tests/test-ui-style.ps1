@@ -23,6 +23,9 @@ public static class StyleCheck {
     [DllImport("user32.dll")] public static extern bool EnableWindow(IntPtr hwnd,bool enabled);
     [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr hwnd,out Rect rect);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd,out Rect rect);
+    [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hwnd);
+    public static void DpiChange(IntPtr hwnd,int previous,int next){Rect r;GetWindowRect(hwnd,out r);r.Right=r.Left+(r.Right-r.Left)*next/previous;r.Bottom=r.Top+(r.Bottom-r.Top)*next/previous;IntPtr p=Marshal.AllocHGlobal(Marshal.SizeOf<Rect>());try{Marshal.StructureToPtr(r,p,false);SendMessage(hwnd,0x2E0,(IntPtr)(next|(next<<16)),p);}finally{Marshal.FreeHGlobal(p);}}
     [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd,IntPtr after,int x,int y,int w,int h,uint flags);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hwnd,uint message,IntPtr wp,IntPtr lp);
     public static void SetText(IntPtr hwnd,string text){SendText(hwnd,0xC,IntPtr.Zero,text);}
@@ -128,7 +131,26 @@ try {
     do{Start-Sleep -Milliseconds 30;$advanced=[StyleCheck]::Dialog($styleProcess.Id,'高级设置');if([DateTime]::UtcNow -gt $deadline){throw '高级设置未打开。'}}while($advanced -eq [IntPtr]::Zero)
     [StyleCheck]::SendMessage($advanced,0,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
     foreach($id in @(201,202,226,227)){Assert-ComboSelection ([StyleCheck]::GetDlgItem($advanced,$id)) 1}
+    if([StyleCheck]::Text([StyleCheck]::GetDlgItem($advanced,238)) -ne '实验性功能'){throw '实验项未合并进高级设置右侧。'}
+    if([StyleCheck]::GetDlgItem($advanced,240) -ne [IntPtr]::Zero){throw '默认正文 OMML 仍保留开关。'}
+    foreach($id in 241..244){if([StyleCheck]::SendMessage([StyleCheck]::GetDlgItem($advanced,$id),0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 0){throw '实验项默认开启。'}}
+    $leftBounds=[GuiBatchCheck+Rect]::new();$rightBounds=[GuiBatchCheck+Rect]::new()
+    [GuiBatchCheck]::GetWindowRect([StyleCheck]::GetDlgItem($advanced,229),[ref]$leftBounds)|Out-Null
+    [GuiBatchCheck]::GetWindowRect([StyleCheck]::GetDlgItem($advanced,241),[ref]$rightBounds)|Out-Null
+    if($rightBounds.Left -le $leftBounds.Right){throw '实验区没有放在现有设置右侧。'}
+    $advancedFrame=Join-Path $styleFolder '00b-高级设置与实验区.png'
+    if(-not (Save-GuiWindow -PidValue $styleProcess.Id -Path $advancedFrame -WindowHandle $advanced)){throw '高级设置截图失败。'}
+    $styleEvidence.Screenshots+=$advancedFrame
+    [StyleCheck]::SendMessage([StyleCheck]::GetDlgItem($advanced,241),0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
     [StyleCheck]::PostMessage($advanced,0x10,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
+    [StyleCheck]::SendMessage($styleWindow,0,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
+    # 取消不提交实验设置，确定后再次打开可见；恢复默认关闭全部实验项。
+    [StyleCheck]::PostMessage($styleWindow,0x111,[IntPtr]143,[IntPtr]::Zero)|Out-Null
+    $deadline=[DateTime]::UtcNow.AddSeconds(10)
+    do{Start-Sleep -Milliseconds 30;$advanced=[StyleCheck]::Dialog($styleProcess.Id,'高级设置');if([DateTime]::UtcNow -gt $deadline){throw '高级设置未重新打开。'}}while($advanced -eq [IntPtr]::Zero)
+    if([StyleCheck]::SendMessage([StyleCheck]::GetDlgItem($advanced,241),0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 0){throw '取消仍然提交了实验项。'}
+    [StyleCheck]::SendMessage([StyleCheck]::GetDlgItem($advanced,241),0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
+    [StyleCheck]::PostMessage($advanced,0x111,[IntPtr]1,[IntPtr]::Zero)|Out-Null
     [StyleCheck]::SendMessage($styleWindow,0,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
     [StyleCheck]::SendMessage([StyleCheck]::GetDlgItem($styleWindow,136),0x14E,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
     [StyleCheck]::SendMessage($styleWindow,0x111,[IntPtr](136 -bor (1 -shl 16)),[StyleCheck]::GetDlgItem($styleWindow,136))|Out-Null
@@ -149,11 +171,11 @@ try {
     [StyleCheck]::SendMessage($font,0x202,[IntPtr]::Zero,$fontPoint)|Out-Null
     if([StyleCheck]::SendMessage($font,0x157,[IntPtr]::Zero,[IntPtr]::Zero).ToInt64() -ne 1){throw '字体下拉箭头未打开原生列表。'}
     [StyleCheck]::SendMessage($font,0x14F,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
-    $fontIndex=[StyleCheck]::FindFont($font,'仅行外公式')
+    $fontIndex=[StyleCheck]::FindFont($font,'仅行外')
     if($fontIndex.ToInt64() -lt 0){throw '行外模式不存在。'}
     [StyleCheck]::SendMessage($font,0x14E,$fontIndex,[IntPtr]::Zero)|Out-Null
     [StyleCheck]::SendMessage($styleWindow,0x111,[IntPtr](111 -bor (1 -shl 16)),$font)|Out-Null
-    if([StyleCheck]::Text($font) -ne '仅行外公式'){throw '公式模式选择未生效。'}
+    if([StyleCheck]::Text($font) -ne '仅行外'){throw '公式模式选择未生效。'}
     [StyleCheck]::SendMessage($font,0x14E,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
     [StyleCheck]::SendMessage($font,0x142,[IntPtr]::Zero,[IntPtr]65535)|Out-Null
     if([StyleCheck]::Text($styleSize) -ne '10.00'){throw '字号输入未生效。'}
@@ -205,7 +227,37 @@ try {
     [StyleCheck]::SendMessage([StyleCheck]::GetDlgItem($styleWindow,102),0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
     Save-StyleFrame '07-反向格式'|Out-Null
     if([StyleCheck]::Text([StyleCheck]::GetDlgItem($styleWindow,109)) -ne '导出格式'){throw '反向设置没有切换。'}
+    [StyleCheck]::PostMessage($styleWindow,0x111,[IntPtr]143,[IntPtr]::Zero)|Out-Null
+    $deadline=[DateTime]::UtcNow.AddSeconds(10)
+    do{Start-Sleep -Milliseconds 30;$advanced=[StyleCheck]::Dialog($styleProcess.Id,'高级设置');if([DateTime]::UtcNow -gt $deadline){throw '反向无法打开高级设置。'}}while($advanced -eq [IntPtr]::Zero)
+    if([StyleCheck]::GetDlgItem($advanced,240) -ne [IntPtr]::Zero -or -not [StyleCheck]::IsWindowEnabled([StyleCheck]::GetDlgItem($advanced,241))){throw '反向实验项可用性错误。'}
+    if([StyleCheck]::SendMessage([StyleCheck]::GetDlgItem($advanced,241),0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 1){throw '实验设置未在当前会话保留。'}
+    $reverseFrame=Join-Path $styleFolder '08-反向高级设置.png'
+    if(-not (Save-GuiWindow -PidValue $styleProcess.Id -Path $reverseFrame -WindowHandle $advanced)){throw '反向高级设置截图失败。'}
+    $styleEvidence.Screenshots+=$reverseFrame
+    [StyleCheck]::SendMessage([StyleCheck]::GetDlgItem($advanced,235),0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
+    foreach($id in 241..244){if([StyleCheck]::SendMessage([StyleCheck]::GetDlgItem($advanced,$id),0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 0){throw '恢复默认未关闭实验项。'}}
+    [StyleCheck]::PostMessage($advanced,0x111,[IntPtr]1,[IntPtr]::Zero)|Out-Null
+    [StyleCheck]::SendMessage($styleWindow,0,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
     if(Test-Path -LiteralPath (Join-Path $styleFolder 'gui-worker.log')){throw '预览意外启动转换。'}
+    # 通过 DPI 变化消息验证实际控件排版；高缩放下按钮可经键盘滚动到可见区域。
+    $previousScale=[int][StyleCheck]::GetDpiForWindow($styleWindow)
+    foreach($scale in @(96,120,144,192)){
+        [StyleCheck]::DpiChange($styleWindow,$previousScale,$scale);$previousScale=$scale
+        [StyleCheck]::PostMessage($styleWindow,0x111,[IntPtr]143,[IntPtr]::Zero)|Out-Null
+        $deadline=[DateTime]::UtcNow.AddSeconds(10)
+        do{Start-Sleep -Milliseconds 30;$advanced=[StyleCheck]::Dialog($styleProcess.Id,'高级设置');if([DateTime]::UtcNow -gt $deadline){throw '缩放后的高级设置未打开。'}}while($advanced -eq [IntPtr]::Zero)
+        $frame=Join-Path $styleFolder ('09-高级设置-'+$scale+'dpi.png')
+        if(-not (Save-GuiWindow -PidValue $styleProcess.Id -Path $frame -WindowHandle $advanced)){throw '缩放后的高级设置截图失败。'}
+        $styleEvidence.Screenshots+=$frame
+        $confirm=[StyleCheck]::GetDlgItem($advanced,1)
+        [StyleCheck]::SendMessage($advanced,0x28,$confirm,[IntPtr]1)|Out-Null
+        $outer=[StyleCheck+Rect]::new();$button=[StyleCheck+Rect]::new()
+        [StyleCheck]::GetWindowRect($advanced,[ref]$outer)|Out-Null;[StyleCheck]::GetWindowRect($confirm,[ref]$button)|Out-Null
+        if($button.Bottom -gt $outer.Bottom -or $button.Right -gt $outer.Right -or $button.Top -lt $outer.Top){throw '缩放后确定按钮不能通过键盘完整显示。'}
+        [StyleCheck]::PostMessage($advanced,0x10,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
+        [StyleCheck]::SendMessage($styleWindow,0,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
+    }
     $styleEvidence.Checks=@{QueueFiveColumns=$true;QueueWidthUnchanged=$true;LogColumnOpensDetails=$true;ComboSelectionNoBlue=$true;AdvancedComboSelection=$true;FourButtonStates=$true;SizeArrow=$true;SizeFrameAligned=$true;ProgressSeparated=$true;ModeDropdown=$true;ModeSelection=$true;UnifiedSettings=$true;ReverseSettings=$true;NoOfficeTask=$true;NoSettingsWritten=$true;MinimumWidthScreenshot=$true}
     $styleEvidence.Checks.EmbeddedGreenIcons=$true
     $styleEvidence.Status='PASSED'

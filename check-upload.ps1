@@ -26,7 +26,7 @@ foreach($name in $names){
     if($entry.PSIsContainer){throw ('清单项必须是文件：'+$name)}
     $bytes=[IO.File]::ReadAllBytes($path)
     $hashes[$name]=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
-    if($name -notin $binaryNames -and $entry.Extension -notin @('.ps1','.py','.cpp','.c','.h','.rc','.md','.txt','.json') -and $name -notin @('.gitignore','.gitattributes','LICENSE')){throw ('禁止上传该类型：'+$name)}
+    if($name -notin $binaryNames -and $entry.Extension -notin @('.ps1','.py','.cpp','.c','.h','.rc','.md','.txt','.json','.yaml') -and $name -notin @('.gitignore','.gitattributes','LICENSE')){throw ('禁止上传该类型：'+$name)}
     $text=[Text.Encoding]::UTF8.GetString($bytes)
     if($name -notin $binaryNames){
         # 公开文本统一 UTF-8；拒绝空字节，避免其他编码绕过路径检查。

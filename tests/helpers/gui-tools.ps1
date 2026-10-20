@@ -15,6 +15,11 @@ public static class GuiBatchCheck {
     [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hwnd, int command);
     [DllImport("user32.dll")] public static extern bool RedrawWindow(IntPtr hwnd, IntPtr rect, IntPtr region, uint flags);
+    [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr hwnd,int id);
+    [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hwnd,uint message,IntPtr wp,IntPtr lp);
+    [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hwnd,uint message,IntPtr wp,IntPtr lp);
+    [DllImport("user32.dll")] public static extern bool KillTimer(IntPtr hwnd,UIntPtr id);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr hwnd,StringBuilder text,int capacity);
     [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
     [StructLayout(LayoutKind.Sequential)] public struct Rect {public int Left, Top, Right, Bottom;}
     public static IntPtr Find(uint pid) {
@@ -22,11 +27,16 @@ public static class GuiBatchCheck {
         EnumWindows((hwnd,p)=>{uint owner;GetWindowThreadProcessId(hwnd,out owner);var name=new StringBuilder(256);GetClassName(hwnd,name,256);if(owner==pid && name.ToString()=="DocxMathTypeBatch.B"){found=hwnd;return false;}return true;},IntPtr.Zero);
         return found;
     }
+    public static IntPtr Dialog(uint pid,string title) {
+        IntPtr found=IntPtr.Zero;
+        EnumWindows((hwnd,p)=>{uint owner;GetWindowThreadProcessId(hwnd,out owner);var text=new StringBuilder(256);GetWindowText(hwnd,text,text.Capacity);if(owner==pid&&text.ToString()==title){found=hwnd;return false;}return true;},IntPtr.Zero);
+        return found;
+    }
 }
 '@
 function Save-GuiWindow {
-    param([int]$PidValue,[string]$Path)
-    $guiWindow = [GuiBatchCheck]::Find($PidValue)
+    param([int]$PidValue,[string]$Path,[IntPtr]$WindowHandle=[IntPtr]::Zero)
+    $guiWindow = if($WindowHandle -ne [IntPtr]::Zero){$WindowHandle}else{[GuiBatchCheck]::Find($PidValue)}
     if ($guiWindow -eq [IntPtr]::Zero) {return $false}
     # PowerShell 默认可能被 DPI 虚拟化；取窗口物理像素并截图后恢复原线程上下文。
     $guiPreviousDpi=[GuiBatchCheck]::SetThreadDpiAwarenessContext([IntPtr](-4))

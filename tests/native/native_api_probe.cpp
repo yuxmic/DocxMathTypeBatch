@@ -506,8 +506,25 @@ static void installationSelfTest(const std::wstring& directory) {
 }
 
 #include "test_native_numbering.h"
+#include "test_experimental_api.h"
 int wmain(int argc, wchar_t** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
+    if(argc==4&&std::wstring(argv[1])==L"--experimental-native-compare"){
+        if(FAILED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED)))return 1;int result=1;
+        try{compareExperimentalNative(absolutePath(argv[2]),absolutePath(argv[3]));result=0;}catch(const std::exception& error){std::printf("EXPERIMENTAL_NATIVE_FAILED %s\n",error.what());}CoUninitialize();return result;
+    }
+    if(argc==4&&std::wstring(argv[1])==L"--experimental-fixture")return superviseTask(argc,argv);
+    if(argc==6&&std::wstring(argv[1])==L"--task-run"&&std::wstring(argv[3])==L"--experimental-fixture"){
+        if(FAILED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED)))return 1;int result=1;
+        try{TaskMapping mapping(argv[2],false);taskShared=mapping.state;createExperimentalFixture(absolutePath(argv[4]),absolutePath(argv[5]));taskShared=nullptr;result=0;}
+        catch(const std::exception& error){std::printf("EXPERIMENTAL_FIXTURE_FAILED %s\n",error.what());taskShared=nullptr;}CoUninitialize();return result;
+    }
+    if(argc==4&&std::wstring(argv[1])==L"--experimental-api-self-test")return superviseTask(argc,argv);
+    if(argc==6&&std::wstring(argv[1])==L"--task-run"&&std::wstring(argv[3])==L"--experimental-api-self-test"){
+        if(FAILED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED)))return 1;int result=1;
+        try{TaskMapping mapping(argv[2],false);taskShared=mapping.state;checkExperimentalApi(absolutePath(argv[5]));taskShared=nullptr;result=0;}
+        catch(const std::exception& error){std::printf("EXPERIMENTAL_API_FAILED %s\n",error.what());taskShared=nullptr;}CoUninitialize();return result;
+    }
     if(argc==4&&(std::wstring(argv[1])==L"--numbering-self-test"||std::wstring(argv[1])==L"--numbering-fixture"||std::wstring(argv[1])==L"--display-self-test"))return superviseTask(argc,argv);
     if(argc==6&&std::wstring(argv[1])==L"--task-run"&&(std::wstring(argv[3])==L"--numbering-self-test"||std::wstring(argv[3])==L"--numbering-fixture"||std::wstring(argv[3])==L"--display-self-test")){
         if(FAILED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED)))return 1;int result=1;

@@ -89,15 +89,18 @@ struct ScanItem {
     bool existingDisplay{};
     long existingNativeOrdinal{};
     bool existingReference{};
+    long ommlOrdinal{};
 };
 struct ScanResult {
     std::vector<ScanItem> items;
+    std::vector<long> paragraphStarts;
     std::vector<ScannedShape> shapes;
     std::vector<ScannedField> fieldSnapshots;
     long paragraphs{}, existingMathType{}, inlineShapes{}, nativeMath{}, fields{}, revisions{}, controls{}, noteReferences{};
     bool protectedDocument{};
     bool tracksChanges{};
     bool reverse{};
+    bool bodyOmml{};
 };
 
 inline ComPtr<IDispatch> docRange(IDispatch* document, long start, long end) {
@@ -128,8 +131,18 @@ inline Span fieldBounds(IDispatch* field,ScannedField* snapshot=nullptr) {
     if(snapshot)snapshot->span=span;return span;
 }
 
+// 子范围从所属文本区域复制，避免将页眉、文本框或注释坐标当成正文坐标。
+inline ComPtr<IDispatch> sliceRange(IDispatch* root,long start,long end) {
+    require(start>=integer(root,L"Start")&&end>=start&&end<=integer(root,L"End"),"Range remains inside owning story");
+    auto range=get(root,L"Duplicate");invoke(range.Get(),L"SetRange",DISPATCH_METHOD,{start,end});return range;
+}
+// 正文继续使用原来的 Document.Range；额外区域才采用所属 Range 的坐标。
+struct ScanRangeContext { IDispatch* document{}; IDispatch* story{};bool captureSize{true}; };
+inline ComPtr<IDispatch> docRange(const ScanRangeContext& context,long start,long end) {
+    return context.story?sliceRange(context.story,start,end):docRange(context.document,start,end);
+}
 // 所有定位从 Word Find 返回的实际位置取得，绝不把 Range.Text 下标加到 Start。
-inline ComPtr<IDispatch> findLiteral(IDispatch* document, long start, long end, const wchar_t* needle) {
+inline ComPtr<IDispatch> findLiteral(const ScanRangeContext& document, long start, long end, const wchar_t* needle) {
     // 折叠 Range 的 Find 会从插入点向故事末尾扩展；空范围必须直接结束，不能继续查找。
     if (start >= end) return {};
     auto range = docRange(document, start, end);
@@ -156,7 +169,7 @@ inline ComPtr<IDispatch> findLiteral(IDispatch* document, long start, long end, 
     return range;
 }
 
-inline bool escapedAt(IDispatch* document, long position, long boundary) {
+inline bool escapedAt(const ScanRangeContext& document, long position, long boundary) {
     long slashes{};
     while (position > boundary && text(docRange(document, position - 1, position).Get(), L"Text") == L"\\") {
         --position; ++slashes;
@@ -176,7 +189,7 @@ inline bool tokensMatch(TokenKind opening, TokenKind closing) {
         ((opening == TokenKind::BracketOpen || opening == TokenKind::RepairedBracketOpen) && closing == TokenKind::BracketClose) ||
         (opening == TokenKind::ParenOpen && closing == TokenKind::ParenClose);
 }
-inline std::vector<Token> tokens(IDispatch* document, Span segment, const std::wstring& source) {
+inline std::vector<Token> tokens(const ScanRangeContext& document, Span segment, const std::wstring& source) {
     std::vector<Token> result;
     long cursor = segment.start;
     while (auto found = findLiteral(document, cursor, segment.end, L"$")) {
@@ -253,7 +266,19 @@ inline std::wstring lexicalReason(const std::wstring& inner) {
     return environments.empty() ? L"" : L"UNBALANCED_ENVIRONMENTS";
 }
 
-inline void addItem(IDispatch* document, Span span, Span inner, TokenKind kind, const std::wstring& reason,
+inline double equationPoints(IDispatch* range,const ScanRangeContext& document,Span inner) {
+    auto size=invoke(get(range,L"Font").Get(),L"Size",DISPATCH_PROPERTYGET);
+    double points=size.v.vt==VT_R4?size.v.fltVal:size.v.vt==VT_R8?size.v.dblVal:size.v.vt==VT_I4?size.v.lVal:0;
+    // 混合字号读取内容首个非空字符，避免将 Word 的 wdUndefined 当成字号。
+    if(!(points>=1&&points<=256)&&inner.start>=0&&inner.end>inner.start){
+        auto characters=get(docRange(document,inner.start,inner.end).Get(),L"Characters");
+        for(long i=1;i<=integer(characters.Get(),L"Count");++i){auto character=collectionItem(characters.Get(),i);if(whitespaceOnly(text(character.Get(),L"Text")))continue;
+            auto effective=invoke(get(character.Get(),L"Font").Get(),L"Size",DISPATCH_PROPERTYGET);
+            points=effective.v.vt==VT_R4?effective.v.fltVal:effective.v.vt==VT_R8?effective.v.dblVal:effective.v.vt==VT_I4?effective.v.lVal:0;break;}
+    }
+    return points;
+}
+inline void addItem(const ScanRangeContext& document, Span span, Span inner, TokenKind kind, const std::wstring& reason,
                     long paragraph, ScanResult& result, const std::wstring& paragraphText) {
     auto range = docRange(document, span.start, span.end);
     ScanItem item;
@@ -287,22 +312,12 @@ inline void addItem(IDispatch* document, Span span, Span inner, TokenKind kind, 
         item.span={integer(first.Get(),L"Start"),integer(last.Get(),L"End")-1};item.source=text(docRange(document,item.span.start,item.span.end).Get(),L"Text");
     }
     item.inner = normalizedTex(item.inner);
-    const auto font = get(range.Get(), L"Font");
-    // 混合字号读取公式内容首字符，避免 Word 的 wdUndefined 被当成真实字号。
-    auto size = invoke(font.Get(),L"Size",DISPATCH_PROPERTYGET);
-    item.points = size.v.vt == VT_R4 ? size.v.fltVal : size.v.vt == VT_R8 ? size.v.dblVal : size.v.vt == VT_I4 ? size.v.lVal : 0;
-    if (!(item.points >= 1 && item.points <= 256) && inner.start >= 0 && inner.end > inner.start) {
-        auto characters=get(docRange(document,inner.start,inner.end).Get(),L"Characters");
-        for(long i=1;i<=integer(characters.Get(),L"Count");++i) {
-            auto character=collectionItem(characters.Get(),i); if(whitespaceOnly(text(character.Get(),L"Text")))continue;
-            auto effective=invoke(get(character.Get(),L"Font").Get(),L"Size",DISPATCH_PROPERTYGET);
-            item.points=effective.v.vt==VT_R4?effective.v.fltVal:effective.v.vt==VT_R8?effective.v.dblVal:effective.v.vt==VT_I4?effective.v.lVal:0;break;
-        }
-    }
+    if(!document.captureSize){result.items.push_back(std::move(item));return;}
+    item.points=equationPoints(range.Get(),document,inner);
     result.items.push_back(std::move(item));
 }
 
-inline long scanSegment(IDispatch* document, Span segment, long paragraph, ScanResult& result, long boundary, const std::wstring& paragraphText) {
+inline long scanSegment(const ScanRangeContext& document, Span segment, long paragraph, ScanResult& result, long boundary, const std::wstring& paragraphText) {
     const auto source=text(docRange(document,segment.start,segment.end).Get(),L"Text");
     if (!hasTexMarkers(source)) return segment.end;
     Token opening{};
@@ -377,7 +392,7 @@ inline bool addExistingDisplay(IDispatch* document,IDispatch* range,long paragra
     result.items.push_back(std::move(item));return true;
 }
 
-inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bool captureFields=false,bool includeExisting=false) {
+inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bool captureFields=false,bool includeExisting=false,bool includeOmml=false) {
     if(checkingSavedDocument)std::puts("TIMING_STAGE RESCAN_BOUNDARIES");
     ScanResult result;
     const auto tracking = invoke(document, L"TrackRevisions", DISPATCH_PROPERTYGET);
@@ -387,11 +402,12 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
     if (result.protectedDocument) return result;
     auto content = get(document, L"Content");
     require(integer(content.Get(), L"StoryType") == 1, "Main story only");
-    std::vector<Span> excluded,protectedRanges;
-    auto exclude = [&](IDispatch* range,bool protect=true) {
+    std::vector<Span> excluded,protectedRanges,ommlExcluded;
+    auto exclude = [&](IDispatch* range,bool protect=true,bool blockOmml=true) {
         require(integer(range, L"StoryType") == 1, "Excluded main story range");
         excluded.push_back(bounds(range));
         if(protect)protectedRanges.push_back(excluded.back());
+        if(includeOmml&&protect&&blockOmml)ommlExcluded.push_back(excluded.back());
     };
     auto tables=get(document,L"Tables");
     const long tableCount=integer(tables.Get(),L"Count");
@@ -416,8 +432,9 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
                               std::make_pair(L"ContentControls", &result.controls)}) {
         auto collection = get(content.Get(), entry.first);
         *entry.second = integer(collection.Get(), L"Count");
-        for (long index = 1; index <= *entry.second; ++index) exclude(get(collectionItem(collection.Get(), index).Get(), L"Range").Get());
+        for (long index = 1; index <= *entry.second; ++index) exclude(get(collectionItem(collection.Get(), index).Get(), L"Range").Get(),true,wcscmp(entry.first,L"OMaths")!=0);
     }
+    result.bodyOmml=includeOmml&&result.nativeMath>0;
     auto fields = get(content.Get(), L"Fields");
     result.fields = integer(fields.Get(), L"Count");
     captureFields=captureFields||(includeExisting&&result.existingMathType>0);
@@ -425,6 +442,7 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
     for (long index = 1; index <= result.fields; ++index) {
         auto field = collectionItem(fields.Get(), index);
         excluded.push_back(fieldBounds(field.Get(),captureFields?&result.fieldSnapshots[static_cast<size_t>(index-1)]:nullptr));
+        if(includeOmml)ommlExcluded.push_back(excluded.back());
     }
     for (const auto name : {L"Footnotes", L"Endnotes"}) {
         auto notes = get(document, name);
@@ -459,6 +477,7 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
         auto paragraph = checkingSavedDocument?savedParagraphs[static_cast<size_t>(index-1)]:collectionItem(paragraphs.Get(), index);
         auto range = get(paragraph.Get(), L"Range");
         auto paragraphSpan = bounds(range.Get());
+        result.paragraphStarts.push_back(paragraphSpan.start);
         if(includeExisting&&result.existingMathType>0&&selectedEquation(true)&&addExistingDisplay(document,range.Get(),index,result,protectedRanges)){paragraphProgress.advance();continue;}
         paragraphSpan.start=std::max(paragraphSpan.start,consumed);
         while(excludedIndex<excluded.size()&&excluded[excludedIndex].end<=paragraphSpan.start)++excludedIndex;
@@ -475,15 +494,28 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
         for (size_t blockIndex=excludedIndex;blockIndex<excluded.size();++blockIndex) {
             const auto& block=excluded[blockIndex];if(block.start>paragraphSpan.end)break;
             if (block.end < cursor || block.start > paragraphSpan.end) continue;
-            if (block.start > cursor) consumed=std::max(consumed,scanSegment(document, {cursor, std::min(block.start, paragraphSpan.end)}, index, result,block.start,paragraphContext?paragraphText:L""));
+            if (block.start > cursor) consumed=std::max(consumed,scanSegment(ScanRangeContext{document}, {cursor, std::min(block.start, paragraphSpan.end)}, index, result,block.start,paragraphContext?paragraphText:L""));
             cursor = std::max(cursor, std::min(block.end, paragraphSpan.end));
         }
         if (cursor < paragraphSpan.end) {
             long boundary=contentEnd;
             for(size_t i=excludedIndex;i<excluded.size();++i)if(excluded[i].start>=cursor){boundary=excluded[i].start;break;}
-            consumed=std::max(consumed,scanSegment(document, {cursor, paragraphSpan.end}, index, result,boundary,paragraphContext?paragraphText:L""));
+            consumed=std::max(consumed,scanSegment(ScanRangeContext{document}, {cursor, paragraphSpan.end}, index, result,boundary,paragraphContext?paragraphText:L""));
         }
         paragraphProgress.advance();
+    }
+    // 仅开启 OMML 时把正文原生公式并入同一清单；表格等区域仍由实验分支处理。
+    if(result.bodyOmml){auto maths=get(content.Get(),L"OMaths");
+        for(long i=1;i<=result.nativeMath;++i){taskPulse();auto math=collectionItem(maths.Get(),i);auto range=get(math.Get(),L"Range");const auto span=bounds(range.Get());
+            if(std::any_of(ommlExcluded.begin(),ommlExcluded.end(),[&](Span block){return block.start<span.end&&block.end>span.start;}))continue;
+            ScanItem item;item.span=span;item.ommlOrdinal=i;item.delimiter=L"OMML";item.display=integer(math.Get(),L"Type")==0;item.ready=true;
+            if(!selectedEquation(item.display))continue;
+            item.points=equationPoints(range.Get(),ScanRangeContext{document},span);
+            item.paragraph=integer(get(docRange(document,0,span.start+1).Get(),L"Paragraphs").Get(),L"Count");
+            if(item.display){auto para=get(collectionItem(get(range.Get(),L"Paragraphs").Get(),1).Get(),L"Range");const auto limits=bounds(para.Get());
+                if(whitespaceOnly(text(docRange(document,limits.start,span.start).Get(),L"Text"))&&whitespaceOnly(text(docRange(document,span.end,limits.end).Get(),L"Text")))item.span={limits.start,limits.end-1};}
+            item.source=text(docRange(document,item.span.start,item.span.end).Get(),L"Text");result.items.push_back(std::move(item));
+        }
     }
     std::sort(result.items.begin(), result.items.end(), [](const ScanItem& a, const ScanItem& b) { return a.span.start < b.span.start; });
     long previousEnd = -1;
@@ -497,7 +529,7 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
     }
     return result;
 }
-inline ScanResult scanDocument(IDispatch* document) { return scanDocumentText(document, true); }
+inline ScanResult scanDocument(IDispatch* document) { return scanDocumentText(document,true,false,false,true); }
 
 inline std::string utf8(const std::wstring& value) {
     if (value.empty()) return {};
@@ -529,7 +561,8 @@ inline void writeReport(const std::wstring& path, const std::wstring& input, con
     auto count = [&](size_t value) { return result.protectedDocument ? std::string("null") : std::to_string(value); };
     json += "  \"Ready\": " + count(static_cast<size_t>(ready)) + ", \"Rejected\": " + count(result.items.size() - static_cast<size_t>(ready)) + ",\n";
     json += "  \"ExistingMathType\": " + count(result.existingMathType) + ", \"InlineShapes\": " + count(result.inlineShapes) + ",\n";
-    json += "  \"Excluded\": {\"OMML\":" + count(result.nativeMath) + ",\"Fields\":" + count(result.fields) +
+    const auto ommlTargets=std::count_if(result.items.begin(),result.items.end(),[](const ScanItem& item){return item.ommlOrdinal!=0;});
+    json += "  \"Excluded\": {\"OMML\":" + count(result.nativeMath-ommlTargets) + ",\"Fields\":" + count(result.fields) +
             ",\"Revisions\":" + count(result.revisions) + ",\"ContentControls\":" + count(result.controls) +
             ",\"NoteReferences\":" + count(result.noteReferences) + "},\n  \"Items\": [\n";
     for (size_t index = 0; index < result.items.size(); ++index) {
@@ -626,4 +659,53 @@ inline void emitGuiScan(const ScanResult& result) {
     const auto inlines=std::count_if(result.items.begin(),result.items.end(),[](const ScanItem& item){return item.ready&&!item.display;});
     const auto rejected=std::count_if(result.items.begin(),result.items.end(),[](const ScanItem& item){return !item.ready&&!item.existingDisplay&&!item.existingReference;});
     std::printf("UI_SCAN_COUNTS %ld %td %td %td\n",result.existingMathType,ready,inlines,rejected);
+}
+
+inline std::wstring compatibleTex(std::wstring value) {
+    if (value.find(L"\\begin{aligned}") == std::wstring::npos) return value;
+    struct Alignment { size_t begin{}, length{}, columns{1}, maximum{1}; int environment{}, braces{}; };
+    struct Replacement { size_t start{}, length{}; std::wstring text; };
+    std::vector<Alignment> aligned;
+    std::vector<Replacement> replacements;
+    int environment{}, braces{};
+    for (size_t i = 0; i < value.size(); ++i) {
+        auto topLevel = [&] { return !aligned.empty() && environment == aligned.back().environment && braces == aligned.back().braces; };
+        if (value[i] == L'\\' && i + 1 < value.size()) {
+            if (value[i + 1] == L'\\') {
+                if (topLevel()) { auto& a = aligned.back(); a.maximum = std::max(a.maximum, a.columns); a.columns = 1; }
+                ++i; continue;
+            }
+            const bool begin = value.compare(i, 7, L"\\begin{") == 0, end = value.compare(i, 5, L"\\end{") == 0;
+            if (begin || end) {
+                const auto first = i + (begin ? 7 : 5), last = value.find(L'}', first);
+                const auto name = value.substr(first, last - first);
+                if (begin) {
+                    ++environment;
+                    if (name == L"aligned") {
+                        size_t after = last + 1; while (after < value.size() && iswspace(value[after])) ++after;
+                        const bool option = after + 2 < value.size() && value[after] == L'[' && value[after + 2] == L']' &&
+                            (value[after + 1] == L't' || value[after + 1] == L'b' || value[after + 1] == L'c');
+                        aligned.push_back({i, (option ? after + 3 : last + 1) - i, 1, 1, environment, braces});
+                        if (option) { i = after + 2; continue; }
+                    }
+                } else {
+                    if (name == L"aligned") {
+                        const auto a = aligned.back(); aligned.pop_back();
+                        std::wstring columns; for (size_t c = 0; c < std::max(size_t{2}, std::max(a.columns, a.maximum)); ++c) columns += c % 2 ? L'l' : L'r';
+                        replacements.push_back({a.begin, a.length, L"\\begin{array}{" + columns + L"}"});
+                        replacements.push_back({i, last + 1 - i, L"\\end{array}"});
+                    }
+                    --environment;
+                }
+                i = last; continue;
+            }
+            ++i; continue;
+        }
+        if (value[i] == L'&' && topLevel()) ++aligned.back().columns;
+        if (value[i] == L'{') ++braces;
+        if (value[i] == L'}') --braces;
+    }
+    std::sort(replacements.begin(), replacements.end(), [](const Replacement& a, const Replacement& b) { return a.start > b.start; });
+    for (const auto& replacement : replacements) value.replace(replacement.start, replacement.length, replacement.text);
+    return value;
 }

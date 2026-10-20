@@ -71,7 +71,13 @@ static Value invoke(IDispatch* object, const wchar_t* name, WORD flags,
     DISPID id{};
     taskPulse();
     LPOLESTR member = const_cast<wchar_t*>(name);
-    const HRESULT resolved = object->GetIDsOfNames(IID_NULL, &member, 1, LOCALE_USER_DEFAULT, &id);
+    // Word 正在加载加载项或处理其他调用时会拒绝 GetIDsOfNames；与 Invoke 一样等待重试。
+    HRESULT resolved{};
+    for (int attempt = 0; attempt != 20; ++attempt) {
+        resolved = object->GetIDsOfNames(IID_NULL, &member, 1, LOCALE_USER_DEFAULT, &id);
+        if (resolved != RPC_E_CALL_REJECTED && resolved != RPC_E_SERVERCALL_RETRYLATER) break;
+        pump(100);
+    }
     if (FAILED(resolved)) std::fwprintf(stderr, L"UNKNOWN_MEMBER %ls\n", name);
     check(resolved, "GetIDsOfNames");
     std::vector<Value> values(arguments);

@@ -4,7 +4,7 @@ $TestOutputRoot = Join-Path $ProjectRoot 'tests/output'
 New-Item -ItemType Directory -Path $TestOutputRoot,(Join-Path $TestOutputRoot 'work') -Force | Out-Null
 
 function Get-TestSourcePath([string]$Name) {
-    if ($Name -in @('native_api_probe.cpp','test_native_numbering.h')) { return Join-Path $ProjectRoot ('tests/native/' + $Name) }
+    if ($Name -in @('native_api_probe.cpp','test_native_numbering.h','test_experimental_api.h')) { return Join-Path $ProjectRoot ('tests/native/' + $Name) }
     if ([IO.Path]::GetExtension($Name) -in @('.cpp','.c','.h')) { return Join-Path $ProjectRoot ('src/' + $Name) }
     if ($Name -like '*.py') { return Join-Path $ProjectRoot ('tests/helpers/' + $Name) }
     if ($Name -like 'test-*.ps1') { return Join-Path $ProjectRoot ('tests/' + $Name) }
