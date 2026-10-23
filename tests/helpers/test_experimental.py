@@ -786,9 +786,50 @@ def check_body(folder, case):
     print(f"UNIFIED_BODY_PASSED: {case}")
 
 
+def spacing_fixture(folder):
+    # 空格分别出现在关系符、逗号和普通字体的上标底数中，覆盖正文与额外区域。
+    doc = Document()
+    doc.core_properties.author = "Synthetic test fixture"
+    doc.core_properties.last_modified_by = ""
+    simple = f'<m:oMath xmlns:m="{M}"><m:r><m:t>k ∈ {{1, …, K}}</m:t></m:r></m:oMath>'
+    complex_math = f'''<m:oMath xmlns:m="{M}">
+      <m:sSub><m:e><m:r><m:rPr><m:sty m:val="b"/></m:rPr><m:t>X</m:t></m:r></m:e><m:sub><m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t>obs</m:t></m:r></m:sub></m:sSub>
+      <m:r><m:t xml:space="preserve"> = B ⊙ X,  B ∈ </m:t></m:r>
+      <m:sSup><m:e><m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t>{{0, 1}}</m:t></m:r></m:e><m:sup><m:r><m:t>6N×M</m:t></m:r></m:sup></m:sSup></m:oMath>'''
+    doc.add_paragraph('Inline ')._p.append(parse_xml(simple))
+    for value in (simple, complex_math):
+        wrapper = OxmlElement('m:oMathPara')
+        wrapper.append(parse_xml(value))
+        doc.add_paragraph()._p.append(wrapper)
+    doc.add_table(rows=1, cols=1).cell(0, 0).paragraphs[0]._p.append(parse_xml(simple))
+    doc.sections[0].header.paragraphs[0]._p.append(parse_xml(simple))
+    doc.save(folder / 'spacing-input.docx')
+
+
+def check_spacing(folder):
+    # 反向转换读取实际 MTEF，不能用导入缓存或成功数量代替内容检查。
+    doc = Document(folder / 'spacing-reverse.docx')
+    texts = [p.text for p in doc.paragraphs if p.text.strip()] + [doc.tables[0].cell(0, 0).text, doc.sections[0].header.paragraphs[0].text]
+    assert len(texts) == 5 and all('?' not in text for text in texts), texts
+    for text in texts:
+        assert r'\in' in text, text
+    for index in (0, 1, 3, 4):
+        assert r'\ldots' in texts[index], texts[index]
+    assert all(command in texts[2] for command in (r'\odot', r'\times', '_', '^')), texts[2]
+    assert 'obs' in texts[2] and r'\mathbf' in texts[2], texts[2]
+    for name in ('spacing', 'spacing-reverse'):
+        result = json.loads((folder / (name + '.json')).read_text(encoding='utf-8-sig'))
+        assert result['Status'] == 'COMPLETE' and result['Succeeded'] == 5 and result['OriginalFileBytesUnchanged'], result
+    print('OMML_SPACING_NATIVE_CONTENT_PASSED')
+
+
 if __name__ == "__main__":
     command, target = sys.argv[1:3]
-    if command == "fixture":
+    if command == 'spacing-fixture':
+        spacing_fixture(Path(target))
+    elif command == 'check-spacing':
+        check_spacing(Path(target))
+    elif command == "fixture":
         fixture(Path(target))
     elif command == "inventory":
         print(json.dumps(inventory(target), ensure_ascii=False))

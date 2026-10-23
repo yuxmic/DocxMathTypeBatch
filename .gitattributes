@@ -1,6 +1,7 @@
-# 源码统一按 UTF-8 文本和 LF 换行管理，图标保留二进制。
+# 源码按 UTF-8 管理；CMD 使用 CRLF，其余文本使用 LF，图标保留二进制。
 * text=auto eol=lf
 *.ps1 text eol=lf
+*.cmd text eol=crlf
 *.py text eol=lf
 *.cpp text eol=lf
 *.c text eol=lf

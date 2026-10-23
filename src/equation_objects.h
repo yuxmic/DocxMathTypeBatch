@@ -42,11 +42,14 @@ inline std::vector<unsigned char> streamBytes(IStream* stream) {
     return bytes;
 }
 struct PackageState {
-    std::vector<std::vector<unsigned char>> equations, media;
+    std::vector<std::vector<unsigned char>> equations, media, otherEmbeddings;
     bool displayStyle{};
 };
 // WordOpenXML 的单对象包和 DOCX 的 OLE part 共用系统结构化存储读取。
 inline std::vector<unsigned char> nativeFromOle(const std::vector<unsigned char>& bytes) {
+    // XLSX 等嵌入包不是复合存储，原样保留，不送入 OLE 读取器。
+    constexpr unsigned char signature[]{0xd0,0xcf,0x11,0xe0,0xa1,0xb1,0x1a,0xe1};
+    if(bytes.size()<sizeof(signature)||memcmp(bytes.data(),signature,sizeof(signature))!=0)return {};
     ComPtr<ILockBytes> locked;
     check(CreateILockBytesOnHGlobal(nullptr, TRUE, &locked), "OLE byte storage");
     ULARGE_INTEGER offset{}; ULONG written{};
@@ -211,6 +214,7 @@ inline PackageState inspectPackage(const std::wstring& path,const char* progress
         if (uri.find(L"/word/embeddings/") == 0) {
             auto equation = nativeFromOle(bytes);
             if(!equation.empty())state.equations.push_back(std::move(equation));
+            else state.otherEmbeddings.push_back(std::move(bytes));
         }
         partProgress.advance();
     }
@@ -278,6 +282,8 @@ inline std::wstring exportedInner(const std::string& value, bool display) {
     require(tex.size() >= open.size() + close.size() && tex.substr(0, open.size()) == open &&
             tex.substr(tex.size() - close.size()) == close, "Native export delimiter matches true equation type");
     auto inner = tex.substr(open.size(), tex.size() - open.size() - close.size());
-    require(lexicalReason(inner).empty() && inner.find(L'%') == std::wstring::npos, "UNSUPPORTED_OR_INVALID_NATIVE_EXPORT");
+    require(lexicalReason(inner).empty(), "UNSUPPORTED_OR_INVALID_NATIVE_EXPORT");
+    // 反斜杠转义的百分号是公式内容，只有未转义的百分号才是注释。
+    for(size_t i=0;i<inner.size();++i){if(inner[i]==L'\\'&&i+1<inner.size()){++i;continue;}require(inner[i]!=L'%',"UNSUPPORTED_OR_INVALID_NATIVE_EXPORT");}
     return normalizedTex(inner);
 }

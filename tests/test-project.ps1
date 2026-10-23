@@ -40,4 +40,5 @@ try{
     if(-not $resolved.StartsWith($TestOutputRoot+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw '测试清理越界。'}
     Remove-Item -LiteralPath $resolved -Recurse -Force
 }
+& (Join-Path $PSScriptRoot 'test-github-update.ps1')
 Write-Output 'PROJECT_STATIC_CHECK_PASSED'

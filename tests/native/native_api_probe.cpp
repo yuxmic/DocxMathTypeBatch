@@ -509,6 +509,20 @@ static void installationSelfTest(const std::wstring& directory) {
 #include "test_experimental_api.h"
 int wmain(int argc, wchar_t** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
+    if(argc==2&&std::wstring(argv[1])==L"--compatible-tex-self-test"){
+        // 只测正式文本改写函数，不启动 Word、MathType 或 COM。
+        try{
+            require(compatibleTex(L"\\bm{x}+\\mathup{abc}")==L"\\boldsymbol{x}+\\mathrm{abc}","Compatible command rewrite");
+            require(compatibleTex(L"\\bmfoo+\\\\bm+\\text{\\bm}")==L"\\bmfoo+\\\\bm+\\text{\\bm}","Compatible command boundaries");
+            require(compatibleTex(L"\\operatorname*{literal \\bm}")==L"\\operatorname*{literal \\bm}","Starred operator text stays exact");
+            require(compatibleTex(L"\\begin{alignedat}{n}a&=b\\end{alignedat}")==L"\\begin{alignedat}{n}a&=b\\end{alignedat}","Unknown column argument unchanged");
+            std::wstring sample=L"\\begin{align*}a&=\\bm{x}+\\mathup{y}\\\\c&=\\lvert z\\rvert\\end{align*}";sample.append(900,L'x');
+            LARGE_INTEGER frequency{},before{},after{};require(QueryPerformanceFrequency(&frequency)&&QueryPerformanceCounter(&before),"Start text rewrite timing");
+            size_t checksum{};constexpr size_t count=10000;for(size_t i=0;i<count;++i)checksum+=compatibleTex(sample).size();
+            require(QueryPerformanceCounter(&after)&&checksum>count*900,"Complete text rewrite timing");
+            std::printf("COMPATIBLE_TEX_PASSED Count=%zu Characters=%zu TotalMilliseconds=%.3f\n",count,sample.size(),1000.0*static_cast<double>(after.QuadPart-before.QuadPart)/static_cast<double>(frequency.QuadPart));return 0;
+        }catch(const std::exception& error){std::printf("COMPATIBLE_TEX_FAILED %s\n",error.what());return 1;}
+    }
     if(argc==4&&std::wstring(argv[1])==L"--experimental-native-compare"){
         if(FAILED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED)))return 1;int result=1;
         try{compareExperimentalNative(absolutePath(argv[2]),absolutePath(argv[3]));result=0;}catch(const std::exception& error){std::printf("EXPERIMENTAL_NATIVE_FAILED %s\n",error.what());}CoUninitialize();return result;

@@ -199,8 +199,9 @@ static ItemOutcome reverseOne(MathTypeApi& api, WordSession& word, const ScanIte
     bool recordOpen = false;
     try {
         // 现有 LaTeX 只改定界符，保留原文中的 Word 换行及空白。
-        const size_t delimiterLength=item.delimiter==L"$"?1:2;
-        std::wstring inner = object?item.inner:item.source.substr(delimiterLength,item.source.size()-2*delimiterLength);
+        // 缺失左反斜杠的 [..\] 起止长度不同，截取与替换必须分别计算。
+        const size_t leftDelimiter=item.delimiter==L"$"||item.delimiter==L"[\\]"?1:2,rightDelimiter=item.delimiter==L"$"?1:2;
+        std::wstring inner = object?item.inner:item.source.substr(leftDelimiter,item.source.size()-leftDelimiter-rightDelimiter);
         if (object) {
             asset = rangeNativeAsset(range.Get()); const auto payload = nativePayload(asset.equation);
             require(inspectStyle(payload).inlineEquation == !item.display, "Reverse native type still matches scan");
@@ -214,9 +215,8 @@ static ItemOutcome reverseOne(MathTypeApi& api, WordSession& word, const ScanIte
         // 已有 LaTeX 只改两端，保留内部原文和字符格式；MathType 成功导出后才替换对象。
         if (object) invoke(range.Get(), L"Text", DISPATCH_PROPERTYPUT, {output.c_str()});
         else if (output != item.source) {
-            const long oldDelimiter = item.delimiter == L"$" ? 1 : 2;
-            invoke(docRange(document, item.span.end - oldDelimiter, item.span.end).Get(), L"Text", DISPATCH_PROPERTYPUT, {close.c_str()});
-            invoke(docRange(document, item.span.start, item.span.start + oldDelimiter).Get(), L"Text", DISPATCH_PROPERTYPUT, {open.c_str()});
+            invoke(docRange(document, item.span.end - static_cast<long>(rightDelimiter), item.span.end).Get(), L"Text", DISPATCH_PROPERTYPUT, {close.c_str()});
+            invoke(docRange(document, item.span.start, item.span.start + static_cast<long>(leftDelimiter)).Get(), L"Text", DISPATCH_PROPERTYPUT, {open.c_str()});
         }
         require(!(selfTest && object && item.display), "Injected reverse replacement failure");
         require(!conversionFault(L"DOCX_MATH_BODY_FAULT",std::to_wstring(item.paragraph),L"RECOVERY"),"Injected reverse body replacement failure");
@@ -291,7 +291,7 @@ static void requireDisplayLayout(IDispatch* document, IDispatch* range) {
     // require(number(format.Get(), L"SpaceBefore") == 0 && number(format.Get(), L"SpaceAfter") == 0, "Display paragraph spacing");
 }
 // 返回普通失败前必须完成恢复；无法确认恢复时由正文调度重建副本并跳过该式。
-// MathType 不支持 aligned；只改导入副本，并按顶层分列保留多组等式。
+// 兼容改写只作用于导入副本，正文和实验区共用 compatibleTex。
 // 原生显示布局按文档初始化一次；宽度只在实际节变化时重新读取，不加载交互宏。
 struct DisplayLayout {
     IDispatch* document{};bool stylePresent{},singleSection{};ComPtr<IDispatch> style;std::map<long,double> widths;std::map<std::wstring,ComPtr<IDispatch>> formats;
@@ -804,6 +804,14 @@ int convertMain(int argc, wchar_t** argv) {
         require(compatibleTex(L"\\begin{aligned}[t]a&=b,&c&=d\\end{aligned}") == L"\\begin{array}{rlrl}a&=b,&c&=d\\end{array}", "Aligned four columns and position");
         require(compatibleTex(L"\\begin{aligned}a&=\\begin{matrix}x&y\\\\z&w\\end{matrix}\\end{aligned}") == L"\\begin{array}{rl}a&=\\begin{matrix}x&y\\\\z&w\\end{matrix}\\end{array}", "Nested matrix columns stay separate");
         require(compatibleTex(L"\\text{aligned} a\\&b") == L"\\text{aligned} a\\&b", "Ordinary TeX stays exact");
+        require(compatibleTex(L"\\bm{x}+\\mathup{abc}+\\lvert y\\rvert")==L"\\boldsymbol{x}+\\mathrm{abc}+\\vert y\\vert","Known command aliases");
+        require(compatibleTex(L"\\bmfoo+\\\\bm+\\text{\\bm}+\\textnormal{literal \\bm}")==L"\\bmfoo+\\\\bm+\\text{\\bm}+\\text{literal \\bm}","Command boundaries, escaped slashes and text arguments");
+        require(compatibleTex(L"\\begin{gathered}a=b\\\\c=d\\end{gathered}")==L"\\begin{array}{c}a=b\\\\c=d\\end{array}","Gathered rows centered");
+        require(compatibleTex(L"\\begin{alignedat}{2}a&=b&c&=d\\end{alignedat}")==L"\\begin{array}{rlrl}a&=b&c&=d\\end{array}","Alignedat column count consumed");
+        require(compatibleTex(L"\\begin{alignedat}{n}a&=b\\end{alignedat}")==L"\\begin{alignedat}{n}a&=b\\end{alignedat}"&&compatibleTex(L"\\unknown{x}\\boxed{y}")==L"\\unknown{x}\\boxed{y}","Unknown or nonliteral forms stay untouched");
+        require(nativeFromOle({}).empty()&&nativeFromOle({'P','K',3,4,0,0,0,0}).empty(),"Non-OLE embeddings stay opaque");
+        require(exportedInner("\\[50\\%\\]",true)==L"50\\%"&&exportedInner("$x\\\\\\%$",false)==L"x\\\\\\%","Escaped percent exports stay exact");
+        for(const auto* tex:{"$x%comment$","$x\\\\%comment$"}){bool rejected=false;try{exportedInner(tex,false);}catch(const std::exception&){rejected=true;}require(rejected,"Unescaped TeX comments remain rejected");}
         require(parseSpacing(L"multiple:1.25").value==1.25&&parseSpacing(L"exact:24").mode==4,"Spacing modes and values");
         EquationNumbering testNumber;testNumber.format=L"[#CI.#Sa-#EA]";testNumber.chapter=4;testNumber.section=2;
         const auto parts=numberParts(testNumber,28);require(parts.before==L"[IV.b-"&&parts.digits==L"BB"&&parts.after==L"]","Number format tokens and alphabetic boundary");
@@ -1063,6 +1071,7 @@ int convertMain(int argc, wchar_t** argv) {
         std::puts("UI_PHASE PACKAGE_VERIFY");
         afterPackage = inspectPackage(candidate,"SAVED_PARTS");
         std::puts("UI_PHASE PACKAGE_COMPARE");
+        requireContains(afterPackage.otherEmbeddings,originalPackage.otherEmbeddings,"Unconverted embedded packages stay byte-identical");
         succeeded = static_cast<size_t>(std::count_if(outcomes.begin(), outcomes.end(), [](const ItemOutcome& item) { return item.status == L"SUCCEEDED"; }));
         if (reverse) {
             auto retained = originalPackage;

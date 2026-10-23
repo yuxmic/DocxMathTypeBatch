@@ -354,6 +354,20 @@ try{
             $evidence.Cases+=@{Name=$name;Status=$result.Status;Succeeded=$result.Succeeded;OriginalUnchanged=$true;FinalPositionsVerified=[bool]$entry.Positions}
         }
     }
+    # 正文行内、行外和表格、页眉的空格均经实际 MTEF 反向导出核对。
+    & python -B -X utf8 $helper spacing-fixture $run
+    if($LASTEXITCODE -ne 0){throw '原生公式空格样本生成失败'}
+    foreach($name in @('spacing','spacing-reverse')){
+        $inputFile=Join-Path $run $(if($name -eq 'spacing'){'spacing-input.docx'}else{'spacing.docx'})
+        $mode=if($name -eq 'spacing'){'--worker-convert'}else{'--worker-reverse'}
+        $style=if($name -eq 'spacing'){'paragraph'}else{'bracket'}
+        $arguments=@($mode,$inputFile,(Join-Path $run ($name+'.docx')),(Join-Path $run ($name+'.json')),$style,(Join-Path $run 'stop.flag'),'--experimental-tables','--experimental-headers')
+        $process=Start-Process -FilePath $exe -ArgumentList @($arguments|ForEach-Object{'"'+$_+'"'}) -WindowStyle Hidden -RedirectStandardOutput (Join-Path $run ($name+'.log')) -RedirectStandardError (Join-Path $run ($name+'.errors')) -PassThru
+        try{if(-not $process.WaitForExit(180000) -or $process.ExitCode -ne 0){throw ('原生公式空格回归失败：'+$name)}}finally{$process.Dispose()}
+    }
+    & python -B -X utf8 $helper check-spacing $run
+    if($LASTEXITCODE -ne 0){throw '原生公式空格内容核验失败'}
+    $evidence.Cases+=@{Name='omml-spacing';Succeeded=5;NativeContentVerified=$true}
     $evidence.Status='PASSED'
 }finally{
     $evidence.SourceSHA256=[ordered]@{}

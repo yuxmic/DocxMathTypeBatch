@@ -234,7 +234,7 @@ inline std::wstring normalizedTex(std::wstring value) {
 }
 inline bool structuredMultiline(const std::wstring& value) {
     if (value.find(L"\\\\") != std::wstring::npos) return true;
-    for (const auto* name : {L"align",L"aligned",L"split",L"gather",L"gathered",L"array",L"cases",L"matrix",L"pmatrix",L"bmatrix",L"vmatrix",L"Vmatrix",L"smallmatrix"})
+    for (const auto* name : {L"align",L"aligned",L"alignat",L"alignedat",L"split",L"gather",L"gathered",L"subarray",L"array",L"cases",L"matrix",L"pmatrix",L"bmatrix",L"vmatrix",L"Vmatrix",L"smallmatrix"})
         if (value.find(std::wstring(L"\\begin{") + name + L"}") != std::wstring::npos ||
             value.find(std::wstring(L"\\begin{") + name + L"*}") != std::wstring::npos) return true;
     return false;
@@ -662,12 +662,19 @@ inline void emitGuiScan(const ScanResult& result) {
 }
 
 inline std::wstring compatibleTex(std::wstring value) {
-    if (value.find(L"\\begin{aligned}") == std::wstring::npos) return value;
-    struct Alignment { size_t begin{}, length{}, columns{1}, maximum{1}; int environment{}, braces{}; };
+    if (value.find(L'\\') == std::wstring::npos) return value;
+    struct Alignment { size_t begin{}, length{}, columns{1}, maximum{1}; int environment{}, braces{}; bool centered{}; };
     struct Replacement { size_t start{}, length{}; std::wstring text; };
     std::vector<Alignment> aligned;
     std::vector<Replacement> replacements;
     int environment{}, braces{};
+    // 按完整控制序列匹配，不能把 \bmfoo 或转义的 \\bm 当作 \bm。
+    const std::pair<const wchar_t*,const wchar_t*> aliases[]={
+        {L"bm",L"\\boldsymbol"},{L"textnormal",L"\\text"},{L"textup",L"\\text"},{L"textmd",L"\\text"},
+        {L"mathup",L"\\mathrm"},{L"lvert",L"\\vert"},{L"rvert",L"\\vert"},
+        {L"mleft",L"\\left"},{L"mright",L"\\right"},{L"dotsc",L"\\ldots"},{L"dotsm",L"\\cdots"},{L"dotso",L"\\ldots"},
+        {L"coloneqq",L":="},{L"eqqcolon",L"=:"}
+    };
     for (size_t i = 0; i < value.size(); ++i) {
         auto topLevel = [&] { return !aligned.empty() && environment == aligned.back().environment && braces == aligned.back().braces; };
         if (value[i] == L'\\' && i + 1 < value.size()) {
@@ -678,20 +685,35 @@ inline std::wstring compatibleTex(std::wstring value) {
             const bool begin = value.compare(i, 7, L"\\begin{") == 0, end = value.compare(i, 5, L"\\end{") == 0;
             if (begin || end) {
                 const auto first = i + (begin ? 7 : 5), last = value.find(L'}', first);
+                if(last==std::wstring::npos)break;
                 const auto name = value.substr(first, last - first);
+                const bool paired=name==L"aligned"||name==L"align*"||name==L"split"||name==L"alignedat"||name==L"alignat*";
+                const bool centered=name==L"gathered"||name==L"gather*";
+                if(name==L"subarray")replacements.push_back({i,last+1-i,begin?L"\\begin{array}":L"\\end{array}"});
                 if (begin) {
                     ++environment;
-                    if (name == L"aligned") {
+                    if (paired||centered) {
                         size_t after = last + 1; while (after < value.size() && iswspace(value[after])) ++after;
                         const bool option = after + 2 < value.size() && value[after] == L'[' && value[after + 2] == L']' &&
                             (value[after + 1] == L't' || value[after + 1] == L'b' || value[after + 1] == L'c');
-                        aligned.push_back({i, (option ? after + 3 : last + 1) - i, 1, 1, environment, braces});
-                        if (option) { i = after + 2; continue; }
+                        size_t finish=option?after+3:last+1;
+                        // alignedat 的组数不是公式内容，array 按实际顶层列数生成列格式。
+                        if(name==L"alignedat"||name==L"alignat*"){
+                            after=finish;while(after<value.size()&&iswspace(value[after]))++after;
+                            if(after>=value.size()||value[after]!=L'{') {i=last;continue;}
+                            const auto close=value.find(L'}',after+1);
+                            if(close==std::wstring::npos||close==after+1||
+                               !std::all_of(value.begin()+after+1,value.begin()+close,[](wchar_t c){return c>=L'0'&&c<=L'9';})||
+                               value.find_first_of(L"123456789",after+1)>=close){i=last;continue;}
+                            finish=close+1;
+                        }
+                        aligned.push_back({i, finish-i, 1, 1, environment, braces,centered});
+                        i=finish-1;continue;
                     }
                 } else {
-                    if (name == L"aligned") {
+                    if ((paired||centered)&&!aligned.empty()&&environment==aligned.back().environment) {
                         const auto a = aligned.back(); aligned.pop_back();
-                        std::wstring columns; for (size_t c = 0; c < std::max(size_t{2}, std::max(a.columns, a.maximum)); ++c) columns += c % 2 ? L'l' : L'r';
+                        std::wstring columns; for (size_t c = 0; c < std::max(a.centered?size_t{1}:size_t{2}, std::max(a.columns, a.maximum)); ++c) columns += a.centered?L'c':c % 2 ? L'l' : L'r';
                         replacements.push_back({a.begin, a.length, L"\\begin{array}{" + columns + L"}"});
                         replacements.push_back({i, last + 1 - i, L"\\end{array}"});
                     }
@@ -699,7 +721,19 @@ inline std::wstring compatibleTex(std::wstring value) {
                 }
                 i = last; continue;
             }
-            ++i; continue;
+            size_t finish=i+1;while(finish<value.size()&&((value[finish]>=L'a'&&value[finish]<=L'z')||(value[finish]>=L'A'&&value[finish]<=L'Z')))++finish;
+            if(finish==i+1){++i;continue;}
+            const auto command=value.substr(i+1,finish-i-1);
+            for(const auto& alias:aliases)if(command==alias.first){replacements.push_back({i,finish-i,alias.second});break;}
+            // 文字参数保持原样，里面形似数学命令的文本不能再次改写。
+            if(command==L"text"||command==L"mbox"||command==L"operatorname"||command==L"textnormal"||command==L"textup"||command==L"textmd"){
+                size_t argument=finish;while(argument<value.size()&&iswspace(value[argument]))++argument;
+                if(command==L"operatorname"&&argument<value.size()&&value[argument]==L'*'){++argument;while(argument<value.size()&&iswspace(value[argument]))++argument;}
+                if(argument<value.size()&&value[argument]==L'{'){
+                    int depth=1;for(size_t j=argument+1;j<value.size();++j){if(value[j]==L'\\'&&j+1<value.size()){++j;continue;}if(value[j]==L'{')++depth;else if(value[j]==L'}'&&--depth==0){finish=j+1;break;}}
+                }
+            }
+            i=finish-1;continue;
         }
         if (value[i] == L'&' && topLevel()) ++aligned.back().columns;
         if (value[i] == L'{') ++braces;

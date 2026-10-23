@@ -120,12 +120,44 @@ $null=Invoke-LightweightTask 'aligned-reverse' @('--worker-reverse',$alignedOutp
 if($LASTEXITCODE -ne 0){throw 'aligned 内容、行列或红色残留检查失败。'}
 $evidence.Cases+=@{Name='aligned';AllRowsAndColumnsVerified=$true;NoRedResiduals=$true;Pdf=($alignedOutput+'.pdf');Report=(Join-Path $run 'aligned-output.json')}
 
+# 兼容规则必须保持命令边界、嵌套内容和实验区域，纯文本耗时单独计量。
+& (Join-Path $project 'build/bin/native-api-probe.exe') --compatible-tex-self-test
+if($LASTEXITCODE -ne 0){throw '兼容改写纯逻辑检查失败。'}
+$compatibilityHelper=Join-Path $PSScriptRoot 'helpers/test_tex_compatibility.py'
+& python -B -X utf8 $compatibilityHelper fixture $run
+if($LASTEXITCODE -ne 0){throw '兼容改写样本生成失败。'}
+$compatibilityInput=Join-Path $run 'tex-compatibility-input.docx';$compatibilityHash=(Get-FileHash -LiteralPath $compatibilityInput).Hash
+$null=Invoke-LightweightTask 'tex-compatibility' @('--self-test',$compatibilityInput,(Join-Path $run 'tex-compatibility.docx'),(Join-Path $run 'tex-compatibility.json'),'paragraph','--experimental-tables') (Join-Path $project 'build/bin/docx-math-convert.exe')
+$null=Invoke-LightweightTask 'tex-compatibility-reverse' @('--worker-reverse',(Join-Path $run 'tex-compatibility.docx'),(Join-Path $run 'tex-compatibility-reverse.docx'),(Join-Path $run 'tex-compatibility-reverse.json'),'bracket',(Join-Path $run 'stop.flag'),'--experimental-tables')
+& python -B -X utf8 $compatibilityHelper check $run
+if($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $compatibilityInput).Hash -ne $compatibilityHash){throw '兼容改写页面、内容或原件检查失败。'}
+$evidence.Cases+=@{Name='tex-compatibility';NoRedResiduals=$true;OriginalSyntaxPreserved=$true;NestedAndExperimental=$true}
+
 # 合成定界符样本覆盖行内/行外上下文，输入不含论文内容。
 $source=Join-Path $run 'delimiters.docx';$output=Join-Path $run 'delimiters-output.docx'
 $null=Invoke-LightweightTask 'delimiters' @('--self-test',$source,$output,(Join-Path $run 'delimiters-output.json'),'paragraph') (Join-Path $project 'build\bin\docx-math-convert.exe')
 & python -B -X utf8 (Join-Path $PSScriptRoot 'helpers/test_delimiters.py') $source $output
 if($LASTEXITCODE -ne 0){throw '合成定界符回归失败。'}
 $evidence.Cases+=@{Name='delimiters';GeneratedFixture=$true}
+
+# 非对称定界符与嵌入工作簿不能影响正常公式；正文和实验区都覆盖百分号往返。
+$inputForms=Join-Path $PSScriptRoot 'helpers/test_input_forms.py'
+& python -B -X utf8 $inputForms fixture $run
+if($LASTEXITCODE -ne 0){throw '输入形式样本生成失败。'}
+foreach($delimiter in @('bracket','dollar')){
+    $name='reverse-forms-'+$delimiter
+    $null=Invoke-LightweightTask $name @('--worker-reverse',(Join-Path $run 'reverse-input-forms.docx'),(Join-Path $run ($name+'.docx')),(Join-Path $run ($name+'.json')),$delimiter,(Join-Path $run 'stop.flag'))
+}
+foreach($extra in @($false,$true)){
+    $name=if($extra){'embedded-forms-extra'}else{'embedded-forms'}
+    $arguments=@('--worker-convert',(Join-Path $run 'embedded-input-forms.docx'),(Join-Path $run ($name+'.docx')),(Join-Path $run ($name+'.json')),'paragraph',(Join-Path $run 'stop.flag'))
+    if($extra){$arguments+='--experimental-tables'}
+    $null=Invoke-LightweightTask $name $arguments
+}
+$null=Invoke-LightweightTask 'embedded-forms-reverse' @('--worker-reverse',(Join-Path $run 'embedded-forms-extra.docx'),(Join-Path $run 'embedded-forms-reverse.docx'),(Join-Path $run 'embedded-forms-reverse.json'),'bracket',(Join-Path $run 'stop.flag'),'--experimental-tables')
+& python -B -X utf8 $inputForms check $run
+if($LASTEXITCODE -ne 0){throw '定界符、百分号或嵌入资产保留回归失败。'}
+$evidence.Cases+=@{Name='input-forms';AsymmetricDelimiters=$true;PercentRoundtrip=$true;OtherEmbeddingsUnchanged=$true;PartialOutputPreserved=$true}
 
 # 交换保存包中的两条不同公式，数量和字节多重集均相同，仍必须拒绝错误位置。
 $oldBoundary=$env:DOCX_MATH_FAULT_BOUNDARY;$oldGate=$env:DOCX_MATH_FAULT_GATE
@@ -185,6 +217,6 @@ if(-not $SkipPerformance){
 }
 $evidence.Status='PASSED'
 $evidence.SourceSHA256=@{}
-foreach($file in @('gui.cpp','convert_docx.cpp','layout_options.h','native_numbering.h','docx_scan.h','mathtype_api.h','word_automation.h','task_guard.h','test-lightweight.ps1','test_lightweight_fixtures.py','test_display_layout.py','test_delimiters.py','test_aligned.py')){$evidence.SourceSHA256[$file]=(Get-FileHash -LiteralPath (Get-TestSourcePath $file)).Hash}
+foreach($file in @('gui.cpp','convert_docx.cpp','equation_objects.h','experimental_conversion.cpp','layout_options.h','native_numbering.h','docx_scan.h','mathtype_api.h','word_automation.h','task_guard.h','native_api_probe.cpp','test-lightweight.ps1','test_lightweight_fixtures.py','test_display_layout.py','test_delimiters.py','test_input_forms.py','test_tex_compatibility.py','test_aligned.py')){$evidence.SourceSHA256[$file]=(Get-FileHash -LiteralPath (Get-TestSourcePath $file)).Hash}
 $evidence|ConvertTo-Json -Depth 12|Set-Content -LiteralPath (Join-Path $TestOutputRoot 'lightweight-results.json') -Encoding utf8
 Write-Output ('LIGHTWEIGHT_PASSED: '+$run)

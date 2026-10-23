@@ -201,7 +201,21 @@ std::wstring ommlMathML(WordSession& word,IDispatch* range,ComPtr<IXMLDOMDocumen
     // Office 的模板输出 MathML 片段，必须补上 math 根节点再交给厂商导入。
     std::wstring fragment=transformed.v.bstrVal;
     if(fragment.rfind(L"<?xml",0)==0){const auto end=fragment.find(L"?>");require(end!=std::wstring::npos,"Office MathML declaration");fragment.erase(0,end+2);}
-    return std::wstring(L"<math xmlns=\"http://www.w3.org/1998/Math/MathML\" display=\"")+(display?L"block":L"inline")+L"\">"+fragment+L"</math>";
+    auto mathml=xmlDocument(std::wstring(L"<math xmlns=\"http://www.w3.org/1998/Math/MathML\" display=\"")+(display?L"block":L"inline")+L"\">"+fragment+L"</math>");
+    // Office 把空格输出为 mi；MathType 在逗号等位置会将其显示成问号，改用专用间距节点。
+    ComPtr<IXMLDOMNodeList> spaces;
+    check(mathml->selectNodes(Value(L"//*[namespace-uri()='http://www.w3.org/1998/Math/MathML' and local-name()='mi' and string-length(.)>0 and translate(.,' \u00a0\t\n\r','')='']").v.bstrVal,&spaces),"Select MathML spacing identifiers");
+    long count{};check(spaces->get_length(&count),"MathML spacing count");
+    for(long i=0;i<count;++i){
+        ComPtr<IXMLDOMNode> node,parent,replacement,removed;check(spaces->get_item(i,&node),"MathML spacing identifier");
+        Value value;value.v.vt=VT_BSTR;check(node->get_text(&value.v.bstrVal),"MathML spacing text");
+        check(mathml->createNode(Value(1L).v,Value(L"mspace").v.bstrVal,Value(L"http://www.w3.org/1998/Math/MathML").v.bstrVal,&replacement),"Create MathML spacing");
+        ComPtr<IXMLDOMElement> element;check(replacement.As(&element),"MathML spacing element");
+        const auto width=std::to_wstring(SysStringLen(value.v.bstrVal)*0.25)+L"em";
+        check(element->setAttribute(Value(L"width").v.bstrVal,Value(width.c_str()).v),"Set MathML spacing width");
+        check(node->get_parentNode(&parent),"MathML spacing parent");check(parent->replaceChild(replacement.Get(),node.Get(),&removed),"Replace MathML spacing identifier");
+    }
+    Value result;result.v.vt=VT_BSTR;check(mathml->get_xml(&result.v.bstrVal),"Serialize MathML import");return result.v.bstrVal;
 }
 // 导入文本先准备好；真正写入只在目标文档的单式撤销事务内执行。
 namespace {
@@ -388,7 +402,7 @@ static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const s
             if(table!=bodyTableEnds.end())result.bodyPositionShifts.push_back({table->second,integer(found->range.Get(),L"End")-table->second});}
             catch(const std::exception& error){throw failure(before.key,L"VERIFYING",error);}}
         // 逐区域有序原生流已覆盖逻辑对象；这里只核对整包资产都必须来自原对象、新导入或空模板。
-        try{const auto saved=inspectPackage(path);requireContains(saved.equations,retained.equations,"Experimental retained native streams unchanged");requireContains(saved.media,retained.media,"Experimental retained media unchanged");
+        try{const auto saved=inspectPackage(path);requireContains(saved.equations,retained.equations,"Experimental retained native streams unchanged");requireContains(saved.media,retained.media,"Experimental retained media unchanged");requireContains(saved.otherEmbeddings,retained.otherEmbeddings,"Experimental unconverted embedded packages unchanged");
         std::set<std::vector<unsigned char>> expectedNative,actualNative,allowed=emptyNative;
         for(const auto& value:retained.equations)expectedNative.insert(nativePayload(value));expectedNative.insert(added.begin(),added.end());
         allowed.insert(expectedNative.begin(),expectedNative.end());if(reverse)for(const auto& value:bodyPackage.equations)allowed.insert(nativePayload(value));

@@ -1,6 +1,6 @@
 #requires -Version 7.0
 # 上传检查只读取明确的公开清单；私有样本和运行报告不作为检查或导出的候选文件。
-param([string]$ProjectDirectory=$PSScriptRoot,[switch]$Export)
+param([string]$ProjectDirectory=$PSScriptRoot,[switch]$Export,[string]$PrivacyDirectory=$ProjectDirectory)
 $ErrorActionPreference='Stop'
 $root=[IO.Path]::GetFullPath($ProjectDirectory)
 $manifest=Join-Path $root 'upload-files.txt'
@@ -8,8 +8,8 @@ $names=@(Get-Content -LiteralPath $manifest -Encoding utf8 | Where-Object {$_ -a
 if($names.Count -ne @($names|Sort-Object -Unique).Count){throw '公开清单包含重复路径。'}
 $issues=[Collections.Generic.List[string]]::new()
 $binaryNames=@('assets/app_icon.png','assets/app_icon.ico')
-$privateValues=@($env:USERPROFILE,$env:USERNAME,$root)|Where-Object {$_ -and $_.Length -ge 4}
-$privateFolder=Join-Path $root '.local/samples'
+$privateValues=@($env:USERPROFILE,$env:USERNAME,[IO.Path]::GetFullPath($PrivacyDirectory))|Where-Object {$_ -and $_.Length -ge 4}
+$privateFolder=Join-Path $PrivacyDirectory '.local/samples'
 if(Test-Path -LiteralPath $privateFolder){$privateValues+=@(Get-ChildItem -LiteralPath $privateFolder -File|ForEach-Object {$_.Name})}
 $hashes=[ordered]@{}
 foreach($name in $names){
@@ -26,7 +26,7 @@ foreach($name in $names){
     if($entry.PSIsContainer){throw ('清单项必须是文件：'+$name)}
     $bytes=[IO.File]::ReadAllBytes($path)
     $hashes[$name]=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
-    if($name -notin $binaryNames -and $entry.Extension -notin @('.ps1','.py','.cpp','.c','.h','.rc','.md','.txt','.json','.yaml') -and $name -notin @('.gitignore','.gitattributes','LICENSE')){throw ('禁止上传该类型：'+$name)}
+    if($name -notin $binaryNames -and $entry.Extension -notin @('.ps1','.cmd','.py','.cpp','.c','.h','.rc','.md','.txt','.json','.yaml') -and $name -notin @('.gitignore','.gitattributes','LICENSE')){throw ('禁止上传该类型：'+$name)}
     $text=[Text.Encoding]::UTF8.GetString($bytes)
     if($name -notin $binaryNames){
         # 公开文本统一 UTF-8；拒绝空字节，避免其他编码绕过路径检查。
@@ -46,6 +46,9 @@ foreach($name in $names){
             ++$lineNumber
             if($line -match '(?<![A-Za-z0-9_])[A-Za-z]:[\\/]' -or $line -match '(?:/Users/|/home/)[A-Za-z0-9_.-]+/'){$issues.Add($name+':'+$lineNumber+': 含绝对文件路径')}
             if($line -match '(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)'){$issues.Add($name+':'+$lineNumber+': 疑似密钥')}
+            foreach($email in [regex]::Matches($line,'[A-Za-z0-9_.+%-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}')){
+                if($email.Value -notmatch '@(?:users\.)?noreply\.github\.com$'){$issues.Add($name+':'+$lineNumber+': 含非 GitHub 隐私邮箱')}
+            }
         }
     }
 }
