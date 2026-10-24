@@ -6,14 +6,23 @@ DocxMathTypeBatch 是一款 Windows 桌面工具，适合在 Word 中使用 LaTe
 
 [使用说明](docs/使用说明.md) · [公式书写与兼容性](docs/MathType兼容LaTeX书写规范.md)
 
-## 下载 v0.1.1
+## 下载 v0.1.2
 
-- **[下载 Windows x64 ZIP](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.1/DocxMathTypeBatch-v0.1.1-win-x64.zip)**：推荐，包含程序、简要使用说明和 MIT 许可证，解压后运行。
-- [下载单文件 EXE](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.1/DocxMathTypeBatch.exe)
-- [下载配套 Skill v0.1](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.1/docx-latex-to-mathtype-skill-v0.1.zip)：供 Agent 自动调用，可选安装。
-- [版本说明与校验文件](https://github.com/yuxmic/DocxMathTypeBatch/releases/tag/v0.1.1)
+- **[下载 Windows x64 ZIP](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.2/DocxMathTypeBatch-v0.1.2-win-x64.zip)**：推荐，包含程序、简要使用说明和 MIT 许可证，解压后运行。
+- [下载单文件 EXE](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.2/DocxMathTypeBatch.exe)
+- [下载配套 Skill v0.1](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.2/docx-latex-to-mathtype-skill-v0.1.zip)：供 Agent 自动调用，可选安装。
+- [版本说明与校验文件](https://github.com/yuxmic/DocxMathTypeBatch/releases/tag/v0.1.2)
 
 运行前请安装下方列出的 Word 和 MathType。程序尚未进行代码签名，首次运行可能出现 Windows 安全提示。
+
+## v0.1.2 更新
+
+- **后台转换与焦点保护**：移除向 Word 注入 DLL 的实现，改用隐藏的独立 Word 实例；任务 Word 争取前台时，及时将前台交还最近使用的窗口，跟随用户主动切换的软件。
+- **熄屏与睡眠保护**：转换期间允许自动熄屏和锁屏，同时阻止空闲自动睡眠；手动睡眠期间暂停处理，唤醒后继续，休眠时间不计入无进展超时。
+- **更多 LaTeX 兼容写法**：自动适配 `\bm`、`\mathup`、`\lvert`、`\coloneqq` 等常见命令，以及 `align*`、`alignedat`、`gathered`、`split` 等多行结构；原文件保持不变。
+- **转换修复**：修复 Word 原生公式中的空格可能显示为问号、含嵌入 Excel 等附件的文档转换失败、反向导出转义百分号被误拒绝，以及缺失左反斜杠的行外定界符处理问题。
+
+配套 Skill 继续使用 v0.1，调用接口保持版本 1。详细变化与验证范围见[版本说明](https://github.com/yuxmic/DocxMathTypeBatch/releases/tag/v0.1.2)。
 
 ## 主要功能
 
@@ -50,7 +59,7 @@ DocxMathTypeBatch 是一款 Windows 桌面工具，适合在 Word 中使用 LaTe
 EXE 与独立的 [docx-latex-to-mathtype Skill](skills/docx-latex-to-mathtype/SKILL.md) 分别安装：
 
 1. 下载上方 Skill ZIP，将其中的 `docx-latex-to-mathtype` 文件夹安装到所用 Agent 的 Skill 目录，并重新加载 Skill。
-2. 正常打开 v0.1.1 EXE 一次，程序会在本机登记自身位置；也可向 Agent 提供一次 EXE 位置进行连接。
+2. 正常打开 v0.1.2 EXE 一次，程序会在本机登记自身位置；也可向 Agent 提供一次 EXE 位置进行连接。
 3. 向 Agent 提出要求，例如：“将这份 DOCX 的公式转成 MathType，正文行外公式添加右编号，结果另存为新文件。”
 
 移动 EXE 后重新打开或重新连接即可，Skill 目录可以与 EXE 分开存放。

@@ -14,7 +14,6 @@
 #include <string>
 #include <vector>
 #include <cwctype>
-#include "window_guard_bytes.h"
 
 using Microsoft::WRL::ComPtr;
 
@@ -56,14 +55,14 @@ static void check(HRESULT status, const char* label) {
 
 // 忙碌重试只覆盖明确被 COM 拒绝的调用，不重试可能已经产生修改的普通错误。
 static void pump(DWORD milliseconds) {
-    const ULONGLONG end = GetTickCount64() + milliseconds;
+    const ULONGLONG end = taskActiveMilliseconds() + milliseconds;
     do {
         MSG message{};
         while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
             TranslateMessage(&message); DispatchMessageW(&message);
         }
         MsgWaitForMultipleObjects(0, nullptr, FALSE, 25, QS_ALLINPUT);
-    } while (GetTickCount64() < end);
+    } while (taskActiveMilliseconds() < end);
 }
 
 static Value invoke(IDispatch* object, const wchar_t* name, WORD flags,
@@ -150,8 +149,6 @@ static std::vector<DWORD> wordProcesses() {
 }
 
 struct WordSession {
-    // 守卫安装于明确创建的 Word 主线程，Word 退出后自动解除。
-    struct WindowGuard {HMODULE library{};HHOOK hook{};~WindowGuard(){if(hook)UnhookWindowsHookEx(hook);if(library)FreeLibrary(library);}} guard;
     ComPtr<IDispatch> application;
     ComPtr<IDispatch> document;
     std::vector<DWORD> before;
@@ -175,18 +172,9 @@ struct WordSession {
         const auto program = start == std::wstring::npos ? registration.substr(0, end + 4) : registration.substr(start + 1, end - start - 1);
         const auto slash = program.find_last_of(L"\\/");
         require(slash != std::wstring::npos && !_wcsicmp(program.c_str() + slash + 1, L"WINWORD.EXE"), "Word registration names WINWORD.EXE");
-        // /a 禁止加载全局模板/加载项；安全的空 RTF 提供原生窗口，不运行用户启动宏。
-        const auto recoveryDirectory = std::wstring(taskShared->recoveryPath).substr(0, std::wstring(taskShared->recoveryPath).find_last_of(L"\\/"));
-        const auto bootstrap = recoveryDirectory + L"\\word-startup-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64()) + L".rtf";
-        taskReservePrivatePath(bootstrap);taskTrackWordOwner(bootstrap);
-        TaskHandle bootstrapFile(CreateFileW(bootstrap.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                             nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
-        require(bootstrapFile.value != INVALID_HANDLE_VALUE, "Create safe Word bootstrap");
-        constexpr char emptyRtf[] = "{\\rtf1\\ansi\\deff0\\pard\\par}"; DWORD written{};
-        require(WriteFile(bootstrapFile.value, emptyRtf, sizeof(emptyRtf) - 1, &written, nullptr) && written == sizeof(emptyRtf) - 1 && FlushFileBuffers(bootstrapFile.value), "Write safe Word bootstrap");
-        CloseHandle(bootstrapFile.value); bootstrapFile.value = nullptr; // Word 打开前释放写句柄，避免锁定提示。
-        // /q 禁用 Word 启动画面；后续文档也必须显式以不可见方式创建和打开。
-        auto command = taskQuote(program) + L" /Automation /q /a " + taskQuote(bootstrap);STARTUPINFOEXW startup{};
+        // /w 提供独立空白文档的原生对象，避免命令行打开 RTF 时 Word 再次显示窗口。
+        // /a 禁止加载全局模板和加载项，/q 禁用启动画面；后续文档显式以不可见方式打开。
+        auto command = taskQuote(program) + L" /Automation /q /a /w";STARTUPINFOEXW startup{};
         startup.StartupInfo.cb=sizeof(startup);startup.StartupInfo.dwFlags=STARTF_USESHOWWINDOW;startup.StartupInfo.wShowWindow=SW_HIDE;
         TaskHandle creationJob(OpenJobObjectW(JOB_OBJECT_ASSIGN_PROCESS,FALSE,taskShared->job));require(creationJob.value!=nullptr,"Open Word creation job");
         SIZE_T attributeBytes{};InitializeProcThreadAttributeList(nullptr,1,0,&attributeBytes);std::vector<unsigned char> attributeStorage(attributeBytes);
@@ -202,65 +190,8 @@ struct WordSession {
         ULARGE_INTEGER identity{}; identity.LowPart = created.dwLowDateTime; identity.HighPart = created.dwHighDateTime;
         taskOwnWord(information.dwProcessId, identity.QuadPart);
         std::printf("OWNED_WORD_PID=%lu\nOWNED_WORD_STARTED=%llu\n", information.dwProcessId, identity.QuadPart);
-        wchar_t appData[32768]{};require(GetEnvironmentVariableW(L"LOCALAPPDATA",appData,32768)>0,"User component cache root");
-        const auto cache=std::wstring(appData)+L"\\DocxMathTypeBatch";
-        require(CreateDirectoryW(cache.c_str(),nullptr)||GetLastError()==ERROR_ALREADY_EXISTS,"Create private component cache");
-        const auto guardPath=cache+L"\\"+WordWindowGuardName;
-        {
-            // 同版本组件复用固定路径；校验实际字节后再加载，不使用任务临时 DLL。
-            TaskHandle cacheLock(CreateMutexW(nullptr,FALSE,L"Local\\DocxMathTypeBatch.WindowGuardCache"));
-            require(cacheLock.value!=nullptr,"Open component cache mutex");const DWORD acquired=WaitForSingleObject(cacheLock.value,5000);
-            require(acquired==WAIT_OBJECT_0||acquired==WAIT_ABANDONED,"Lock component cache");
-            struct UnlockCache {HANDLE value;~UnlockCache(){ReleaseMutex(value);}} unlockCache{cacheLock.value};
-            if(GetFileAttributesW(guardPath.c_str())==INVALID_FILE_ATTRIBUTES){
-                const auto staging=guardPath+L".tmp-"+std::to_wstring(GetCurrentProcessId());taskReservePrivatePath(staging);
-                TaskHandle cachedFile(CreateFileW(staging.c_str(),GENERIC_WRITE,FILE_SHARE_READ,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr));
-                require(cachedFile.value!=INVALID_HANDLE_VALUE,"Create versioned Word guard component");
-                require(WriteFile(cachedFile.value,WordWindowGuardBytes,sizeof(WordWindowGuardBytes),&written,nullptr)&&written==sizeof(WordWindowGuardBytes)&&FlushFileBuffers(cachedFile.value),"Write embedded Word guard component");
-                CloseHandle(cachedFile.value);cachedFile.value=nullptr;
-                // 发布目标也登记到复制完成；路径映射返回不同设备时允许系统复制并移动。
-                const auto cacheIntent=InterlockedCompareExchange(&taskShared->files,0,0);taskReservePrivatePath(guardPath);
-                const bool published=MoveFileExW(staging.c_str(),guardPath.c_str(),MOVEFILE_WRITE_THROUGH|MOVEFILE_COPY_ALLOWED)!=0;
-                if(!published)std::printf("COMPONENT_PUBLICATION_FAILED WIN32=%lu\n",GetLastError());
-                require(published,"Publish complete embedded component");
-                taskShared->tracked[cacheIntent].path[0]=0;
-            }
-            TaskHandle saved(CreateFileW(guardPath.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr));
-            LARGE_INTEGER size{};require(saved.value!=INVALID_HANDLE_VALUE&&GetFileSizeEx(saved.value,&size)&&size.QuadPart==sizeof(WordWindowGuardBytes),"Validate Word guard component size");
-            std::vector<unsigned char> cachedBytes(sizeof(WordWindowGuardBytes));DWORD read{};
-            require(ReadFile(saved.value,cachedBytes.data(),static_cast<DWORD>(cachedBytes.size()),&read,nullptr)&&read==cachedBytes.size()&&memcmp(cachedBytes.data(),WordWindowGuardBytes,cachedBytes.size())==0,"Verify cached Word guard bytes");
-        }
-        guard.library=LoadLibraryExW(guardPath.c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
-        require(guard.library!=nullptr,"Load embedded Word window guard");
-        const SIZE_T pathBytes=(guardPath.size()+1)*sizeof(wchar_t);
-        void* remotePath=VirtualAllocEx(process.value,nullptr,pathBytes,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE);
-        require(remotePath!=nullptr,"Allocate owned Word component path");
-        struct ReleasePath {HANDLE process;void* address;~ReleasePath(){VirtualFreeEx(process,address,0,MEM_RELEASE);}} releasePath{process.value,remotePath};
-        SIZE_T copied{};require(WriteProcessMemory(process.value,remotePath,guardPath.c_str(),pathBytes,&copied)&&copied==pathBytes,"Pass embedded component path to owned Word");
-        auto loadLibrary=reinterpret_cast<LPTHREAD_START_ROUTINE>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"),"LoadLibraryW"));
-        require(loadLibrary!=nullptr,"System component loader");
-        TaskHandle loader(CreateRemoteThread(process.value,nullptr,0,loadLibrary,remotePath,0,nullptr));
-        require(loader.value!=nullptr,"Load component only into owned Word");
-        require(WaitForSingleObject(loader.value,10000)==WAIT_OBJECT_0,"Owned Word component loaded within deadline");
-        HMODULE remoteModule{};TaskHandle modules(CreateToolhelp32Snapshot(TH32CS_SNAPMODULE,information.dwProcessId));
-        require(modules.value!=INVALID_HANDLE_VALUE,"Read owned Word modules");MODULEENTRY32W module{sizeof(module)};
-        for(BOOL more=Module32FirstW(modules.value,&module);more;more=Module32NextW(modules.value,&module))if(!_wcsicmp(module.szModule,WordWindowGuardName)){remoteModule=module.hModule;break;}
-        require(remoteModule!=nullptr,"Embedded Word component identity");
-        const auto install=GetProcAddress(guard.library,"InstallGuard");require(install!=nullptr,"Owned Word guard entry");
-        const auto offset=reinterpret_cast<ULONG_PTR>(install)-reinterpret_cast<ULONG_PTR>(guard.library);
-        auto remoteInstall=reinterpret_cast<LPTHREAD_START_ROUTINE>(reinterpret_cast<ULONG_PTR>(remoteModule)+offset);
-        TaskHandle installer(CreateRemoteThread(process.value,nullptr,0,remoteInstall,reinterpret_cast<void*>(static_cast<ULONG_PTR>(information.dwThreadId)),0,nullptr));
-        require(installer.value!=nullptr,"Prepare owned Word guard installer");
-        const auto ready=GetProcAddress(guard.library,"GuardReadyHook");require(ready!=nullptr,"Owned Word guard readiness");
-        const auto remoteReady=reinterpret_cast<void*>(reinterpret_cast<ULONG_PTR>(remoteModule)+reinterpret_cast<ULONG_PTR>(ready)-reinterpret_cast<ULONG_PTR>(guard.library));
-        DWORD hook{};SIZE_T received{};
-        // 先让安装线程运行，避免它在第一个 Word 窗口之后才获得执行机会。
-        Sleep(10);ReadProcessMemory(process.value,remoteReady,&hook,sizeof(hook),&received);
+        // 使用系统启动隐藏和 Word 自身可见性设置，不向 Word 注入代码。
         require(ResumeThread(thread.value)!=MAXDWORD,"Start explicit task Word");
-        const auto readyDeadline=GetTickCount64()+5000;
-        while(!hook&&GetTickCount64()<readyDeadline&&WaitForSingleObject(installer.value,0)==WAIT_TIMEOUT){require(ReadProcessMemory(process.value,remoteReady,&hook,sizeof(hook),&received)&&received==sizeof(hook),"Read owned Word guard readiness");if(!hook)Sleep(1);}
-        require(hook!=0,"Owned Word window guard is active");
-        guard.hook=reinterpret_cast<HHOOK>(static_cast<ULONG_PTR>(hook));
         taskTestBoundary(L"WORD_STARTUP");
         // 启动时可能先出现一个尚不提供原生对象的隐藏 _WwG，必须检查全部同属窗口并有限重试。
         struct WindowSearch { DWORD pid; std::vector<HWND> natives; } search{information.dwProcessId, {}};
@@ -269,8 +200,8 @@ struct WordSession {
         using NativeObject = HRESULT (WINAPI*)(HWND, DWORD, REFIID, void**);
         const auto nativeObject = reinterpret_cast<NativeObject>(GetProcAddress(accessibility, "AccessibleObjectFromWindow"));
         require(nativeObject != nullptr, "Office native-object bridge export");
-        const auto deadline=GetTickCount64()+TaskDefaultTimeoutSeconds*1000ULL;
-        while (!application && GetTickCount64() < deadline && WaitForSingleObject(process.value, 0) == WAIT_TIMEOUT) {
+        const auto deadline=taskActiveMilliseconds()+TaskDefaultTimeoutSeconds*1000ULL;
+        while (!application && taskActiveMilliseconds() < deadline && WaitForSingleObject(process.value, 0) == WAIT_TIMEOUT) {
             search.natives.clear();
             EnumWindows([](HWND window, LPARAM parameter) -> BOOL {
                 auto& context = *reinterpret_cast<WindowSearch*>(parameter); DWORD pid{}; GetWindowThreadProcessId(window, &pid);

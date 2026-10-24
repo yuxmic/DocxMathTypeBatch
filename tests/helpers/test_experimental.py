@@ -791,11 +791,11 @@ def spacing_fixture(folder):
     doc = Document()
     doc.core_properties.author = "Synthetic test fixture"
     doc.core_properties.last_modified_by = ""
-    simple = f'<m:oMath xmlns:m="{M}"><m:r><m:t>k ∈ {{1, …, K}}</m:t></m:r></m:oMath>'
+    simple = f'<m:oMath xmlns:m="{M}"><m:r><m:t xml:space="preserve"> </m:t></m:r><m:r><m:t>k\u00a0 ∈ {{1, …, K}}</m:t></m:r><m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t>\u00a0</m:t></m:r></m:oMath>'
     complex_math = f'''<m:oMath xmlns:m="{M}">
       <m:sSub><m:e><m:r><m:rPr><m:sty m:val="b"/></m:rPr><m:t>X</m:t></m:r></m:e><m:sub><m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t>obs</m:t></m:r></m:sub></m:sSub>
       <m:r><m:t xml:space="preserve"> = B ⊙ X,  B ∈ </m:t></m:r>
-      <m:sSup><m:e><m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t>{{0, 1}}</m:t></m:r></m:e><m:sup><m:r><m:t>6N×M</m:t></m:r></m:sup></m:sSup></m:oMath>'''
+      <m:sSup><m:e><m:r><m:rPr><m:sty m:val="p"/></m:rPr><m:t>{{0, 1}}</m:t></m:r></m:e><m:sup><m:r><m:t>6 N × M</m:t></m:r></m:sup></m:sSup></m:oMath>'''
     doc.add_paragraph('Inline ')._p.append(parse_xml(simple))
     for value in (simple, complex_math):
         wrapper = OxmlElement('m:oMathPara')
@@ -811,6 +811,8 @@ def check_spacing(folder):
     doc = Document(folder / 'spacing-reverse.docx')
     texts = [p.text for p in doc.paragraphs if p.text.strip()] + [doc.tables[0].cell(0, 0).text, doc.sections[0].header.paragraphs[0].text]
     assert len(texts) == 5 and all('?' not in text for text in texts), texts
+    # 自动数学间距不应产生手工间距命令或原式没有的竖线。
+    assert all(not re.search(r'\\(?:[,;:!]|quad\b|qquad\b|hspace\b)|[|\u2223\u2502]', text) for text in texts), texts
     for text in texts:
         assert r'\in' in text, text
     for index in (0, 1, 3, 4):

@@ -8,6 +8,11 @@
 constexpr DWORD TaskTimeoutExit = 124, TaskServiceLostExit = 125, TaskRecoveryExit = 126, TaskCancelExit = 127;
 constexpr DWORD TaskDefaultTimeoutSeconds = 120, TaskRecoverySeconds = 30;
 constexpr size_t TaskMaxFiles = 16, TaskNativeCapacity = 65536;
+// 只累计系统运行时间，主动睡眠和休眠不会误触发无进展超时。
+inline ULONGLONG taskActiveMilliseconds() {
+    ULONGLONG ticks{}; require(QueryUnbiasedInterruptTime(&ticks) != 0, "Read active task clock");
+    return ticks / 10000;
+}
 // 跨进程心跳可能在父进程采样 now 后更新；未来心跳按0等待计算，避免无符号减法溢出。
 constexpr ULONGLONG taskElapsed(ULONGLONG now, ULONGLONG before) { return now >= before ? now - before : 0; }
 static_assert(taskElapsed(100, 101) == 0 && taskElapsed(100, 100) == 0 && taskElapsed(100, 80) == 20, "Cross-process heartbeat elapsed bounds");
@@ -50,13 +55,13 @@ struct TaskMapping {
         if (create) require(GetLastError() != ERROR_ALREADY_EXISTS, "Unique task supervision mapping");
         state = static_cast<TaskSharedState*>(MapViewOfFile(handle.value, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(TaskSharedState)));
         require(state != nullptr, "Map task supervision state");
-        if (create) { new (state) TaskSharedState(); InterlockedExchange64(&state->heartbeat, static_cast<LONG64>(GetTickCount64())); }
+        if (create) { new (state) TaskSharedState(); InterlockedExchange64(&state->heartbeat, static_cast<LONG64>(taskActiveMilliseconds())); }
     }
     ~TaskMapping() { if (state) UnmapViewOfFile(state); }
 };
 inline void taskPulse() {
     if (!taskShared) return;
-    InterlockedExchange64(&taskShared->heartbeat, static_cast<LONG64>(GetTickCount64()));
+    InterlockedExchange64(&taskShared->heartbeat, static_cast<LONG64>(taskActiveMilliseconds()));
     require(InterlockedCompareExchange(&taskShared->cancelRequested, 0, 0) == 0, "TASK_CANCELLED");
 }
 inline bool taskCancelled() { return taskShared && InterlockedCompareExchange(&taskShared->cancelRequested, 0, 0) != 0; }
@@ -258,6 +263,44 @@ inline bool taskCleanupFiles(TaskSharedState& state) {
     if (complete) std::puts("TASK_COPY_CLEANUP_PASSED"); return complete;
 }
 
+// 只纠正已核验的任务 Word 抢前台，目标始终跟随用户最近选择的可见窗口。
+struct TaskForegroundGuard {
+    TaskSharedState& state;std::unique_ptr<TaskHandle> word;HWND userWindow{};DWORD userPid{},userThread{};HWINEVENTHOOK hook{};
+    TaskForegroundGuard* previous{};inline static thread_local TaskForegroundGuard* current{};
+    unsigned restored{},failed{};
+    void observe(HWND window) {
+        if(!window)return;DWORD pid{};const auto thread=GetWindowThreadProcessId(window,&pid);
+        if(state.wordReady&&pid==state.wordPid){
+            DWORD targetPid{};const auto targetThread=GetWindowThreadProcessId(userWindow,&targetPid);
+            if(word&&WaitForSingleObject(word->value,0)==WAIT_TIMEOUT&&GetForegroundWindow()==window&&
+               targetPid==userPid&&targetThread==userThread&&IsWindow(userWindow)&&IsWindowVisible(userWindow)&&IsWindowEnabled(userWindow)&&!IsIconic(userWindow)){
+                if(SetForegroundWindow(userWindow))++restored;else ++failed;
+            }
+        }else if(IsWindowVisible(window)&&IsWindowEnabled(window)&&!IsIconic(window)){userWindow=window;userPid=pid;userThread=thread;}
+    }
+    static void CALLBACK changed(HWINEVENTHOOK source,DWORD,HWND window,LONG,LONG,DWORD,DWORD) {
+        for(auto guard=current;guard;guard=guard->previous)if(guard->hook==source){guard->observe(window);return;}
+    }
+    explicit TaskForegroundGuard(TaskSharedState& shared):state(shared) {
+        userWindow=GetForegroundWindow();userThread=GetWindowThreadProcessId(userWindow,&userPid);previous=current;
+        hook=SetWinEventHook(EVENT_SYSTEM_FOREGROUND,EVENT_SYSTEM_FOREGROUND,nullptr,changed,0,0,WINEVENT_OUTOFCONTEXT);
+        require(hook!=nullptr,"Start task foreground protection");current=this;
+        std::puts("TASK_FOREGROUND_GUARD_READY");
+    }
+    void poll() {
+        if(!word&&InterlockedCompareExchange(&state.wordReady,0,0))word.reset(taskVerifiedWord(state,false));
+        MSG message{};while(PeekMessageW(&message,nullptr,0,0,PM_REMOVE)){TranslateMessage(&message);DispatchMessageW(&message);}
+        observe(GetForegroundWindow());
+    }
+    ~TaskForegroundGuard(){observe(GetForegroundWindow());UnhookWinEvent(hook);current=previous;
+        std::printf("TASK_FOREGROUND_RESTORED=%u FAILED_REQUESTS=%u\n",restored,failed);}
+};
+struct TaskAwake {
+    // 允许熄屏和锁屏，仅阻止任务期间自动睡眠；嵌套恢复结束后保留外层请求。
+    EXECUTION_STATE previous{SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)};
+    TaskAwake() { require(previous != 0, "Keep active task awake"); }
+    ~TaskAwake() { SetThreadExecutionState(previous); }
+};
 inline int superviseTaskArguments(const std::vector<std::wstring>& arguments, bool mathTypeTask = true);
 inline bool taskRecover(TaskMapping& original, const std::wstring& originalName, bool preferences) {
     if (!preferences && !original.state->linksChanged) return true;
@@ -268,6 +311,7 @@ inline bool taskRecover(TaskMapping& original, const std::wstring& originalName,
 inline int superviseTaskArguments(const std::vector<std::wstring>& arguments, bool mathTypeTask) {
     setvbuf(stdout, nullptr, _IONBF, 0); DWORD code = 1;
     require(!arguments.empty(), "Task worker mode");
+    TaskAwake awake;
     const bool recoveryOnly = arguments[0] == L"--worker-recover";
     const DWORD timeout = recoveryOnly ? (std::min)(TaskRecoverySeconds, taskTimeoutSeconds()) : taskTimeoutSeconds();
     const bool usesMathType = mathTypeTask && !recoveryOnly && arguments[0] != L"--scan" && arguments[0] != L"--worker-scan";
@@ -282,6 +326,7 @@ inline int superviseTaskArguments(const std::vector<std::wstring>& arguments, bo
     GUID id{}; check(CoCreateGuid(&id), "Create unique supervision identity"); wchar_t guid[40]{}; StringFromGUID2(id, guid, 40);
     const auto mappingName = L"Local\\DocxMathTypeBatch-" + std::wstring(guid);
     TaskMapping mapping(mappingName, true); auto& state = *mapping.state;
+    TaskForegroundGuard foreground(state);
     const auto jobName = mappingName + L"-job"; wcscpy_s(state.job, jobName.c_str());
     state.scanTask = arguments[0] == L"--scan" || arguments[0] == L"--worker-scan";
     const auto recoveryPath = taskRecoveryPath(); wcscpy_s(state.recoveryPath, recoveryPath.c_str());
@@ -345,6 +390,7 @@ inline int superviseTaskArguments(const std::vector<std::wstring>& arguments, bo
                 require(TerminateJobObject(job.value,TaskCancelExit)!=0,"Cancel only owned task job");
                 code=TaskCancelExit;terminated=cancelled=true;std::puts("TASK_CANCEL_REQUESTED");break;
             }
+            foreground.poll();
             // 本监管进程只有这一线程读取管道；仅按可用字节数读取，绝不等待工作进程输出。
             DWORD available{}; if (PeekNamedPipe(read.value, nullptr, 0, nullptr, &available, nullptr) && available) {
                 char buffer[4096]{}; DWORD count{};
@@ -354,15 +400,15 @@ inline int superviseTaskArguments(const std::vector<std::wstring>& arguments, bo
                 DWORD remaining{}; if (PeekNamedPipe(read.value, nullptr, 0, nullptr, &remaining, nullptr) && remaining) continue;
                 require(GetExitCodeProcess(process.value, &code), "Read supervised worker outcome");
                 if(guiPublication&&code==0&&state.committed){
-                    if(!commitRequested){std::puts("UI_COMMIT_READY");commitRequested=true;commitWaiting=GetTickCount64();}
+                    if(!commitRequested){std::puts("UI_COMMIT_READY");commitRequested=true;commitWaiting=taskActiveMilliseconds();}
                     if(GetFileAttributesW(guiCommit)==INVALID_FILE_ATTRIBUTES){
-                        if(taskElapsed(GetTickCount64(),commitWaiting)>=timeout*1000ULL){InterlockedExchange(&state.committed,0);taskError("GUI_COMMIT_TIMEOUT");code=TaskTimeoutExit;break;}
+                        if(taskElapsed(taskActiveMilliseconds(),commitWaiting)>=timeout*1000ULL){InterlockedExchange(&state.committed,0);taskError("GUI_COMMIT_TIMEOUT");code=TaskTimeoutExit;break;}
                         Sleep(20);continue;
                     }
                 }
                 break;
             }
-            const auto now = GetTickCount64();
+            const auto now = taskActiveMilliseconds();
             if (!sharedMath.value && InterlockedCompareExchange(&state.mathReady, 0, 0)) {
                 sharedMath.value = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, state.mathPid);
                 if (sharedMath.value) {
@@ -382,7 +428,7 @@ inline int superviseTaskArguments(const std::vector<std::wstring>& arguments, bo
                 taskError("TASK_TIMEOUT"); std::printf("TASK_HARD_TIMEOUT_PASSED TIMEOUT_SECONDS=%lu\n", timeout);
                 code = TaskTimeoutExit; terminated = true; taskEndBlockedWorker(state, job.value, process.value, code); break;
             }
-            Sleep(20);
+            MsgWaitForMultipleObjects(0,nullptr,FALSE,20,QS_ALLINPUT);
         }
     } catch (...) { TerminateJobObject(job.value, 1); WaitForSingleObject(process.value, 5000); throw; }
     if (!recoveryOnly) SetConsoleCtrlHandler(taskConsoleHandler, FALSE);

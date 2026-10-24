@@ -509,6 +509,33 @@ static void installationSelfTest(const std::wstring& directory) {
 #include "test_experimental_api.h"
 int wmain(int argc, wchar_t** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
+    if(argc==2&&std::wstring(argv[1])==L"--task-power-self-test"){
+        // 检查实际线程电源请求及嵌套恢复，不改变系统电源计划，不启动 Office。
+        const auto previous=SetThreadExecutionState(ES_CONTINUOUS);
+        struct RestorePower {EXECUTION_STATE previous;~RestorePower(){if(previous)SetThreadExecutionState(previous);}} restore{previous};
+        try{
+            require(previous!=0,"Read original thread execution state");
+            constexpr auto active=ES_CONTINUOUS|ES_SYSTEM_REQUIRED;
+            {
+                TaskAwake outer;
+                require(SetThreadExecutionState(active)==active,"Task keeps system awake without keeping display on");
+                {TaskAwake recovery;require(SetThreadExecutionState(active)==active,"Recovery keeps system awake");}
+                require(SetThreadExecutionState(active)==active,"Recovery retains outer execution request");
+            }
+            require(SetThreadExecutionState(ES_CONTINUOUS)==ES_CONTINUOUS,"Task releases execution request");
+            try{TaskAwake failed;throw std::runtime_error("Injected task failure");}catch(const std::runtime_error&){}
+            require(SetThreadExecutionState(ES_CONTINUOUS)==ES_CONTINUOUS,"Failure releases execution request");
+            ULONGLONG before{},after{};require(QueryUnbiasedInterruptTime(&before)!=0,"Read active clock before test");
+            const auto now=taskActiveMilliseconds();require(QueryUnbiasedInterruptTime(&after)!=0,"Read active clock after test");
+            require(now>=before/10000&&now<=after/10000,"Task clock uses active milliseconds");
+            const auto name=L"Local\\DocxMathTypeBatch-PowerTest-"+std::to_wstring(GetCurrentProcessId());
+            TaskMapping mapping(name,true);taskShared=mapping.state;
+            require(static_cast<ULONGLONG>(taskShared->heartbeat)>=now&&static_cast<ULONGLONG>(taskShared->heartbeat)<=taskActiveMilliseconds(),"Initial heartbeat uses active clock");
+            InterlockedExchange64(&taskShared->heartbeat,0);taskPulse();
+            require(static_cast<ULONGLONG>(taskShared->heartbeat)>=now&&static_cast<ULONGLONG>(taskShared->heartbeat)<=taskActiveMilliseconds(),"Progress heartbeat uses active clock");
+            taskShared=nullptr;std::puts("TASK_POWER_SELF_TEST_PASSED");return 0;
+        }catch(const std::exception& error){taskShared=nullptr;std::printf("TASK_POWER_SELF_TEST_FAILED %s\n",error.what());return 1;}
+    }
     if(argc==2&&std::wstring(argv[1])==L"--compatible-tex-self-test"){
         // 只测正式文本改写函数，不启动 Word、MathType 或 COM。
         try{

@@ -55,7 +55,7 @@ foreach($name in $names){
 if(Test-Path -LiteralPath (Join-Path $root '.git')){
     $tracked=@(& git -C $root -c core.quotePath=false ls-files)
     if($LASTEXITCODE -ne 0){throw '无法读取 Git 已跟踪文件。'}
-    foreach($trackedName in $tracked){if($trackedName -cnotin $names){$issues.Add('Git 已跟踪公开清单之外的文件')}}
+    foreach($trackedName in $tracked){if($trackedName -cnotin $names -and (Test-Path -LiteralPath (Join-Path $root $trackedName))){$issues.Add('Git 已跟踪公开清单之外的文件')}}
 }
 if($issues.Count){throw ('上传检查未通过：'+[Environment]::NewLine+($issues -join [Environment]::NewLine))}
 Write-Output ('UPLOAD_CHECK_PASSED: '+$names.Count+' 个公开文件')

@@ -12,6 +12,7 @@ $timeoutEvidence = [ordered]@{ CheckedAt=(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 $timeoutPrevious = @{}
 foreach ($timeoutVariable in @('DOCX_MATH_TIMEOUT_SECONDS','DOCX_MATH_RECOVERY_DIRECTORY','DOCX_MATH_FAULT_BOUNDARY','DOCX_MATH_FAULT_GATE')) { $timeoutPrevious[$timeoutVariable]=[Environment]::GetEnvironmentVariable($timeoutVariable) }
 $timeoutSentinel=$null; $timeoutSentinelDoc=$null; $timeoutSentinelOwned=$false
+$timeoutSentinelTask=$null;$timeoutSentinelNative=$null;$timeoutSentinelHandle=[IntPtr]::Zero;$timeoutSentinelGate=Join-Path $timeoutTask 'sentinel-release.flag'
 
 # 只对已核对的进程句柄注入故障；MathType 必须有本轮/前置自建 GUI 任务的明确来源证据。
 Add-Type -TypeDefinition @'
@@ -36,8 +37,18 @@ public static class TimeoutFaultCheck {
     [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeout(IntPtr window,uint message,IntPtr wparam,IntPtr lparam,uint flags,uint timeout,out IntPtr result);
     public delegate bool EnumProc(IntPtr window,IntPtr parameter);
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc callback,IntPtr parameter);
+    [DllImport("user32.dll")] static extern bool EnumChildWindows(IntPtr window,EnumProc callback,IntPtr parameter);
+    [DllImport("oleacc.dll")] static extern int AccessibleObjectFromWindow(IntPtr window,uint id,ref Guid iid,[MarshalAs(UnmanagedType.Interface)] out object value);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window,StringBuilder name,int size);
+    public static object NativeWord(uint expected) {
+        object found=null;
+        EnumWindows((window,p)=>{uint owner;GetWindowThreadProcessId(window,out owner);if(owner!=expected)return true;
+            EnumChildWindows(window,(child,data)=>{var name=new StringBuilder(80);GetClassName(child,name,80);if(name.ToString()=="_WwG"){
+                var iid=new Guid("00020400-0000-0000-C000-000000000046");object value;if(AccessibleObjectFromWindow(child,0xFFFFFFF0,ref iid,out value)==0)found=value;}
+                return found==null;},IntPtr.Zero);return found==null;},IntPtr.Zero);
+        return found;
+    }
     public static IntPtr Window(uint pid) {
         IntPtr found=IntPtr.Zero;
         EnumWindows((window,p)=>{uint owner;GetWindowThreadProcessId(window,out owner);var name=new StringBuilder(256);GetClassName(window,name,256);if(owner==pid&&name.ToString()=="DocxMathTypeBatch.B"){found=window;return false;}return true;},IntPtr.Zero);
@@ -108,6 +119,8 @@ function Wait-TimeoutFinish([Diagnostics.Process]$Process,[int]$Seconds=60) {
 }
 try {
     if (-not $SkipBuild) { & (Join-Path $ProjectRoot 'build.ps1') -Target All }
+    & (Join-Path $ProjectRoot 'build/bin/native-api-probe.exe') --task-power-self-test
+    if($LASTEXITCODE -ne 0){throw '任务电源与有效运行时间自检失败。'}
     # 只接纳本轮样本转换产生的服务身份，不读取历史日志或进程归属。
     $timeoutInitialOffice=@(Get-Process -Name WINWORD -ErrorAction SilentlyContinue | ForEach-Object { [ordered]@{Id=$_.Id;Started=$_.StartTime.ToFileTimeUtc()} })
     $timeoutInitialMath=@(Get-Process -Name MathType -ErrorAction SilentlyContinue | ForEach-Object { [ordered]@{Id=$_.Id;Started=$_.StartTime.ToFileTimeUtc()} })
@@ -119,10 +132,24 @@ try {
     $timeoutOwnedMath=@{}
     foreach ($service in $timeoutBaseline.OwnedMath) { $timeoutOwnedMath[$service.Id]=$service.Started }
     $timeoutBeforeWord=@(Get-Process -Name WINWORD -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
-    $timeoutSentinel=New-Object -ComObject Word.Application; $timeoutSentinelDoc=$timeoutSentinel.Documents.Add()
-    [uint32]$timeoutSentinelPid=0; $null=[TimeoutFaultCheck]::GetWindowThreadProcessId([IntPtr]$timeoutSentinelDoc.ActiveWindow.Hwnd,[ref]$timeoutSentinelPid)
+    # 用已有受监管扫描入口创建哨兵，停在开发边界；不通过 COM 激活未知实例。
+    $savedSentinel=@{};foreach($variable in @('DOCX_MATH_TIMEOUT_SECONDS','DOCX_MATH_FAULT_BOUNDARY','DOCX_MATH_FAULT_GATE')){$savedSentinel[$variable]=[Environment]::GetEnvironmentVariable($variable)}
+    try{
+        $env:DOCX_MATH_TIMEOUT_SECONDS='3600';$env:DOCX_MATH_FAULT_BOUNDARY='WORD_STARTUP';$env:DOCX_MATH_FAULT_GATE=$timeoutSentinelGate
+        $timeoutSentinelTask=Start-TimeoutWorker $timeoutExe @('--worker-scan',$timeoutBaseline.Input,(Join-Path $timeoutTask 'sentinel-scan.json'),'forward',(Join-Path $timeoutTask 'sentinel-stop.flag')) $timeoutTask 'sentinel'
+    }finally{foreach($variable in $savedSentinel.Keys){[Environment]::SetEnvironmentVariable($variable,$savedSentinel[$variable])}}
+    $sentinelTrace=Wait-TimeoutMarker (Join-Path $timeoutTask 'sentinel.log') 'FAULT_BOUNDARY=WORD_STARTUP' $timeoutSentinelTask
+    [uint32]$timeoutSentinelPid=[uint32]([regex]::Matches($sentinelTrace,'OWNED_WORD_PID=(\d+)')|Select-Object -Last 1).Groups[1].Value
+    $sentinelStarted=[long]([regex]::Matches($sentinelTrace,'OWNED_WORD_STARTED=(\d+)')|Select-Object -Last 1).Groups[1].Value
+    $timeoutSentinelHandle=[TimeoutFaultCheck]::Verified($timeoutSentinelPid,$sentinelStarted,'WINWORD.EXE')
     $timeoutSentinelOwned=$timeoutSentinelPid -ne 0 -and $timeoutSentinelPid -notin $timeoutBeforeWord
     if (-not $timeoutSentinelOwned) { throw '拒绝使用已有 Word 创建哨兵。' }
+    $sentinelDeadline=[DateTime]::UtcNow.AddSeconds(15)
+    do{$timeoutSentinelNative=[TimeoutFaultCheck]::NativeWord($timeoutSentinelPid);if(-not $timeoutSentinelNative){Start-Sleep -Milliseconds 25}}while(-not $timeoutSentinelNative -and [DateTime]::UtcNow -lt $sentinelDeadline)
+    if(-not $timeoutSentinelNative){throw '自建哨兵 Word 原生对象未就绪。'}
+    [uint32]$nativePid=0;$null=[TimeoutFaultCheck]::GetWindowThreadProcessId([IntPtr]$timeoutSentinelNative.Hwnd,[ref]$nativePid)
+    if($nativePid -ne $timeoutSentinelPid){throw '哨兵原生窗口的 PID 不匹配。'}
+    $timeoutSentinel=$timeoutSentinelNative.Application;$timeoutSentinelDoc=$timeoutSentinelNative.Document
     $timeoutSentinel.Visible=$false; $timeoutSentinel.DisplayAlerts=0
     $timeoutSentinelDoc.Content.Text='timeout unrelated Word sentinel '+$timeoutIdentity
     $timeoutSentinelText=$timeoutSentinelDoc.Content.Text; $timeoutSentinelLinks=$timeoutSentinel.Options.UpdateLinksAtOpen
@@ -242,15 +269,25 @@ try {
     $timeoutEvidence.Checks=[ordered]@{AutomaticHardTimeoutVerified=$true;PermanentWordBlockVerified=$true;NoUnknownPublication=$true;OwnedWordAndCopiesCleaned=$true;TaskIdentityIncludesCreationTime=$true;UnrelatedSessionsPreserved=$true;SharedMathTypeNeverKilledByProduct=$true;NoPendingSharedStyles=(@($timeoutEvidence.Cases | Where-Object NoPendingSharedStyle -EQ $true).Count -eq 3);NextConversionAfterTimeout=(@($timeoutEvidence.Cases | Where-Object RestoredNextTask -EQ 'COMPLETE').Count -eq 1);PhysicalMouseKeyboard=$false;OtherMachine=$false}
     $timeoutEvidence.FullSuite=-not $Cases
     $timeoutEvidence.SourceSHA256=[ordered]@{}
-    foreach ($timeoutSource in @('task_guard.h','window_guard.c','gui.cpp','convert_docx.cpp','docx_scan.h','word_automation.h','mathtype_api.h','test-timeouts.ps1','build.ps1')) { $timeoutEvidence.SourceSHA256[$timeoutSource]=(Get-FileHash -LiteralPath (Get-TestSourcePath $timeoutSource)).Hash }
+    foreach ($timeoutSource in @('task_guard.h','gui.cpp','convert_docx.cpp','docx_scan.h','word_automation.h','mathtype_api.h','native_api_probe.cpp','test-timeouts.ps1','build.ps1')) { $timeoutEvidence.SourceSHA256[$timeoutSource]=(Get-FileHash -LiteralPath (Get-TestSourcePath $timeoutSource)).Hash }
     $timeoutEvidence.ExecutableSHA256=(Get-FileHash -LiteralPath $timeoutExe).Hash
     $timeoutEvidence.CliExecutableSHA256=(Get-FileHash -LiteralPath $timeoutCli).Hash; $timeoutEvidence.ScanExecutableSHA256=(Get-FileHash -LiteralPath $timeoutScan).Hash
     $timeoutEvidence.Status='PASSED'; Write-Output 'PRODUCT_TIMEOUT_ACCEPTANCE_PASSED'
 } catch { $timeoutEvidence.Error=$_.Exception.Message; throw }
 finally {
     foreach ($timeoutVariable in $timeoutPrevious.Keys) { [Environment]::SetEnvironmentVariable($timeoutVariable,$timeoutPrevious[$timeoutVariable]) }
-    if ($timeoutSentinelDoc) { if ($timeoutSentinelOwned) { $timeoutSentinelDoc.Close(0) }; $null=[Runtime.InteropServices.Marshal]::FinalReleaseComObject($timeoutSentinelDoc) }
-    if ($timeoutSentinel) { if ($timeoutSentinelOwned) { $timeoutSentinel.Quit() }; $null=[Runtime.InteropServices.Marshal]::FinalReleaseComObject($timeoutSentinel) }
+    if ($timeoutSentinelDoc) { $null=[Runtime.InteropServices.Marshal]::FinalReleaseComObject($timeoutSentinelDoc) }
+    if ($timeoutSentinel) { $null=[Runtime.InteropServices.Marshal]::FinalReleaseComObject($timeoutSentinel) }
+    if ($timeoutSentinelNative) { $null=[Runtime.InteropServices.Marshal]::FinalReleaseComObject($timeoutSentinelNative) }
+    if($timeoutSentinelTask){
+        [IO.File]::WriteAllText($timeoutSentinelGate,'release')
+        if(-not $timeoutSentinelTask.WaitForExit(15000)){
+            [IO.File]::WriteAllText((Join-Path $timeoutTask 'sentinel-stop.flag'),'stop')
+            if(-not $timeoutSentinelTask.WaitForExit(10000)){$timeoutSentinelTask.Kill();$timeoutSentinelTask.WaitForExit()}
+        }
+        $timeoutSentinelTask.Dispose()
+    }
+    if($timeoutSentinelHandle -ne [IntPtr]::Zero){$null=[TimeoutFaultCheck]::CloseHandle($timeoutSentinelHandle)}
     # 失败材料同样保存，避免排查日志在 finally 中消失；移动前核对两个绝对路径的边界。
     $timeoutResolved=[IO.Path]::GetFullPath($timeoutTask); $timeoutTarget=[IO.Path]::GetFullPath($timeoutPublished)
     $timeoutSamples=[IO.Path]::GetFullPath((Join-Path $ProjectRoot 'tests\output'))

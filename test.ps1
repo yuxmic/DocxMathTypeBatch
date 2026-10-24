@@ -10,7 +10,7 @@ if(-not $SkipBuild){& (Join-Path $PSScriptRoot 'build.ps1') -Target All}
 $groups=[ordered]@{
     Core=@('lightweight','advanced','native-display','native-numbering','experimental','agent')
     Safety=@('cancel','faults','timeouts','installation','link-updates')
-    UI=@('gui','diagnostics','batch','ui-style','ui-experience')
+    UI=@('gui','diagnostics','batch','ui-style','ui-experience','foreground')
 }
 $selected=if($Suite -eq 'All'){@('Core','Safety','UI')}else{@($Suite)}
 foreach($group in $selected){

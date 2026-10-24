@@ -4,6 +4,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <string_view>
 
 namespace {
 struct Region {std::wstring key,label;ComPtr<IDispatch> range;bool main{};std::vector<Span> tables;};
@@ -197,25 +198,22 @@ std::wstring ommlMathML(WordSession& word,IDispatch* range,ComPtr<IXMLDOMDocumen
         stylesheet=xmlDocument(L"<root/>");VARIANT_BOOL loaded{};check(stylesheet->load(Value(path.c_str()).v,&loaded),"Load Office OMML transform");require(loaded!=VARIANT_FALSE,"OFFICE_OMML_TRANSFORM_MISSING");}
     auto source=xmlDocument(text(range,L"WordOpenXML"));ComPtr<IXMLDOMNode> equation;
     check(source->selectSingleNode(Value(L"//*[namespace-uri()='http://schemas.openxmlformats.org/officeDocument/2006/math' and local-name()='oMath']").v.bstrVal,&equation),"Select source OMML");require(equation!=nullptr,"Source OMML exists");
+    // 导入副本直接删除原生公式文本中的空格，交由 MathType 自动安排数学间距。
+    ComPtr<IXMLDOMNodeList> texts;
+    check(equation->selectNodes(Value(L".//*[namespace-uri()='http://schemas.openxmlformats.org/officeDocument/2006/math' and local-name()='t']").v.bstrVal,&texts),"Select OMML text");
+    long count{};check(texts->get_length(&count),"OMML text count");
+    for(long i=0;i<count;++i){
+        ComPtr<IXMLDOMNode> node;check(texts->get_item(i,&node),"OMML text node");
+        Value value;value.v.vt=VT_BSTR;check(node->get_text(&value.v.bstrVal),"OMML text value");
+        std::wstring content=value.v.bstrVal;
+        content.erase(std::remove_if(content.begin(),content.end(),[](wchar_t c){return std::wstring_view(L" \u00a0\t\n\r").find(c)!=std::wstring_view::npos;}),content.end());
+        check(node->put_text(Value(content.c_str()).v.bstrVal),"Remove OMML whitespace");
+    }
     Value transformed;transformed.v.vt=VT_BSTR;check(equation->transformNode(stylesheet.Get(),&transformed.v.bstrVal),"Transform OMML to MathML");
     // Office 的模板输出 MathML 片段，必须补上 math 根节点再交给厂商导入。
     std::wstring fragment=transformed.v.bstrVal;
     if(fragment.rfind(L"<?xml",0)==0){const auto end=fragment.find(L"?>");require(end!=std::wstring::npos,"Office MathML declaration");fragment.erase(0,end+2);}
-    auto mathml=xmlDocument(std::wstring(L"<math xmlns=\"http://www.w3.org/1998/Math/MathML\" display=\"")+(display?L"block":L"inline")+L"\">"+fragment+L"</math>");
-    // Office 把空格输出为 mi；MathType 在逗号等位置会将其显示成问号，改用专用间距节点。
-    ComPtr<IXMLDOMNodeList> spaces;
-    check(mathml->selectNodes(Value(L"//*[namespace-uri()='http://www.w3.org/1998/Math/MathML' and local-name()='mi' and string-length(.)>0 and translate(.,' \u00a0\t\n\r','')='']").v.bstrVal,&spaces),"Select MathML spacing identifiers");
-    long count{};check(spaces->get_length(&count),"MathML spacing count");
-    for(long i=0;i<count;++i){
-        ComPtr<IXMLDOMNode> node,parent,replacement,removed;check(spaces->get_item(i,&node),"MathML spacing identifier");
-        Value value;value.v.vt=VT_BSTR;check(node->get_text(&value.v.bstrVal),"MathML spacing text");
-        check(mathml->createNode(Value(1L).v,Value(L"mspace").v.bstrVal,Value(L"http://www.w3.org/1998/Math/MathML").v.bstrVal,&replacement),"Create MathML spacing");
-        ComPtr<IXMLDOMElement> element;check(replacement.As(&element),"MathML spacing element");
-        const auto width=std::to_wstring(SysStringLen(value.v.bstrVal)*0.25)+L"em";
-        check(element->setAttribute(Value(L"width").v.bstrVal,Value(width.c_str()).v),"Set MathML spacing width");
-        check(node->get_parentNode(&parent),"MathML spacing parent");check(parent->replaceChild(replacement.Get(),node.Get(),&removed),"Replace MathML spacing identifier");
-    }
-    Value result;result.v.vt=VT_BSTR;check(mathml->get_xml(&result.v.bstrVal),"Serialize MathML import");return result.v.bstrVal;
+    return std::wstring(L"<math xmlns=\"http://www.w3.org/1998/Math/MathML\" display=\"")+(display?L"block":L"inline")+L"\">"+fragment+L"</math>";
 }
 // 导入文本先准备好；真正写入只在目标文档的单式撤销事务内执行。
 namespace {

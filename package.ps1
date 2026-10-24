@@ -1,7 +1,7 @@
 #requires -Version 7.0
 # 程序与 Skill 分别打包；不把本机绑定、文档样本和日志放入任何发布包。
 param(
-    [ValidatePattern('^v[0-9]+\.[0-9]+(?:\.[0-9]+)?$')][string]$Version='v0.1.1',
+    [ValidatePattern('^v[0-9]+\.[0-9]+(?:\.[0-9]+)?$')][string]$Version='v0.1.2',
     [ValidatePattern('^v[0-9]+\.[0-9]+(?:\.[0-9]+)?$')][string]$SkillVersion='v0.1',
     [ValidateSet('All','Exe','Skill')][string]$Target='All'
 )

@@ -2,6 +2,11 @@
 # 检查公开脚本语法、Python 模块和隐私检查的拒绝行为，不启动 Office。
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'helpers/common.ps1')
+# 模拟中文系统的 GBK 控制台，公共入口须恢复正确的原生 UTF-8 JSON 管道。
+[Console]::OutputEncoding=[Text.Encoding]::GetEncoding(936)
+. (Join-Path $PSScriptRoot 'helpers/common.ps1')
+$nativeJson=& python -B -X utf8 -c 'import json; print(json.dumps(dict(text=chr(0x4e2d)+chr(0x6587)+chr(34)), ensure_ascii=False))'
+if($LASTEXITCODE -ne 0 -or ($nativeJson|ConvertFrom-Json).text -cne ('中文'+[char]34)){throw '原生 UTF-8 JSON 的中文或转义引号解码错误。'}
 $names=Get-Content -LiteralPath (Join-Path $ProjectRoot 'upload-files.txt')|Where-Object {$_ -and -not $_.StartsWith('#')}
 foreach($name in $names|Where-Object {$_ -like '*.ps1'}){
     $tokens=$null;$parseErrors=$null
@@ -22,6 +27,16 @@ try{
     'example.txt'|Set-Content -LiteralPath (Join-Path $sandbox 'upload-files.txt') -Encoding utf8
     $example=Join-Path $sandbox 'example.txt'
     'public fixture'|Set-Content -LiteralPath $example -Encoding utf8
+    & (Join-Path $ProjectRoot 'check-upload.ps1') -ProjectDirectory $sandbox
+    # 删除中的已跟踪文件允许退出清单，仍存在的清单外文件必须拒绝。
+    & git -C $sandbox init --quiet
+    $retired=Join-Path $sandbox 'retired.txt';'retired fixture'|Set-Content -LiteralPath $retired
+    & git -C $sandbox add -- retired.txt
+    if($LASTEXITCODE -ne 0){throw '清单删除回归准备失败。'}
+    $rejected=$false
+    try{& (Join-Path $ProjectRoot 'check-upload.ps1') -ProjectDirectory $sandbox|Out-Null}catch{$rejected=$true}
+    if(-not $rejected){throw '上传检查未拒绝仍存在的清单外已跟踪文件。'}
+    Remove-Item -LiteralPath $retired
     & (Join-Path $ProjectRoot 'check-upload.ps1') -ProjectDirectory $sandbox
     foreach($value in @(('Z'+':\'+'private\sample.docx'),('ghp_'+('a'*30)),'.local/paper.docx')){
         if($value -eq '.local/paper.docx'){$value|Set-Content -LiteralPath (Join-Path $sandbox 'upload-files.txt')}else{$value|Set-Content -LiteralPath $example}

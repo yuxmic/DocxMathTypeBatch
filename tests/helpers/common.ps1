@@ -1,4 +1,8 @@
 # 测试只从当前项目获取输入；结果和进程身份均属于本轮运行。
+# Python 使用 UTF-8 输出 JSON，统一测试控制台编码，避免中文系统按 GBK 解码原生管道。
+[Console]::InputEncoding=[Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
+$OutputEncoding=[Console]::OutputEncoding
 $ProjectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $TestOutputRoot = Join-Path $ProjectRoot 'tests/output'
 New-Item -ItemType Directory -Path $TestOutputRoot,(Join-Path $TestOutputRoot 'work') -Force | Out-Null

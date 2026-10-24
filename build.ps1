@@ -4,10 +4,9 @@ param([ValidateSet('All','Native','Scan','Convert','Gui')][string]$Target='All')
 $ErrorActionPreference='Stop'
 $projectRoot=$PSScriptRoot
 $bin=Join-Path $projectRoot 'build/bin'
-$generated=Join-Path $projectRoot 'build/generated'
 $objectRoot=Join-Path $projectRoot 'build/obj'
 $objects=Join-Path $objectRoot ([Guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $bin,$generated,$objects -Force | Out-Null
+New-Item -ItemType Directory -Path $bin,$objects -Force | Out-Null
 $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
 $vsRoot=(& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath)
 if(-not $vsRoot){throw '未找到 MSVC 编译工具。'}
@@ -22,16 +21,6 @@ try{
     $env:LIB=@((Join-Path $tools 'lib/x64'))+@('ucrt','um'|ForEach-Object {Join-Path $sdk ('Lib/'+$sdkVersion+'/'+$_+'/x64')}) -join ';'
     $env:PATH=(Join-Path $tools 'bin/Hostx64/x64')+';'+$previousPath
     $compiler=Join-Path $tools 'bin/Hostx64/x64/cl.exe'
-    # 守卫 DLL 仅作为构建中间物；生成头文件后嵌入程序。
-    $guardName='DmtGuard_'+[Guid]::NewGuid().ToString('N')+'.dll'
-    $guardDll=Join-Path $objects $guardName
-    & $compiler /nologo /TC /LD /utf-8 /O1 /MT /W4 /WX /DUNICODE /D_UNICODE ('/Fo'+(Join-Path $objects 'window_guard.obj')) ('/Fe'+$guardDll) (Join-Path $projectRoot 'src/window_guard.c') /link ('/IMPLIB:'+(Join-Path $objects 'window_guard.lib')) user32.lib kernel32.lib comctl32.lib
-    if($LASTEXITCODE -ne 0){throw '窗口守卫编译失败。'}
-    $bytes=[IO.File]::ReadAllBytes($guardDll)
-    $header=@('// 自动生成：内嵌 Word 窗口守卫。',('inline constexpr wchar_t WordWindowGuardName[]=L"'+$guardName+'";'),'inline constexpr unsigned char WordWindowGuardBytes[]={')
-    for($index=0;$index -lt $bytes.Length;$index+=32){$header+=((($bytes[$index..([Math]::Min($index+31,$bytes.Length-1))]|ForEach-Object {'0x'+$_.ToString('X2')}) -join ',')+',')}
-    $header+='};'
-    $header|Set-Content -LiteralPath (Join-Path $generated 'window_guard_bytes.h') -Encoding utf8
     $resource=Join-Path $objects 'app.res'
     if($Target -in @('All','Gui')){
         & (Join-Path $sdk ('bin/'+$sdkVersion+'/x64/rc.exe')) /nologo /c65001 /i (Join-Path $projectRoot 'assets') /fo $resource (Join-Path $projectRoot 'assets/app.rc')
@@ -50,7 +39,7 @@ try{
             $extra=@('/DDOCX_MATH_GUI');$sources+=$resource
             $links=@('/SUBSYSTEM:WINDOWS','comctl32.lib','comdlg32.lib','shell32.lib','gdi32.lib','gdiplus.lib','d2d1.lib','dwrite.lib','advapi32.lib','uxtheme.lib','uuid.lib')
         }
-        & $compiler /nologo /EHsc /std:c++17 /utf-8 /MT /W4 /WX /O1 /DUNICODE /D_UNICODE /I (Join-Path $projectRoot 'src') /I $generated /I (Join-Path $projectRoot 'tests/native') @extra ('/Fe'+$exe) ('/Fo'+$objects+'\') @sources /link ole32.lib oleaut32.lib user32.lib advapi32.lib xmllite.lib crypt32.lib @links
+        & $compiler /nologo /EHsc /std:c++17 /utf-8 /MT /W4 /WX /O1 /DUNICODE /D_UNICODE /I (Join-Path $projectRoot 'src') /I (Join-Path $projectRoot 'tests/native') @extra ('/Fe'+$exe) ('/Fo'+$objects+'\') @sources /link ole32.lib oleaut32.lib user32.lib advapi32.lib xmllite.lib crypt32.lib @links
         if($LASTEXITCODE -ne 0){throw ('编译失败：'+$program.Name)}
         $imports=& (Join-Path $tools 'bin/Hostx64/x64/dumpbin.exe') /nologo /dependents $exe
         if($LASTEXITCODE -ne 0){throw 'PE 依赖读取失败。'}

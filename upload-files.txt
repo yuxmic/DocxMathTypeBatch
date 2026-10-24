@@ -32,7 +32,6 @@ src/mathtype_api.h
 src/native_numbering.h
 src/scan_docx.cpp
 src/task_guard.h
-src/window_guard.c
 src/word_automation.h
 test.ps1
 skills/docx-latex-to-mathtype/SKILL.md
@@ -77,5 +76,6 @@ tests/test-project.ps1
 tests/test-github-update.ps1
 tests/test-timeouts.ps1
 tests/test-ui-experience.ps1
+tests/test-foreground.ps1
 tests/test-ui-style.ps1
 upload-files.txt
