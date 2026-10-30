@@ -1,13 +1,13 @@
 #requires -Version 7.0
-# 程序与 Skill 分别打包；不把本机绑定、文档样本和日志放入任何发布包。
+# GUI 包与包含 EXE 的 Skill 包分别打包；不收集本机配置、样本或日志。
 param(
-    [ValidatePattern('^v[0-9]+\.[0-9]+(?:\.[0-9]+)?$')][string]$Version='v0.1.2',
-    [ValidatePattern('^v[0-9]+\.[0-9]+(?:\.[0-9]+)?$')][string]$SkillVersion='v0.1',
+    [ValidatePattern('^v[0-9]+\.[0-9]+(?:\.[0-9]+)?$')][string]$Version='v0.1.3',
+    [ValidatePattern('^v[0-9]+\.[0-9]+(?:\.[0-9]+)?$')][string]$SkillVersion='v0.2',
     [ValidateSet('All','Exe','Skill')][string]$Target='All'
 )
 $ErrorActionPreference='Stop'
 & (Join-Path $PSScriptRoot 'check-upload.ps1')
-if($Target -in @('All','Exe')){
+# 两类包共用程序身份、构建哈希、依赖和隐私检查，Skill 单独打包也必须执行。
 $exe=Join-Path $PSScriptRoot 'build/bin/DocxMathTypeBatch.exe'
 $guide=Join-Path $PSScriptRoot 'docs/简要使用说明.txt'
 $license=Join-Path $PSScriptRoot 'LICENSE'
@@ -29,6 +29,7 @@ foreach($file in @($exe,$guide,$license)){
 $allowed=@('ole32.dll','oleaut32.dll','user32.dll','xmllite.dll','crypt32.dll','comctl32.dll','comdlg32.dll','shell32.dll','gdi32.dll','gdiplus.dll','d2d1.dll','dwrite.dll','advapi32.dll','uxtheme.dll','kernel32.dll')
 # 功能扩展后仍限制为小型原生成品，不引入额外运行库。
 if($build.ClrDirectory -ne 0 -or @($build.ImportedDlls|Where-Object {$_ -notin $allowed}).Count -or (Get-Item -LiteralPath $exe).Length -gt 2MB){throw 'PE 依赖或大小不符合发布约定。'}
+if($Target -in @('All','Exe')){
 $name='DocxMathTypeBatch-'+$Version+'-win-x64'
 $folder=Join-Path $PSScriptRoot ('dist/'+$name)
 $zip=$folder+'.zip'
@@ -75,6 +76,11 @@ if($Target -in @('All','Skill')){
         Copy-Item -LiteralPath $source -Destination $destination
         $expected[$skillName+'/'+$name]=(Get-FileHash -LiteralPath $source).Hash
     }
+    # 始终注入当前已验证的构建结果，不打包源码目录中可能过时的程序副本。
+    $runtimePath=Join-Path $contentRoot 'bin/DocxMathTypeBatch.exe'
+    [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($runtimePath))
+    Copy-Item -LiteralPath $exe -Destination $runtimePath
+    $expected[$skillName+'/bin/DocxMathTypeBatch.exe']=$exeHash
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'LICENSE') -Destination (Join-Path $contentRoot 'LICENSE')
     $expected[$skillName+'/LICENSE']=(Get-FileHash -LiteralPath (Join-Path $contentRoot 'LICENSE')).Hash
     [IO.Compression.ZipFile]::CreateFromDirectory($skillFolder,$skillZip)
@@ -89,6 +95,6 @@ if($Target -in @('All','Skill')){
             if($hash -ne $expected[$entry.FullName]){throw 'Skill ZIP 回读字节不符。'}
         }
     }finally{$archive.Dispose()}
-    [ordered]@{Status='PACKAGED';Version=$SkillVersion;CliContractVersion=1;License='MIT';Zip=('dist/'+$skillPackageName+'.zip');ZipSHA256=(Get-FileHash -LiteralPath $skillZip).Hash;Files=@($expected.Keys);SourceSHA256=$expected;ArchiveReadBackVerified=$true}|ConvertTo-Json -Depth 4|Set-Content -LiteralPath ($skillFolder+'.json') -Encoding utf8
+    [ordered]@{Status='PACKAGED';Version=$SkillVersion;BundledApplicationVersion=$Version;BundledExeSHA256=$exeHash;CliContractVersion=1;License='MIT';Zip=('dist/'+$skillPackageName+'.zip');ZipSHA256=(Get-FileHash -LiteralPath $skillZip).Hash;Files=@($expected.Keys);SourceSHA256=$expected;ArchiveReadBackVerified=$true}|ConvertTo-Json -Depth 4|Set-Content -LiteralPath ($skillFolder+'.json') -Encoding utf8
     Write-Output ('SKILL_PACKAGE_CREATED: dist/'+$skillPackageName+'.zip')
 }

@@ -1,5 +1,5 @@
 #requires -Version 7.0
-# 使用合成文档与独立程序/Skill副本验收连接和自动化，结束后恢复原有本机绑定。
+# 使用合成文档与完整 Skill 副本验收包内程序调用，结束后恢复测试用本机设置。
 param([switch]$SkipBuild)
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'helpers/common.ps1')
@@ -25,6 +25,12 @@ try{
 $saved|ConvertTo-Json -Depth 4|Set-Content -LiteralPath (Join-Path $run 'local-settings-backup.json') -Encoding utf8
 
 function Assert-Agent($Condition,[string]$Message){if(-not $Condition){throw $Message}}
+function Get-AgentRegistration {
+    # 仅用于确认旧绑定不会影响包内调用；产品脚本不读取此值。
+    $key=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($keyPath)
+    try{if($key){return [string]$key.GetValue('AgentExecutable','')}}finally{if($key){$key.Dispose()}}
+    return ''
+}
 function Start-AgentProcess([string]$Name,[string]$Program,[string[]]$Arguments){
     Start-Process -FilePath $Program -ArgumentList @($Arguments|ForEach-Object{ConvertTo-ConverterArgument $_}) -WorkingDirectory $run -WindowStyle Hidden -RedirectStandardOutput (Join-Path $run ($Name+'.jsonl')) -RedirectStandardError (Join-Path $run ($Name+'.errors')) -PassThru
 }
@@ -47,9 +53,7 @@ function Open-AgentGui([string]$Path){
         $clock=[Diagnostics.Stopwatch]::StartNew();$window=[IntPtr]::Zero
         while($clock.Elapsed.TotalSeconds -lt 15 -and $window -eq [IntPtr]::Zero){$window=[GuiBatchCheck]::Find($process.Id);Start-Sleep -Milliseconds 100}
         Assert-Agent ($window -ne [IntPtr]::Zero) '未找到本次 GUI 窗口'
-        # 登记在窗口创建完成后执行，等待它写入当前路径。
-        while($clock.Elapsed.TotalSeconds -lt 15 -and (Get-RegisteredConverter) -ne $Path){Start-Sleep -Milliseconds 100}
-        Assert-Agent ((Get-RegisteredConverter) -eq $Path) '正常 GUI 未登记自身位置'
+        Assert-Agent ((Get-AgentRegistration) -eq $registrationBeforeGui) '正常 GUI 意外改写了旧版程序登记'
         [void][GuiBatchCheck]::PostMessage($window,0x10,[IntPtr]::Zero,[IntPtr]::Zero)
         Assert-Agent ($process.WaitForExit(10000)) '本次 GUI 未正常关闭'
     }finally{if(-not $process.HasExited){[void][GuiBatchCheck]::PostMessage([GuiBatchCheck]::Find($process.Id),0x10,[IntPtr]::Zero,[IntPtr]::Zero);[void]$process.WaitForExit(10000)};$process.Dispose()}
@@ -62,7 +66,7 @@ try{
         try{Assert-Agent ($process.WaitForExit(5000) -and $process.ExitCode -eq $entry[2]) '轻量入口失败或弹窗阻塞'}finally{$process.Dispose()}
     }
     $description=Get-Content -LiteralPath (Join-Path $run 'describe.jsonl') -Raw|ConvertFrom-Json
-    Assert-Agent ($description.Version -eq '0.1.2' -and $description.CliContractVersion -eq 1 -and $description.BodyOmmlDefault) '程序版本或接口能力不符'
+    Assert-Agent ($description.Version -eq '0.1.3' -and $description.CliContractVersion -eq 1 -and $description.BodyOmmlDefault) '程序版本或接口能力不符'
     $wordAfter=@(Get-Process WINWORD -ErrorAction SilentlyContinue|Select-Object -ExpandProperty Id)
     Assert-Agent (-not @($wordAfter|Where-Object{$_ -notin $wordBefore}).Count) '能力查询启动了 Word'
     $evidence.Cases+=@{Name='native-query-help-and-errors';Status='PASSED';WordNotStarted=$true}
@@ -83,21 +87,24 @@ public static class AgentArgumentCheck {
     $key=[Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($keyPath);try{$key.DeleteValue('AgentExecutable',$false)}finally{$key.Dispose()}
     foreach($shell in @($shell5,$shell7)){
         $tag=if($shell -eq $shell5){'ps51'}else{'ps7'}
-        $result=Invoke-AgentScript ($tag+'-unbound') $shell 'connect.ps1' @() 1
-        Assert-Agent ($result.ErrorCode -eq 'NEEDS_CONNECTION') '未连接状态不明确'
+        $result=Invoke-AgentScript ($tag+'-bundled') $shell 'connect.ps1' @()
+        Assert-Agent ($result.ExecutablePath -eq (Join-Path $skill 'bin/DocxMathTypeBatch.exe')) 'Skill 未直接使用包内程序'
     }
     $portableFolder=Join-Path $run '独立程序 中文 & 空格';[void][IO.Directory]::CreateDirectory($portableFolder)
     $portable=Join-Path $portableFolder '转换器 已重命名.exe';Copy-Item -LiteralPath $exe -Destination $portable
+    $registrationBeforeGui=Get-AgentRegistration
     Open-AgentGui $portable
+    # 旧版 GUI 登记无关路径时，完整 Skill 仍只能使用自己的 EXE。
+    $key=[Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($keyPath);try{$key.SetValue('AgentExecutable',$portable)}finally{$key.Dispose()}
     foreach($shell in @($shell5,$shell7)){
         $tag=if($shell -eq $shell5){'ps51'}else{'ps7'}
-        $result=Invoke-AgentScript ($tag+'-registered') $shell 'connect.ps1' @()
-        Assert-Agent ($result.ExecutablePath -eq $portable) 'Skill 未读取 GUI 登记的位置'
+        $result=Invoke-AgentScript ($tag+'-ignores-registration') $shell 'connect.ps1' @()
+        Assert-Agent ($result.ExecutablePath -eq (Join-Path $skill 'bin/DocxMathTypeBatch.exe')) '旧绑定影响了包内程序选择'
     }
     $result=Invoke-AgentScript 'missing-file' $shell5 'connect.ps1' @('-ExePath',(Join-Path $run 'missing.exe')) 1
-    Assert-Agent ($result.ErrorCode -eq 'EXECUTABLE_NOT_FOUND' -and (Get-RegisteredConverter) -eq $portable) '失败连接改写了旧绑定'
+    Assert-Agent ($result.ErrorCode -eq 'EXECUTABLE_NOT_FOUND' -and (Get-AgentRegistration) -eq $portable) '失败查询改写了旧绑定'
     $result=Invoke-AgentScript 'wrong-program' $shell7 'connect.ps1' @('-ExePath',(Join-Path $env:WINDIR 'System32/whoami.exe')) 1
-    Assert-Agent ($result.ErrorCode -eq 'UNSUPPORTED_EXECUTABLE' -and (Get-RegisteredConverter) -eq $portable) '未拒绝其他产品'
+    Assert-Agent ($result.ErrorCode -eq 'UNSUPPORTED_EXECUTABLE' -and (Get-AgentRegistration) -eq $portable) '未拒绝其他产品'
     # 合成查询程序只模拟协议，不访问 Office；验证不兼容和有界查询超时。
     $fakeSource=Join-Path $run 'query-fixture.cs';$fakeExe=Join-Path $run 'query-fixture.exe'
     @'
@@ -113,15 +120,21 @@ class QueryFixture { static void Main() {if(Environment.GetEnvironmentVariable("
     $previousQuery=$env:DOCX_MATH_QUERY_TEST
     try{$env:DOCX_MATH_QUERY_TEST='timeout';$result=Invoke-AgentScript 'query-timeout' $shell5 'connect.ps1' @('-ExePath',$fakeExe) 1}finally{$env:DOCX_MATH_QUERY_TEST=$previousQuery}
     Assert-Agent ($result.ErrorCode -eq 'QUERY_TIMEOUT') '能力查询未有界结束'
-    $movedFolder=Join-Path $run '移动后的目录';[void][IO.Directory]::CreateDirectory($movedFolder)
-    $moved=Join-Path $movedFolder 'DocxMathTypeBatch.exe'
-    foreach($path in @($portable,$moved)){Assert-Agent ([IO.Path]::GetFullPath($path).StartsWith($run+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) '测试移动越界'}
-    Move-Item -LiteralPath $portable -Destination $moved
-    $result=Invoke-AgentScript 'moved-not-connected' $shell7 'connect.ps1' @() 1
-    Assert-Agent ($result.ErrorCode -eq 'EXECUTABLE_NOT_FOUND') '移动后未要求重连'
-    Open-AgentGui $moved
-    $null=Invoke-AgentScript 'moved-auto-connect' $shell5 'connect.ps1' @()
-    $null=Invoke-AgentScript 'explicit-bind' $shell7 'connect.ps1' @('-ExePath',$moved)
+    $movedSkill=Join-Path $run '移动后的完整 Skill'
+    foreach($path in @($skill,$movedSkill)){Assert-Agent ([IO.Path]::GetFullPath($path).StartsWith($run+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) '测试移动越界'}
+    Move-Item -LiteralPath $skill -Destination $movedSkill;$skill=$movedSkill
+    foreach($shell in @($shell5,$shell7)){
+        $tag=if($shell -eq $shell5){'ps51'}else{'ps7'}
+        $result=Invoke-AgentScript ($tag+'-moved-skill') $shell 'connect.ps1' @()
+        Assert-Agent ($result.ExecutablePath -eq (Join-Path $skill 'bin/DocxMathTypeBatch.exe')) 'Skill 移动后未按相对路径调用'
+    }
+    $bundled=Join-Path $skill 'bin/DocxMathTypeBatch.exe';$hiddenBundle=Join-Path $run 'temporarily-hidden.exe'
+    Move-Item -LiteralPath $bundled -Destination $hiddenBundle
+    try{
+        $result=Invoke-AgentScript 'missing-bundle' $shell7 'connect.ps1' @() 1
+        Assert-Agent ($result.ErrorCode -eq 'EXECUTABLE_NOT_FOUND') '包内缺少 EXE 时未明确报错'
+    }finally{Move-Item -LiteralPath $hiddenBundle -Destination $bundled}
+    Assert-Agent ((Get-AgentRegistration) -eq $portable) '包内调用改写了旧版本机登记'
 
     & python -B -X utf8 (Join-Path $PSScriptRoot 'helpers/test_experimental.py') review-fixture $run
     Assert-Agent ($LASTEXITCODE -eq 0) 'Agent 合成样本创建失败'

@@ -59,7 +59,7 @@ inline DocxLinkUpdates setDocxLinkUpdates(const std::wstring& path, const DocxLi
 }
 
 // 只在 GUI 工作进程输出计数；阶段首尾立即发送，中途最多每 150 ms 更新一次。
-inline bool guiStageProgress{},checkingSavedDocument{};
+inline bool guiStageProgress{},checkingSavedDocument{},experimentalFast{};
 struct StageProgress {
     const char* stage{};size_t total{},completed{};ULONGLONG lastUpdate{};
     StageProgress(const char* name,size_t count):stage(name),total(count) {
@@ -164,7 +164,7 @@ inline ComPtr<IDispatch> findLiteral(const ScanRangeContext& document, long star
     require(found.v.vt == VT_BOOL, "Word Find return type");
     if (found.v.boolVal == VARIANT_FALSE) return {};
     const auto actual = bounds(range.Get());
-    require(actual.start >= start && actual.end <= end && actual.end > actual.start && text(range.Get(), L"Text") == needle,
+    require(actual.start >= start && actual.end <= end && actual.end > actual.start && (experimentalFast||text(range.Get(), L"Text") == needle),
             "Literal Find remains inside requested range");
     return range;
 }
@@ -241,6 +241,7 @@ inline bool structuredMultiline(const std::wstring& value) {
 }
 // 只检查基本语法与环境配对，支持度仍由 MathType 的导入结果判定。
 inline std::wstring lexicalReason(const std::wstring& inner) {
+    if(experimentalFast)return {};
     if (whitespaceOnly(inner)) return L"EMPTY";
     if (inner.find_first_of(L"\f\a") != std::wstring::npos ||
         (inner.find_first_of(L"\r\n\v") != std::wstring::npos && !structuredMultiline(inner))) return L"UNSUPPORTED_LINE_BREAK";
@@ -259,6 +260,8 @@ inline std::wstring lexicalReason(const std::wstring& inner) {
             }
             ++index; continue;
         }
+        // MathType 会把注释直接排成公式内容，未转义的百分号必须保留原式。
+        if (character == L'%') return L"UNSUPPORTED_TEX_COMMENT";
         if (character == L'{') ++depth;
         if (character == L'}' && --depth < 0) return L"UNBALANCED_BRACES";
     }
@@ -272,14 +275,28 @@ inline double equationPoints(IDispatch* range,const ScanRangeContext& document,S
     // 混合字号读取内容首个非空字符，避免将 Word 的 wdUndefined 当成字号。
     if(!(points>=1&&points<=256)&&inner.start>=0&&inner.end>inner.start){
         auto characters=get(docRange(document,inner.start,inner.end).Get(),L"Characters");
-        for(long i=1;i<=integer(characters.Get(),L"Count");++i){auto character=collectionItem(characters.Get(),i);if(whitespaceOnly(text(character.Get(),L"Text")))continue;
+        const long characterCount=integer(characters.Get(),L"Count");
+        for(long i=1;i<=characterCount;++i){auto character=collectionItem(characters.Get(),i);if(whitespaceOnly(text(character.Get(),L"Text")))continue;
             auto effective=invoke(get(character.Get(),L"Font").Get(),L"Size",DISPATCH_PROPERTYGET);
             points=effective.v.vt==VT_R4?effective.v.fltVal:effective.v.vt==VT_R8?effective.v.dblVal:effective.v.vt==VT_I4?effective.v.lVal:0;break;}
     }
     return points;
 }
+// 只识别括号内的数字及章-序号；单位、说明和数学表达式不作为手动编号。
+inline bool manualEquationNumber(const std::wstring& value) {
+    const auto first=value.find_first_not_of(L" \t\r\n\v\f\u00a0\u3000"),last=value.find_last_not_of(L" \t\r\n\v\f\u00a0\u3000");
+    if(first==std::wstring::npos||last<=first+1)return false;
+    if(!((value[first]==L'('&&value[last]==L')')||(value[first]==L'（'&&value[last]==L'）')))return false;
+    bool digit=false;
+    for(auto i=first+1;i<last;++i){
+        const auto c=value[i];if(c>=L'0'&&c<=L'9'){digit=true;continue;}
+        if((c==L'-'||c==L'.'||c==L'－')&&digit){digit=false;continue;}return false;
+    }
+    return digit;
+}
+
 inline void addItem(const ScanRangeContext& document, Span span, Span inner, TokenKind kind, const std::wstring& reason,
-                    long paragraph, ScanResult& result, const std::wstring& paragraphText) {
+                    long paragraph, ScanResult& result, const std::wstring& paragraphText, Span allowed) {
     auto range = docRange(document, span.start, span.end);
     ScanItem item;
     item.span = span; item.paragraph = paragraph; item.reason = reason; item.ready = reason.empty();
@@ -291,6 +308,7 @@ inline void addItem(const ScanRangeContext& document, Span span, Span inner, Tok
                      kind == TokenKind::RepairedBracketOpen ? L"[\\]" :
                      kind == TokenKind::ParenOpen || kind == TokenKind::ParenClose ? L"\\(\\)" : L"AMBIGUOUS";
     item.display = kind != TokenKind::Dollar && kind != TokenKind::ParenOpen && kind != TokenKind::ParenClose && kind != TokenKind::AmbiguousDollars;
+    Span manualSpan{};bool manualNumber=false;
     if (item.ready && !paragraphText.empty()) {
         auto context = paragraphText;
         if (item.source.find(L'\r') != std::wstring::npos) {
@@ -301,15 +319,24 @@ inline void addItem(const ScanRangeContext& document, Span span, Span inner, Tok
         }
         // 只比较文本判断上下文，不用字符串下标推算 Word Range 坐标。
         const auto position = context.find(item.source);
-        item.display = position != std::wstring::npos && whitespaceOnly(context.substr(0, position)) &&
-            whitespaceOnly(context.substr(position + item.source.size()));
+        const bool leadingOnly=position!=std::wstring::npos&&whitespaceOnly(context.substr(0,position));
+        const auto trailing=leadingOnly?context.substr(position+item.source.size()):std::wstring();
+        if(leadingOnly&&manualEquationNumber(trailing)){
+            auto paragraphs=get(range.Get(),L"Paragraphs");auto first=get(collectionItem(paragraphs.Get(),1).Get(),L"Range");auto last=get(collectionItem(paragraphs.Get(),integer(paragraphs.Get(),L"Count")).Get(),L"Range");
+            manualSpan={integer(first.Get(),L"Start"),integer(last.Get(),L"End")-1};
+            // 编号和公式须在同一安全片段内，不能跨过域、控件或其他公式。
+            manualNumber=manualSpan.start>=allowed.start&&manualSpan.end<=allowed.end;
+        }
+        item.display=leadingOnly&&(whitespaceOnly(trailing)||manualNumber);
         if (kind == TokenKind::RepairedBracketOpen && !item.display) { item.ready = false; item.reason = L"UNSAFE_MISSING_DELIMITER"; }
     }
     if (!selectedEquation(item.display)) return;
     if(item.ready&&item.display&&!paragraphText.empty()){
-        // 独占段落的外侧空白一并替换为单个原生前导 Tab，避免原有多个 Tab 把公式推向右边。
-        auto paragraphs=get(range.Get(),L"Paragraphs");auto first=get(collectionItem(paragraphs.Get(),1).Get(),L"Range");auto last=get(collectionItem(paragraphs.Get(),integer(paragraphs.Get(),L"Count")).Get(),L"Range");
-        item.span={integer(first.Get(),L"Start"),integer(last.Get(),L"End")-1};item.source=text(docRange(document,item.span.start,item.span.end).Get(),L"Text");
+        // 外侧空白仅在当前安全片段内扩展，不能吞掉空结果域或空白内容控件。
+        if(manualNumber)item.span=manualSpan;
+        else{auto paragraphs=get(range.Get(),L"Paragraphs");auto first=get(collectionItem(paragraphs.Get(),1).Get(),L"Range");auto last=get(collectionItem(paragraphs.Get(),integer(paragraphs.Get(),L"Count")).Get(),L"Range");
+            item.span={std::max(integer(first.Get(),L"Start"),allowed.start),std::min(integer(last.Get(),L"End")-1,allowed.end)};}
+        item.source=text(docRange(document,item.span.start,item.span.end).Get(),L"Text");
     }
     item.inner = normalizedTex(item.inner);
     if(!document.captureSize){result.items.push_back(std::move(item));return;}
@@ -320,17 +347,18 @@ inline void addItem(const ScanRangeContext& document, Span span, Span inner, Tok
 inline long scanSegment(const ScanRangeContext& document, Span segment, long paragraph, ScanResult& result, long boundary, const std::wstring& paragraphText) {
     const auto source=text(docRange(document,segment.start,segment.end).Get(),L"Text");
     if (!hasTexMarkers(source)) return segment.end;
+    const Span allowed{segment.start,boundary};
     Token opening{};
     bool haveOpening = false;
     for (const auto& token : tokens(document, segment, source)) {
         if (token.kind == TokenKind::AmbiguousDollars || token.kind == TokenKind::EmptyDisplay) {
             addItem(document, {haveOpening ? opening.span.start : token.span.start, token.span.end}, {-1, -1},
-                    token.kind, token.kind == TokenKind::EmptyDisplay && !haveOpening ? L"EMPTY" : L"AMBIGUOUS_DOLLARS", paragraph, result, paragraphText);
+                    token.kind, token.kind == TokenKind::EmptyDisplay && !haveOpening ? L"EMPTY" : L"AMBIGUOUS_DOLLARS", paragraph, result, paragraphText, allowed);
             haveOpening = false; continue;
         }
         if (!haveOpening) {
             if (token.kind == TokenKind::BracketClose || token.kind == TokenKind::ParenClose)
-                addItem(document, token.span, {-1, -1}, token.kind, L"UNMATCHED_CLOSE", paragraph, result, paragraphText);
+                addItem(document, token.span, {-1, -1}, token.kind, L"UNMATCHED_CLOSE", paragraph, result, paragraphText, allowed);
             else { opening = token; haveOpening = true; }
             continue;
         }
@@ -338,10 +366,10 @@ inline long scanSegment(const ScanRangeContext& document, Span segment, long par
         if (closes) {
             const Span inner{opening.span.end, token.span.start};
             addItem(document, {opening.span.start, token.span.end}, inner, opening.kind,
-                    lexicalReason(text(docRange(document, inner.start, inner.end).Get(), L"Text")), paragraph, result, paragraphText);
+                    lexicalReason(text(docRange(document, inner.start, inner.end).Get(), L"Text")), paragraph, result, paragraphText, allowed);
         } else {
             // 混用定界符时消费冲突标记，保守拒绝，不生成互相覆盖的可转换范围。
-            addItem(document, {opening.span.start, token.span.end}, {-1, -1}, opening.kind, L"MIXED_DELIMITERS", paragraph, result, paragraphText);
+            addItem(document, {opening.span.start, token.span.end}, {-1, -1}, opening.kind, L"MIXED_DELIMITERS", paragraph, result, paragraphText, allowed);
         }
         haveOpening = false;
     }
@@ -357,10 +385,10 @@ inline long scanSegment(const ScanRangeContext& document, Span segment, long par
             const auto all=tokens(document,{opening.span.start,closing.end},text(docRange(document,opening.span.start,closing.end).Get(),L"Text"));
             if(body.find_first_of(L"\r\n\v")!=std::wstring::npos && structuredMultiline(body) && all.size()==2 &&
                 tokensMatch(opening.kind, all.back().kind)) {
-                addItem(document,{opening.span.start,closing.end},inner,opening.kind,lexicalReason(body),paragraph,result,paragraphText);return closing.end;
+                addItem(document,{opening.span.start,closing.end},inner,opening.kind,lexicalReason(body),paragraph,result,paragraphText,allowed);return closing.end;
             }
         }
-        addItem(document, {opening.span.start, segment.end}, {-1, -1}, opening.kind, L"UNMATCHED_OPEN", paragraph, result, paragraphText);
+        addItem(document, {opening.span.start, segment.end}, {-1, -1}, opening.kind, L"UNMATCHED_OPEN", paragraph, result, paragraphText, allowed);
     }
     return segment.end;
 }
@@ -402,10 +430,13 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
     if (result.protectedDocument) return result;
     auto content = get(document, L"Content");
     require(integer(content.Get(), L"StoryType") == 1, "Main story only");
+    const long contentEnd=integer(content.Get(),L"End");
     std::vector<Span> excluded,protectedRanges,ommlExcluded;
-    auto exclude = [&](IDispatch* range,bool protect=true,bool blockOmml=true) {
+    auto exclude = [&](IDispatch* range,bool protect=true,bool blockOmml=true,bool control=false) {
         require(integer(range, L"StoryType") == 1, "Excluded main story range");
         excluded.push_back(bounds(range));
+        // ContentControl.Range 只含内容，首尾各一位的控件标记也必须排除。
+        if(control){excluded.back().start=std::max(0L,excluded.back().start-1);excluded.back().end=std::min(contentEnd,excluded.back().end+1);}
         if(protect)protectedRanges.push_back(excluded.back());
         if(includeOmml&&protect&&blockOmml)ommlExcluded.push_back(excluded.back());
     };
@@ -432,7 +463,7 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
                               std::make_pair(L"ContentControls", &result.controls)}) {
         auto collection = get(content.Get(), entry.first);
         *entry.second = integer(collection.Get(), L"Count");
-        for (long index = 1; index <= *entry.second; ++index) exclude(get(collectionItem(collection.Get(), index).Get(), L"Range").Get(),true,wcscmp(entry.first,L"OMaths")!=0);
+        for (long index = 1; index <= *entry.second; ++index) exclude(get(collectionItem(collection.Get(), index).Get(), L"Range").Get(),true,wcscmp(entry.first,L"OMaths")!=0,wcscmp(entry.first,L"ContentControls")==0);
     }
     result.bodyOmml=includeOmml&&result.nativeMath>0;
     auto fields = get(content.Get(), L"Fields");
@@ -472,7 +503,9 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
         require(savedParagraphs.size()==static_cast<size_t>(result.paragraphs),"Saved paragraph enumeration count");
     }
     StageProgress paragraphProgress(checkingSavedDocument?"RESCAN_TEXT":"SCAN_TEXT",static_cast<size_t>(result.paragraphs));
-    const long contentEnd=integer(content.Get(),L"End");long consumed{};size_t excludedIndex{};
+    // OMML 上下文复用本轮已经读取的段落文本，不为识别手动编号再次读取整段。
+    std::vector<std::wstring> ommlParagraphText(result.bodyOmml?static_cast<size_t>(result.paragraphs):0);
+    long consumed{};size_t excludedIndex{};
     for (long index = 1; index <= result.paragraphs; ++index) {
         auto paragraph = checkingSavedDocument?savedParagraphs[static_cast<size_t>(index-1)]:collectionItem(paragraphs.Get(), index);
         auto range = get(paragraph.Get(), L"Range");
@@ -483,6 +516,7 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
         while(excludedIndex<excluded.size()&&excluded[excludedIndex].end<=paragraphSpan.start)++excludedIndex;
         if(paragraphSpan.start>=paragraphSpan.end || (excludedIndex<excluded.size()&&excluded[excludedIndex].start<=paragraphSpan.start&&excluded[excludedIndex].end>=paragraphSpan.end)) {paragraphProgress.advance();continue;}
         const auto paragraphText=text(range.Get(),L"Text");
+        if(result.bodyOmml)ommlParagraphText[static_cast<size_t>(index-1)]=paragraphText;
         if (!hasTexMarkers(paragraphText)) {paragraphProgress.advance();continue;}
         // Word 单元格末尾的文本可能同时含 \r\a，一个真实字符范围可以返回两个标记。
         while (paragraphSpan.end > paragraphSpan.start) {
@@ -509,16 +543,29 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
         for(long i=1;i<=result.nativeMath;++i){taskPulse();auto math=collectionItem(maths.Get(),i);auto range=get(math.Get(),L"Range");const auto span=bounds(range.Get());
             if(std::any_of(ommlExcluded.begin(),ommlExcluded.end(),[&](Span block){return block.start<span.end&&block.end>span.start;}))continue;
             ScanItem item;item.span=span;item.ommlOrdinal=i;item.delimiter=L"OMML";item.display=integer(math.Get(),L"Type")==0;item.ready=true;
+            // 段落位置来自已记录的 Word 范围；文本匹配只判断上下文，不推算 Word 字符坐标。
+            const auto paragraphIndex=static_cast<size_t>(std::upper_bound(result.paragraphStarts.begin(),result.paragraphStarts.end(),span.start)-result.paragraphStarts.begin()-1);
+            item.paragraph=static_cast<long>(paragraphIndex+1);
+            const Span limits{result.paragraphStarts[paragraphIndex],paragraphIndex+1<result.paragraphStarts.size()?result.paragraphStarts[paragraphIndex+1]:contentEnd};
+            auto nativeText=text(range.Get(),L"Text");const auto& context=ommlParagraphText[paragraphIndex];const auto at=context.find(nativeText);
+            const bool leadingOnly=!nativeText.empty()&&at!=std::wstring::npos&&whitespaceOnly(context.substr(0,at));
+            const bool manual=leadingOnly&&manualEquationNumber(context.substr(at+nativeText.size()))&&
+                std::none_of(protectedRanges.begin(),protectedRanges.end(),[&](Span block){return block.start<limits.end&&block.end>limits.start&&(block.start!=span.start||block.end!=span.end);})&&
+                std::none_of(ommlExcluded.begin(),ommlExcluded.end(),[&](Span block){return block.start<limits.end&&block.end>limits.start;});
+            if(manual){item.display=true;item.span={limits.start,limits.end-1};}
+            else if(item.display){
+                if(whitespaceOnly(text(docRange(document,limits.start,span.start).Get(),L"Text"))&&whitespaceOnly(text(docRange(document,span.end,limits.end).Get(),L"Text"))){
+                    item.span={limits.start,limits.end-1};
+                    // OMML 的段外空白同样不能跨过已记录的域和控件边界。
+                    for(const auto block:ommlExcluded){if(block.end<=span.start)item.span.start=std::max(item.span.start,block.end);if(block.start>=span.end)item.span.end=std::min(item.span.end,block.start);}
+                }}
             if(!selectedEquation(item.display))continue;
             item.points=equationPoints(range.Get(),ScanRangeContext{document},span);
-            item.paragraph=integer(get(docRange(document,0,span.start+1).Get(),L"Paragraphs").Get(),L"Count");
-            if(item.display){auto para=get(collectionItem(get(range.Get(),L"Paragraphs").Get(),1).Get(),L"Range");const auto limits=bounds(para.Get());
-                if(whitespaceOnly(text(docRange(document,limits.start,span.start).Get(),L"Text"))&&whitespaceOnly(text(docRange(document,span.end,limits.end).Get(),L"Text")))item.span={limits.start,limits.end-1};}
-            item.source=text(docRange(document,item.span.start,item.span.end).Get(),L"Text");result.items.push_back(std::move(item));
+            item.source=item.span.start==span.start&&item.span.end==span.end?std::move(nativeText):text(docRange(document,item.span.start,item.span.end).Get(),L"Text");result.items.push_back(std::move(item));
         }
     }
     std::sort(result.items.begin(), result.items.end(), [](const ScanItem& a, const ScanItem& b) { return a.span.start < b.span.start; });
-    long previousEnd = -1;
+    if(!experimentalFast){long previousEnd = -1;
     if(checkingSavedDocument)std::puts("TIMING_STAGE RESCAN_RANGES");
     StageProgress rangeProgress(checkingSavedDocument?"RESCAN_RANGES":"SCAN_RANGES",result.items.size());
     for (const auto& item : result.items) {
@@ -526,6 +573,7 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
         require(text(docRange(document, item.span.start, item.span.end).Get(), L"Text") == item.source, "All reported ranges rechecked");
         previousEnd = item.span.end;
         rangeProgress.advance();
+    }
     }
     return result;
 }
@@ -661,8 +709,29 @@ inline void emitGuiScan(const ScanResult& result) {
     std::printf("UI_SCAN_COUNTS %ld %td %td %td\n",result.existingMathType,ready,inlines,rejected);
 }
 
+struct MathAccent {wchar_t mark,symbol;const wchar_t* tex;};
+inline const MathAccent* mathAccent(wchar_t mark) {
+    // 组合码用于识别原文，symbol 采用 MathType 原生导入能识别的顶饰码。
+    static const MathAccent accents[]={
+        {0x0300,L'`',L"\\grave"},{0x0301,0x00b4,L"\\acute"},{0x0302,L'^',L"\\hat"},
+        {0x0303,L'~',L"\\tilde"},{0x0304,L'-',L"\\bar"},{0x0306,0x2323,L"\\breve"},
+        {0x0307,0x0307,L"\\dot"},{0x0308,0x0308,L"\\ddot"},{0x030a,0x2218,L"\\overset{\\circ}"},
+        {0x030c,0x02c7,L"\\check"},{0x20db,0x20db,L"\\dddot"},{0x20dc,0x20dc,L"\\ddddot"},
+        {0x20d6,0x2190,L"\\overleftarrow"},{0x20d7,0x2192,L"\\vec"},{0x20e1,0x2194,L"\\overleftrightarrow"}
+    };
+    for(const auto& accent:accents)if(accent.mark==mark)return &accent;
+    return nullptr;
+}
+inline std::wstring decomposedMathCharacter(wchar_t character) {
+    if(character<128||(character>=0xd800&&character<=0xdfff))return std::wstring(1,character);
+    wchar_t buffer[8]{};const int count=FoldStringW(MAP_COMPOSITE,&character,1,buffer,8);
+    require(count>0,"Decompose Unicode math character");
+    // 只展开已支持的顶饰；其他文字、兼容字符及数学字体保持原样。
+    if(count>1&&std::all_of(buffer+1,buffer+count,[](wchar_t c){return mathAccent(c)!=nullptr;}))return std::wstring(buffer,count);
+    return std::wstring(1,character);
+}
 inline std::wstring compatibleTex(std::wstring value) {
-    if (value.find(L'\\') == std::wstring::npos) return value;
+    if (value.find(L'\\') == std::wstring::npos&&std::all_of(value.begin(),value.end(),[](wchar_t c){return c<128;})) return value;
     struct Alignment { size_t begin{}, length{}, columns{1}, maximum{1}; int environment{}, braces{}; bool centered{}; };
     struct Replacement { size_t start{}, length{}; std::wstring text; };
     std::vector<Alignment> aligned;
@@ -673,7 +742,7 @@ inline std::wstring compatibleTex(std::wstring value) {
         {L"bm",L"\\boldsymbol"},{L"textnormal",L"\\text"},{L"textup",L"\\text"},{L"textmd",L"\\text"},
         {L"mathup",L"\\mathrm"},{L"lvert",L"\\vert"},{L"rvert",L"\\vert"},
         {L"mleft",L"\\left"},{L"mright",L"\\right"},{L"dotsc",L"\\ldots"},{L"dotsm",L"\\cdots"},{L"dotso",L"\\ldots"},
-        {L"coloneqq",L":="},{L"eqqcolon",L"=:"}
+        {L"coloneqq",L":="},{L"eqqcolon",L"=:"},{L"widetilde",L"\\tilde"},{L"mathring",L"\\overset{\\circ}"}
     };
     for (size_t i = 0; i < value.size(); ++i) {
         auto topLevel = [&] { return !aligned.empty() && environment == aligned.back().environment && braces == aligned.back().braces; };
@@ -734,6 +803,15 @@ inline std::wstring compatibleTex(std::wstring value) {
                 }
             }
             i=finish-1;continue;
+        }
+        if(iswalnum(value[i])) {
+            auto atom=decomposedMathCharacter(value[i]);
+            const auto base=atom.front();std::wstring marks=atom.substr(1);size_t finish=i+1;
+            while(finish<value.size()&&mathAccent(value[finish]))marks+=value[finish++];
+            if(!marks.empty()) {
+                atom.assign(1,base);for(const auto mark:marks)atom=std::wstring(mathAccent(mark)->tex)+L"{"+atom+L"}";
+                replacements.push_back({i,finish-i,std::move(atom)});i=finish-1;continue;
+            }
         }
         if (value[i] == L'&' && topLevel()) ++aligned.back().columns;
         if (value[i] == L'{') ++braces;

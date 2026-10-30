@@ -15,17 +15,6 @@ function Write-ConverterFailure($Record) {
     Write-ConverterJson ([ordered]@{SchemaVersion=1;Event='FINISHED';Status='FAILED';ErrorCode=$code;Message=$Record.Exception.Message})
 }
 
-function Get-RegisteredConverter {
-    $key=[Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\DocxMathTypeBatch')
-    try{if($key){return [string]$key.GetValue('AgentExecutable','')}}finally{if($key){$key.Dispose()}}
-    return ''
-}
-
-function Set-RegisteredConverter([string]$Path) {
-    $key=[Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Software\DocxMathTypeBatch')
-    try{$key.SetValue('AgentExecutable',$Path,[Microsoft.Win32.RegistryValueKind]::String)}finally{$key.Dispose()}
-}
-
 function ConvertTo-ConverterArgument([string]$Value) {
     # 按 Windows 命令行规则处理引号和尾反斜杠，参数内容不会被当作 PowerShell 代码。
     $quoted=[Text.StringBuilder]::new();[void]$quoted.Append([char]34);$slashes=0
@@ -39,10 +28,10 @@ function ConvertTo-ConverterArgument([string]$Value) {
 }
 
 function Get-ConverterConnection([string]$ExePath) {
-    if(-not $ExePath){$ExePath=Get-RegisteredConverter}
-    if(-not $ExePath){Throw-ConverterError 'NEEDS_CONNECTION' '尚未连接转换器。请正常打开 EXE 一次，或用 connect.ps1 -ExePath 指定位置。'}
+    # 直接使用随 Skill 分发的程序，不读取注册表或搜索外部安装位置。
+    if(-not $ExePath){$ExePath=Join-Path $PSScriptRoot '../bin/DocxMathTypeBatch.exe'}
     $path=[IO.Path]::GetFullPath($ExePath)
-    if(-not [IO.File]::Exists($path)){Throw-ConverterError 'EXECUTABLE_NOT_FOUND' '已登记的 EXE 不存在，请打开新位置的程序或重新连接。'}
+    if(-not [IO.File]::Exists($path)){Throw-ConverterError 'EXECUTABLE_NOT_FOUND' '程序文件缺失。请重新解压包含 bin/DocxMathTypeBatch.exe 的完整 Skill 包。'}
     # 旧版没有产品资源；先读文件身份，避免向旧 GUI 发送不认识的参数而弹窗。
     $identity=[Diagnostics.FileVersionInfo]::GetVersionInfo($path)
     if($identity.ProductName -ne 'DocxMathTypeBatch'){Throw-ConverterError 'UNSUPPORTED_EXECUTABLE' '此文件不是支持连接协议的 DocxMathTypeBatch，请选择新版单文件 EXE。'}
@@ -71,6 +60,8 @@ function Get-ConverterWorkerError([int]$ExitCode,[string]$LogPath) {
             for($i=0;$i -lt $bytes.Length;$i++){$bytes[$i]=[Convert]::ToByte($hex.Substring(2*$i,2),16)}
             $message=[Text.Encoding]::UTF8.GetString($bytes)
             if($message -eq 'MATHTYPE_TASK_BUSY'){$code='BUSY';$message='另一个转换正在进行，请等待它结束后再调用。'}
+            elseif($message -eq 'Disable revision tracking in source before batch conversion'){$code='TRACK_CHANGES_ENABLED';$message='文件开启修订，请先关闭修订并保存后重试。'}
+            elseif($message -eq 'Protected document cannot be converted'){$code='DOCUMENT_PROTECTED';$message='文件已限制编辑，请解除编辑限制后重试。'}
         }
     }
     return [pscustomobject]@{Code=$code;Message=$message}

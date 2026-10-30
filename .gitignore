@@ -66,6 +66,7 @@
 !/tests/test-cancel.ps1
 !/tests/test-diagnostics.ps1
 !/tests/test-experimental.ps1
+!/tests/test-experimental-fast.ps1
 !/tests/test-faults.ps1
 !/tests/test-gui.ps1
 !/tests/test-installation.ps1
@@ -87,6 +88,7 @@
 /临时文件夹/
 /build/
 /dist/
+/skills/docx-latex-to-mathtype/bin/
 /tests/output/
 **/__pycache__/
 *.doc

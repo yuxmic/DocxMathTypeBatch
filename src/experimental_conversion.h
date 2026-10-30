@@ -25,7 +25,7 @@ struct ExperimentalResult {
     std::vector<ExperimentalItem> items;
     std::vector<ProcessingIssue> issues;
     std::vector<BodyPositionShift> bodyPositionShifts;
-    size_t succeeded{},failed{},rejected{},unattempted{};
+    size_t succeeded{},failed{},failedUnverified{},rejected{},unattempted{};
     bool enabled{};
     // NO_TARGETS/NO_CHANGES 表示实验阶段直接复用正文已核验结果，没有保存重开。
     std::wstring skipped;
@@ -37,5 +37,5 @@ ExperimentalResult convertExperimental(WordSession& word,MathTypeApi& api,const 
 // 只读文档上的低成本存在性判断：启用区域内没有任何可转换候选时返回 false。
 bool experimentalTargetsPresent(IDispatch* document,const std::wstring& path,const ExperimentalOptions& options,bool reverse);
 // 正文与其他区域共用 OMML 适配；字号、布局和编号由所属流程决定。
-std::wstring ommlMathML(WordSession& word,IDispatch* range,ComPtr<IXMLDOMDocument2>& stylesheet,bool display);
+std::wstring ommlMathML(WordSession& word,const std::wstring& sourcePackage,ComPtr<IXMLDOMDocument2>& stylesheet,bool display);
 std::wstring ommlSource(IDispatch* range);

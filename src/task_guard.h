@@ -29,7 +29,7 @@ struct TaskTrackedFile {
 };
 struct TaskSharedState {
     alignas(8) volatile LONG64 heartbeat{};
-    volatile LONG files{}, wordReady{}, mathReady{}, pendingPrefs{}, recordSaved{}, linksChanged{}, committed{}, cancelRequested{};
+    volatile LONG files{}, wordReady{}, mathReady{}, pendingPrefs{}, recordSaved{}, linksChanged{}, committed{}, cancelRequested{}, wordQuitComplete{};
     DWORD wordPid{}, mathPid{}; ULONGLONG wordStarted{}, mathStarted{}; bool originalLinks{}, scanTask{};
     wchar_t job[160]{}, recoveryPath[32768]{};
     TaskRecoveryRecord recovery;
@@ -230,6 +230,16 @@ inline TaskHandle* taskVerifiedWord(TaskSharedState& state, bool terminating) {
     } // Job 已按登记身份请求退出时只等待，不重复查询正在卸载的映像。
     return process.release();
 }
+inline void taskFinishOwnedWord(TaskSharedState& state,bool terminating,DWORD code) {
+    std::unique_ptr<TaskHandle> word(taskVerifiedWord(state,terminating));
+    if(word&&WaitForSingleObject(word->value,0)==WAIT_TIMEOUT){
+        // 只处理已核实归属的 Word；退出请求与自然退出竞争时，按实际退出结果判断。
+        const bool requested=TerminateProcess(word->value,code?code:1)!=0;
+        const auto exited=WaitForSingleObject(word->value,5000);
+        require((requested||exited==WAIT_OBJECT_0)&&exited==WAIT_OBJECT_0,"Verified task Word exits");
+        std::puts("OWNED_WORD_HARD_EXIT_PASSED");
+    }
+}
 inline void taskEndBlockedWorker(TaskSharedState& state, HANDLE job, HANDLE worker, DWORD code) {
     // 先让任务 Word 断连，给后端一次有界的异常展开/MTTermAPI 机会，避免硬杀积累 SDK 会话。
     std::unique_ptr<TaskHandle> word(taskVerifiedWord(state, false));
@@ -391,6 +401,11 @@ inline int superviseTaskArguments(const std::vector<std::wstring>& arguments, bo
                 code=TaskCancelExit;terminated=cancelled=true;std::puts("TASK_CANCEL_REQUESTED");break;
             }
             foreground.poll();
+            if(InterlockedCompareExchange(&state.wordQuitComplete,0,1)==1){
+                // 快速模式已保存、关闭文档并结束 MathType 接口，提前完成原本在进程末尾的 Word 收尾。
+                const auto fastWordExitStarted=GetTickCount64();taskFinishOwnedWord(state,false,0);
+                std::printf("FAST_WORD_EXIT_MS=%llu\n",GetTickCount64()-fastWordExitStarted);
+            }
             // 本监管进程只有这一线程读取管道；仅按可用字节数读取，绝不等待工作进程输出。
             DWORD available{}; if (PeekNamedPipe(read.value, nullptr, 0, nullptr, &available, nullptr) && available) {
                 char buffer[4096]{}; DWORD count{};
@@ -433,15 +448,13 @@ inline int superviseTaskArguments(const std::vector<std::wstring>& arguments, bo
     } catch (...) { TerminateJobObject(job.value, 1); WaitForSingleObject(process.value, 5000); throw; }
     if (!recoveryOnly) SetConsoleCtrlHandler(taskConsoleHandler, FALSE);
     require(WaitForSingleObject(process.value, 5000) == WAIT_OBJECT_0, "Supervised worker exits after bounded termination");
-    std::unique_ptr<TaskHandle> word(taskVerifiedWord(state, terminated));
-    if (word && WaitForSingleObject(word->value, 0) == WAIT_TIMEOUT) {
-        // Job 终止是异步请求；不要对已经进入退出流程的 Word 再次终止并把 ACCESS_DENIED 当失败。
-        const bool requested = TerminateProcess(word->value, code ? code : 1) != 0;
-        const auto exited = WaitForSingleObject(word->value, 5000);
-        require((requested || exited == WAIT_OBJECT_0) && exited == WAIT_OBJECT_0, "Verified task Word exits");
-        std::puts("OWNED_WORD_HARD_EXIT_PASSED");
-    }
+    // 分别记录进程退出与副本清理，避免把退出等待误算为公式转换耗时。
+    const auto wordExitStarted=GetTickCount64();
+    taskFinishOwnedWord(state,terminated,code);
+    std::printf("TASK_WORD_EXIT_MS=%llu\n",GetTickCount64()-wordExitStarted);
+    const auto fileCleanupStarted=GetTickCount64();
     if (!taskCleanupFiles(state)) {taskError("TASK_COPY_CLEANUP_FAILED");code = 1;}
+    std::printf("TASK_FILES_CLEANUP_MS=%llu\n",GetTickCount64()-fileCleanupStarted);
     if (!recoveryOnly&&!cancelled) {
         const bool pending = InterlockedCompareExchange(&state.pendingPrefs, 0, 0) != 0;
         if (!taskRecover(mapping, mappingName, pending)) { taskError("PREFERENCE_RECOVERY_REQUIRED"); if (!code) code = TaskRecoveryExit; }

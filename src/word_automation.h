@@ -271,14 +271,20 @@ struct WordSession {
             document.Reset();
         }
         if (owned) {
+            const auto started=GetTickCount64();
             invoke(application.Get(), L"Quit", DISPATCH_METHOD, {0L});
             owned = false;
+            std::printf("WORD_QUIT_MS=%llu\n",GetTickCount64()-started);
             std::puts("OWNED_WORD_QUIT_PASSED");
         }
     }
     ~WordSession() {
         try { shutdown(); }
         catch (...) { std::puts("OWNED_WORD_QUIT_FAILED"); }
+        // 退出后的代理释放可能等待 Word；单独计时，不改变原有释放责任。
+        const auto started=GetTickCount64();
+        linkOptions.Reset();document.Reset();application.Reset();
+        std::printf("WORD_COM_RELEASE_MS=%llu\n",GetTickCount64()-started);
     }
 };
 

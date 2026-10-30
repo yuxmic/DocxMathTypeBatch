@@ -1,12 +1,12 @@
-# Skill v0.1 调用约定
+# Skill v0.2 调用约定
 
-要求 EXE 支持 `CliContractVersion: 1`、报告 `SchemaVersion: 1`。EXE 与 Skill 可以分别升级；连接脚本按接口版本检查兼容性。此包不包含 EXE、文档样本、本机配置或日志。
+要求包内 EXE 支持 `CliContractVersion: 1`、报告 `SchemaVersion: 1`。Skill 包内包含已匹配的 `bin/DocxMathTypeBatch.exe`，更新时替换完整包；不包含文档样本、本机配置或日志。
 
-## 首次连接
+## 程序路径与查询
 
-正常 GUI 启动后，EXE 把自身完整路径登记到当前用户设置 `Software\DocxMathTypeBatch` 的 `AgentExecutable`。最近一次正常 GUI 启动或显式连接的版本成为已绑定版本；worker、查询与 UI 测试不更新登记。
+转换脚本使用相对于 Skill 脚本目录的 `../bin/DocxMathTypeBatch.exe`，不读取注册表，也不搜索安装位置。整个 Skill 目录移动后无需重新连接，普通 GUI 启动也不写入程序路径登记。
 
-`connect.ps1` 不带参数时读取并检查绑定；传入 `-ExePath` 时先验证产品身份、查询接口，再保存新绑定。失败不改写旧绑定。路径失效时正常打开新位置的 EXE 一次，或显式重新连接。
+`connect.ps1` 仅用于诊断包内程序身份及接口；开发排查可临时传入 `-ExePath` 查询另一个文件，不保存路径，也不影响后续转换脚本。包内 EXE 缺失时返回 `EXECUTABLE_NOT_FOUND`，重新解压完整 Skill 包即可。
 
 连接前先读取 EXE 文件资源的产品名称；旧版或其他程序不会被拿来探测不认识的 GUI 参数。`--describe --json` 在 5 秒内返回静态身份与能力，不启动 Word。查询超时只结束该查询进程。
 
@@ -25,18 +25,21 @@
 | `-InlineSpacing`、`-DisplaySpacing` | 默认 follow；single、onehalf、double、exact:20、atleast:20、multiple:1.25 |
 | `-DisplayDelimiter bracket/dollar` | 反向行外使用 `\[...\]` 或 `$$...$$`；行内使用 `$...$` |
 | `-Tables`、`-Textboxes`、`-Headers`、`-Notes` | 显式启用四类额外位置，默认关闭 |
+| `-FastConversion` | 默认关闭；实验性直接保存模式，跳过转换前内容/语法核验、逐式复查及保存后重开重扫/资产核验，可能漏转或错位 |
 | `-TaskDirectory` | 可选全新任务目录；默认创建本机用户数据下的独立目录 |
 | `-TimeoutSeconds` | 无进展超时，5–3600 秒，默认 120；不是整份任务总时限 |
 
 编号格式支持 `#C1`、`#S1`、`#E1`，末尾可为 `a/A/i/I`，并且仅含一个 `#E`。章、节、起始值作用于目标序列；已有编号保留其原生显示格式。反向不支持字号、右编号和段落行距设置。
 
-额外位置仅转换公式；正文 OMML 默认参与主线且无需单独开关。表格/文本框开关需要其父区域也启用。保护、修订和普通域等仍构成边界。LaTeX 文本以 ASCII 为支持范围，非 ASCII 导入保留原文；OMML 使用 Office 原生转换资源。
+额外位置仅转换公式；正文 OMML 默认参与主线且无需单独开关。表格/文本框开关需要其父区域也启用。保护、修订和普通域等仍构成边界。LaTeX 文本以 ASCII 为基础，支持顶饰适配的程序可先将 `Ŷ`、`Ŷ` 等写法转换为命令，其余未适配字符保留原文；OMML 使用 Office 原生转换资源。是否成功以连接程序的实际报告为准。
 
 ## 任务结果与诊断
 
 脚本只向标准输出发送 JSON Lines，不混入 worker 原始日志。`STARTED` 给出 `Output`、`TaskDirectory`、`StopFile`、`LogPath`；`FINISHED` 给出状态、退出码、结果路径、计数、区域问题和保留项摘要。
 
-退出码 0 配合 `COMPLETE` / `PARTIAL` 表示已交付核验结果；部分完成仍保留输出。退出码 124、125、126、127 分别对应超时、服务失联、恢复问题和取消。其他失败由 `ErrorCode` 区分，如 NEEDS_CONNECTION、EXECUTABLE_NOT_FOUND、INCOMPATIBLE_CONTRACT、BUSY、ENGINE_ERROR。PowerShell 参数绑定错误由宿主返回，尚未进入转换脚本。
+默认模式中，退出码 0 配合 `COMPLETE` / `PARTIAL` 表示已交付核验结果；部分完成仍保留输出。退出码 124、125、126、127 分别对应超时、服务失联、恢复问题和取消。其他失败由 `ErrorCode` 区分，如 EXECUTABLE_NOT_FOUND、INCOMPATIBLE_CONTRACT、BUSY、TRACK_CHANGES_ENABLED、DOCUMENT_PROTECTED、ENGINE_ERROR。修订及限制编辑错误同时提供中文说明。PowerShell 参数绑定错误由宿主返回，尚未进入转换脚本。
+
+只有用户明确接受跳过核验时才使用 `-FastConversion`。它要求 EXE 的能力描述含 `ExperimentalFastConversion: true`，底层参数为 `--experimental-fast`。此时 `COMPLETE/PARTIAL` 只表示已保存输出，不表示内容已核验；`FastConversion` 为 true、`Validation` 为 `SKIPPED_EXPERIMENTAL_FAST`、`WordReopenVerified` 为 false、`PostConversionScans` 为 0，原件字节及资产核验字段为 null。`FailedUnverified` 与逐式 `FAILED_UNVERIFIED` 单列未经核验的失败，不计入 `FailedPreserved`；快速模式的位置坐标也未经保存后核验。默认模式沿用原有核验契约。
 
 完整 `result.json`、`worker.log`、`worker.errors` 保留在本机任务目录，可能含私人路径与公式源码，不应默认回显或随 Skill 上传。`FinalStart/FinalEnd` 是最终 DOCX 的 Word 主故事范围坐标，不能作为普通字符串下标；文档再次编辑后需重扫。实验项当前报告所在区域及结果，不承诺区域内精确坐标。
 

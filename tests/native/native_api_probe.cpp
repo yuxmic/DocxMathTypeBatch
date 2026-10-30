@@ -543,12 +543,54 @@ int wmain(int argc, wchar_t** argv) {
             require(compatibleTex(L"\\bmfoo+\\\\bm+\\text{\\bm}")==L"\\bmfoo+\\\\bm+\\text{\\bm}","Compatible command boundaries");
             require(compatibleTex(L"\\operatorname*{literal \\bm}")==L"\\operatorname*{literal \\bm}","Starred operator text stays exact");
             require(compatibleTex(L"\\begin{alignedat}{n}a&=b\\end{alignedat}")==L"\\begin{alignedat}{n}a&=b\\end{alignedat}","Unknown column argument unchanged");
+            require(compatibleTex(L"\u0176+Y\u0302+\u022c")==L"\\hat{Y}+\\hat{Y}+\\bar{\\tilde{O}}","Precomposed and stacked Unicode accents");
+            require(compatibleTex(L"\\mathrm{\u0176}_i^2+\\widetilde{XY}+\\mathring{Y}")==L"\\mathrm{\\hat{Y}}_i^2+\\tilde{XY}+\\overset{\\circ}{Y}","Accent aliases and styled Unicode");
+            require(compatibleTex(L"\\text{\u0176 \\widetilde}+\\widetildefoo")==L"\\text{\u0176 \\widetilde}+\\widetildefoo","Text and longer command names unchanged");
+            require(compatibleTex(L"\\text{\u4e2d\u6587}+\u4e2d\u6587+\u00c7")==L"\\text{\u4e2d\u6587}+\u4e2d\u6587+\u00c7","Unmapped Unicode unchanged");
+            // 注释不能交给 MathType 排成内容；转义百分号及成对反斜杠分别处理。
+            require(lexicalReason(L"\\begin{aligned}a&=1% ignored\v\\\\b&=2\\end{aligned}")==L"UNSUPPORTED_TEX_COMMENT"&&
+                    lexicalReason(L"x\\\\%comment")==L"UNSUPPORTED_TEX_COMMENT"&&lexicalReason(L"x\\%+y").empty(),"TeX comments preserved without rejecting escaped percent");
+            require(exportedInner("$x\\$+50\\%$",false)==L"x\\$+50\\%","Escaped export delimiters remain valid");
+            // 厂商短音符等导出可能夹带嵌套定界符，必须在替换对象前拦住。
+            for(const auto* tex:{"$x$y$","$x\\[y\\]$","$x\\(y\\)$","$x\\\\$y$","$x%comment$"}){
+                bool rejected=false;try{exportedInner(tex,false);}catch(const std::exception&){rejected=true;}
+                require(rejected,"Invalid native export preserved before replacing its object");
+            }
+            // 资产索引使用引用后仍按内容匹配，重复资产缺一份也必须拒绝。
+            const std::vector<std::vector<unsigned char>> assets{{3},{1,2},{1,2}};
+            requireContains(assets,{{1,2},{3},{1,2}},"Asset references preserve duplicate contents");
+            bool missing=false;try{requireContains(assets,{{1,2},{1,2},{1,2}},"Missing duplicate asset");}catch(const std::exception&){missing=true;}
+            require(missing,"Missing duplicate asset is rejected");
+            // 同一份原始 XML 可供签名和 OMML 导入共用，签名只去掉易变元数据。
+            require(sourceSignature(L"<pkg><w:body><w:p w:rsidR=\"1\"><w:r ObjectID=\"2\"/></w:p></w:body></pkg>",true)==
+                    L"<w:body><w:p><w:r/></w:p></w:body>","Signature from cached source XML");
+            // 实验快速模式可以跳过语法预检，退出后恢复默认严格规则。
+            experimentalFast=true;require(lexicalReason(L"x{ % invalid").empty(),"Fast conversion skips lexical verification");
+            experimentalFast=false;require(!lexicalReason(L"x{ % invalid").empty(),"Default conversion retains lexical verification");
             std::wstring sample=L"\\begin{align*}a&=\\bm{x}+\\mathup{y}\\\\c&=\\lvert z\\rvert\\end{align*}";sample.append(900,L'x');
             LARGE_INTEGER frequency{},before{},after{};require(QueryPerformanceFrequency(&frequency)&&QueryPerformanceCounter(&before),"Start text rewrite timing");
             size_t checksum{};constexpr size_t count=10000;for(size_t i=0;i<count;++i)checksum+=compatibleTex(sample).size();
             require(QueryPerformanceCounter(&after)&&checksum>count*900,"Complete text rewrite timing");
             std::printf("COMPATIBLE_TEX_PASSED Count=%zu Characters=%zu TotalMilliseconds=%.3f\n",count,sample.size(),1000.0*static_cast<double>(after.QuadPart-before.QuadPart)/static_cast<double>(frequency.QuadPart));return 0;
         }catch(const std::exception& error){std::printf("COMPATIBLE_TEX_FAILED %s\n",error.what());return 1;}
+    }
+    if(argc==4&&std::wstring(argv[1])==L"--accent-export"){
+        // 仅供顶饰开发回归：直接导出结构，不改变正式转换中的缓存与成功判定。
+        check(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED),"Accent export COM");int result=1;
+        try{
+            const auto output=absolutePath(argv[3]);require(GetFileAttributesW(output.c_str())==INVALID_FILE_ATTRIBUTES,"Accent export already exists");
+            std::wstring problem;const auto install=findMathTypeInstall(problem);require(!install.empty(),"Installed MathType required");
+            MathTypeApi api(install);require(api.init(0,10)>0,"Accent export MathType init");api.initialized=true;
+            WordSession word;auto documents=get(word.application.Get(),L"Documents");word.document=asObject(invoke(documents.Get(),L"Add",DISPATCH_METHOD));word.verifyOwnership();
+            invoke(word.application.Get(),L"Visible",DISPATCH_PROPERTYPUT,{false});invoke(word.application.Get(),L"DisplayAlerts",DISPATCH_PROPERTYPUT,{0L});invoke(word.application.Get(),L"AutomationSecurity",DISPATCH_PROPERTYPUT,{3L});
+            invoke(word.document.Get(),L"Close",DISPATCH_METHOD,{0L});word.document=asObject(invoke(documents.Get(),L"Open",DISPATCH_METHOD,{argv[2],false,true,false}));
+            FILE* raw{};require(_wfopen_s(&raw,output.c_str(),L"wb")==0&&raw,"Create accent structure export");std::unique_ptr<FILE,decltype(&fclose)> file(raw,&fclose);
+            auto shapes=get(word.document.Get(),L"InlineShapes");const auto count=integer(shapes.Get(),L"Count");
+            for(long i=1;i<=count;++i){auto shape=collectionItem(shapes.Get(),i);auto ole=get(shape.Get(),L"OLEFormat");invoke(ole.Get(),L"DoVerb",DISPATCH_METHOD,{2L});auto object=get(ole.Get(),L"Object");
+                const auto native=readNative(api,object.Get());require(api.close(OLECLOSE_NOSAVE,object.Get())==0,"Close accent export equation");
+                auto tex=exportNativeTex(api,native);for(auto& c:tex)if(c=='\r'||c=='\n')c=' ';require(fprintf(file.get(),"%s\n",tex.c_str())>0,"Write accent structure export");}
+            require(fflush(file.get())==0,"Flush accent structure export");std::printf("ACCENT_EXPORT_PASSED Count=%ld\n",count);result=0;
+        }catch(const std::exception& error){std::printf("ACCENT_EXPORT_FAILED %s\n",error.what());}CoUninitialize();return result;
     }
     if(argc==4&&std::wstring(argv[1])==L"--experimental-native-compare"){
         if(FAILED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED)))return 1;int result=1;

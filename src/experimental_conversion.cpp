@@ -38,6 +38,58 @@ std::vector<std::wstring> xmlValues(IXMLDOMDocument2* dom,const wchar_t* query) 
     ComPtr<IXMLDOMNodeList> nodes;check(dom->selectNodes(Value(query).v.bstrVal,&nodes),"Select experimental XML");long count{};check(nodes->get_length(&count),"Experimental XML count");
     std::vector<std::wstring> result;for(long i=0;i<count;++i){ComPtr<IXMLDOMNode> node;check(nodes->get_item(i,&node),"Experimental XML node");Value xml;xml.v.vt=VT_BSTR;check(node->get_xml(&xml.v.bstrVal),"Experimental node XML");result.emplace_back(xml.v.bstrVal);}return result;
 }
+void compatibleMathML(IXMLDOMDocument2* dom) {
+    auto nodes=[&](const wchar_t* query){
+        ComPtr<IXMLDOMNodeList> list;check(dom->selectNodes(Value(query).v.bstrVal,&list),"Select MathML accents");
+        long count{};check(list->get_length(&count),"MathML accent count");std::vector<ComPtr<IXMLDOMNode>> result;
+        for(long i=0;i<count;++i){ComPtr<IXMLDOMNode> node;check(list->get_item(i,&node),"MathML accent node");result.push_back(node);}return result;
+    };
+    auto content=[](IXMLDOMNode* node){Value value;value.v.vt=VT_BSTR;check(node->get_text(&value.v.bstrVal),"MathML token text");return std::wstring(value.v.bstrVal?value.v.bstrVal:L"");};
+    auto name=[](IXMLDOMNode* node){Value value;value.v.vt=VT_BSTR;check(node->get_baseName(&value.v.bstrVal),"MathML token name");return std::wstring(value.v.bstrVal?value.v.bstrVal:L"");};
+    auto element=[&](const wchar_t* tag){ComPtr<IXMLDOMNode> node;check(dom->createNode(Value(1L).v,Value(tag).v.bstrVal,Value(L"http://www.w3.org/1998/Math/MathML").v.bstrVal,&node),"Create MathML accent element");return node;};
+    auto append=[](IXMLDOMNode* parent,IXMLDOMNode* child){ComPtr<IXMLDOMNode> added;check(parent->appendChild(child,&added),"Append MathML accent element");};
+    auto wrap=[&](ComPtr<IXMLDOMNode> base,wchar_t mark){
+        auto mover=element(L"mover"),symbol=element(L"mo");ComPtr<IXMLDOMElement> attributes;check(mover.As(&attributes),"MathML accent attributes");
+        check(attributes->setAttribute(Value(L"accent").v.bstrVal,Value(L"true").v),"Set MathML accent");
+        const std::wstring glyph(1,mathAccent(mark)->symbol);check(symbol->put_text(Value(glyph.c_str()).v.bstrVal),"Set MathML accent glyph");
+        append(mover.Get(),base.Get());append(mover.Get(),symbol.Get());return mover;
+    };
+    // 只改顶饰位置的符号码，不能把正文中的减号、波浪号等全局替换。
+    for(const auto& node:nodes(L"//*[local-name()='mover']/*[2][local-name()='mo' or local-name()='mi']")) {
+        const auto text=content(node.Get());if(text.size()!=1)continue;auto mark=text.front();
+        if(mark==0x02c6)mark=0x0302;else if(mark==0x02dc)mark=0x0303;else if(mark==0x02d8)mark=0x0306;
+        else if(mark==0x00af)mark=0x0304;else if(mark==0x02d9)mark=0x0307;else if(mark==0x00a8)mark=0x0308;
+        if(const auto* accent=mathAccent(mark)){const std::wstring glyph(1,accent->symbol);check(node->put_text(Value(glyph.c_str()).v.bstrVal),"Normalize MathML accent glyph");}
+    }
+    const auto tokens=nodes(L"//*[namespace-uri()='http://www.w3.org/1998/Math/MathML' and (local-name()='mi' or local-name()='mn' or local-name()='mo')][not(parent::*[local-name()='mover' or local-name()='munder' or local-name()='munderover'] and count(preceding-sibling::*)>=1)]");
+    // Office 会把 Y 与后面的组合符拆成相邻 token；先合回，随后仅装饰最后一个字符。
+    for(const auto& node:tokens) {
+        const auto marks=content(node.Get());if(marks.empty()||!std::all_of(marks.begin(),marks.end(),[](wchar_t c){return mathAccent(c)!=nullptr;}))continue;
+        ComPtr<IXMLDOMNode> previous,parent;check(node->get_parentNode(&parent),"MathML token parent");if(!parent)continue;
+        check(node->get_previousSibling(&previous),"Previous MathML token");
+        while(previous&&name(previous.Get()).empty()&&whitespaceOnly(content(previous.Get()))){ComPtr<IXMLDOMNode> before;check(previous->get_previousSibling(&before),"Previous MathML whitespace");previous=before;}
+        if(!previous)continue;const auto tag=name(previous.Get());if(tag!=L"mi"&&tag!=L"mn"&&tag!=L"mo")continue;
+        const auto combined=content(previous.Get())+marks;check(previous->put_text(Value(combined.c_str()).v.bstrVal),"Join MathML combining accents");
+        ComPtr<IXMLDOMNode> removed;check(parent->removeChild(node.Get(),&removed),"Remove joined MathML accent token");
+    }
+    for(const auto& node:tokens) {
+        ComPtr<IXMLDOMNode> parent;check(node->get_parentNode(&parent),"MathML letter parent");if(!parent)continue;
+        const auto original=content(node.Get());std::wstring decomposed;for(const auto character:original)decomposed+=decomposedMathCharacter(character);
+        if(decomposed.size()<2||std::none_of(decomposed.begin()+1,decomposed.end(),[](wchar_t c){return mathAccent(c)!=nullptr;}))continue;
+        auto row=element(L"mrow");std::wstring plain;
+        auto clone=[&](const std::wstring& text){ComPtr<IXMLDOMNode> token;check(node->cloneNode(VARIANT_FALSE,&token),"Clone styled MathML token");check(token->put_text(Value(text.c_str()).v.bstrVal),"Set MathML base text");return token;};
+        auto flush=[&]{if(!plain.empty()){auto token=clone(plain);append(row.Get(),token.Get());plain.clear();}};
+        for(size_t i=0;i<decomposed.size();) {
+            size_t finish=i+1;if(decomposed[i]>=0xd800&&decomposed[i]<=0xdbff&&finish<decomposed.size()&&decomposed[finish]>=0xdc00&&decomposed[finish]<=0xdfff)++finish;
+            const auto base=decomposed.substr(i,finish-i);const auto firstMark=finish;
+            while(finish<decomposed.size()&&mathAccent(decomposed[finish]))++finish;
+            if(finish==firstMark)plain+=base;
+            else {flush();auto token=clone(base);for(size_t j=firstMark;j<finish;++j)token=wrap(token,decomposed[j]);append(row.Get(),token.Get());}
+            i=finish;
+        }
+        flush();ComPtr<IXMLDOMNode> replaced;check(parent->replaceChild(row.Get(),node.Get(),&replaced),"Replace MathML accented token");
+    }
+}
 // 一次 WordOpenXML 导出同时取得段落/表格版式和 OMML，避免同一区域导出两次整包样式。
 DocumentState documentState(IDispatch* range) {
     auto dom=xmlDocument(text(range,L"WordOpenXML"));
@@ -56,7 +108,9 @@ void addRegion(std::vector<Region>& regions,const std::wstring& key,const std::w
     regions.push_back({key,label,get(range,L"Duplicate"),main});
 }
 void textboxes(std::vector<Region>& regions,IDispatch* shapes,const std::wstring& owner,const std::wstring& label) {
-    for(long i=1;i<=integer(shapes,L"Count");++i){taskPulse();auto shape=collectionItem(shapes,i);const long type=integer(shape.Get(),L"Type");
+    // 只读遍历期间集合不变，数量在进入循环时读取一次。
+    const long count=integer(shapes,L"Count");
+    for(long i=1;i<=count;++i){taskPulse();auto shape=collectionItem(shapes,i);const long type=integer(shape.Get(),L"Type");
         if(type==6){textboxes(regions,get(shape.Get(),L"GroupItems").Get(),owner+L":group:"+std::to_wstring(i),label+L"组合 "+std::to_wstring(i)+L" ");continue;}
         if(type!=1&&type!=17)continue;auto frame=get(shape.Get(),L"TextFrame");if(!integer(frame.Get(),L"HasText"))continue;
         // Word 保存时会重新分配 Shape.ID；使用所属区域内的对象路径并核对完整内容。
@@ -87,7 +141,7 @@ std::vector<HeaderSlot> storedHeaders(const std::wstring& path) {
 std::vector<Region> collectRegions(IDispatch* document,const ExperimentalOptions& options,const std::vector<HeaderSlot>& headers) {
     std::vector<Region> regions;addRegion(regions,L"body",L"正文",get(document,L"Content").Get(),true);
     // 正文只作保留核验；每个顶层表格单独处理，嵌套表格由其所属顶层表格覆盖。
-    if(options.tables){auto tables=get(document,L"Tables");for(long i=1;i<=integer(tables.Get(),L"Count");++i){auto range=get(collectionItem(tables.Get(),i).Get(),L"Range");
+    if(options.tables){auto tables=get(document,L"Tables");const long count=integer(tables.Get(),L"Count");for(long i=1;i<=count;++i){auto range=get(collectionItem(tables.Get(),i).Get(),L"Range");
         bool nested=false;for(const auto& prior:regions)if(prior.key.rfind(L"body:table:",0)==0){const auto a=bounds(prior.range.Get()),b=bounds(range.Get());if(a.start<=b.start&&a.end>=b.end){nested=true;break;}}
         if(!nested)addRegion(regions,L"body:table:"+std::to_wstring(i),L"正文表格 "+std::to_wstring(i),range.Get());}}
     if(options.textboxes)textboxes(regions,get(document,L"Shapes").Get(),L"body",L"正文");
@@ -100,8 +154,8 @@ std::vector<Region> collectRegions(IDispatch* document,const ExperimentalOptions
             addRegion(regions,key,label,get(header.Get(),L"Range").Get());if(options.textboxes)textboxes(regions,get(header.Get(),L"Shapes").Get(),key,label);
         }
     }
-    if(options.notes)for(const auto* name:{L"Footnotes",L"Endnotes"}){auto notes=get(document,name);
-        for(long i=1;i<=integer(notes.Get(),L"Count");++i)addRegion(regions,std::wstring(name)+L":"+std::to_wstring(i),std::wstring(!wcscmp(name,L"Footnotes")?L"脚注 ":L"尾注 ")+std::to_wstring(i),get(collectionItem(notes.Get(),i).Get(),L"Range").Get());
+    if(options.notes)for(const auto* name:{L"Footnotes",L"Endnotes"}){auto notes=get(document,name);const long count=integer(notes.Get(),L"Count");
+        for(long i=1;i<=count;++i)addRegion(regions,std::wstring(name)+L":"+std::to_wstring(i),std::wstring(!wcscmp(name,L"Footnotes")?L"脚注 ":L"尾注 ")+std::to_wstring(i),get(collectionItem(notes.Get(),i).Get(),L"Range").Get());
     }
     return regions;
 }
@@ -114,15 +168,16 @@ bool intersects(Span span,const std::vector<Span>& excluded) {
 }
 std::vector<Target> scanRegion(IDispatch* document,const Region& region,const ExperimentalOptions& options,bool reverse) {
     const auto root=region.range.Get();const auto limits=bounds(root);std::vector<Span> protectedRanges,excluded;std::vector<Target> targets;
-    for(const auto* name:{L"Revisions",L"ContentControls"}){auto collection=get(root,name);for(long i=1;i<=integer(collection.Get(),L"Count");++i)protectedRanges.push_back(bounds(get(collectionItem(collection.Get(),i).Get(),L"Range").Get()));}
-    auto fields=get(root,L"Fields");for(long i=1;i<=integer(fields.Get(),L"Count");++i){auto field=collectionItem(fields.Get(),i);if(integer(field.Get(),L"Type")!=58)protectedRanges.push_back(fieldBounds(field.Get()));}
+    for(const auto* name:{L"Revisions",L"ContentControls"}){auto collection=get(root,name);const long count=integer(collection.Get(),L"Count");for(long i=1;i<=count;++i){auto span=bounds(get(collectionItem(collection.Get(),i).Get(),L"Range").Get());
+        if(!wcscmp(name,L"ContentControls")){span.start=std::max(limits.start,span.start-1);span.end=std::min(limits.end,span.end+1);}protectedRanges.push_back(span);}}
+    auto fields=get(root,L"Fields");const long fieldCount=integer(fields.Get(),L"Count");for(long i=1;i<=fieldCount;++i){auto field=collectionItem(fields.Get(),i);if(integer(field.Get(),L"Type")!=58)protectedRanges.push_back(fieldBounds(field.Get()));}
     excluded=protectedRanges;
-    auto maths=get(root,L"OMaths");for(long i=1;i<=integer(maths.Get(),L"Count");++i){auto math=collectionItem(maths.Get(),i);auto range=get(math.Get(),L"Range");const auto span=bounds(range.Get());excluded.push_back(span);
+    auto maths=get(root,L"OMaths");const long mathCount=integer(maths.Get(),L"Count");for(long i=1;i<=mathCount;++i){auto math=collectionItem(maths.Get(),i);auto range=get(math.Get(),L"Range");const auto span=bounds(range.Get());excluded.push_back(span);
         if(reverse||!locationSelected(region,range.Get(),options)||intersects(span,protectedRanges))continue;
         ScanItem item;item.span=span;item.source=text(range.Get(),L"Text");item.display=integer(math.Get(),L"Type")==0;item.ready=true;
         if(selectedEquation(item.display))targets.push_back({std::move(item),L"OMML"});
     }
-    auto shapes=get(root,L"InlineShapes");for(long i=1;i<=integer(shapes.Get(),L"Count");++i){auto shape=collectionItem(shapes.Get(),i);auto range=get(shape.Get(),L"Range");const auto span=bounds(range.Get());excluded.push_back(span);
+    auto shapes=get(root,L"InlineShapes");const long shapeCount=integer(shapes.Get(),L"Count");for(long i=1;i<=shapeCount;++i){auto shape=collectionItem(shapes.Get(),i);auto range=get(shape.Get(),L"Range");const auto span=bounds(range.Get());excluded.push_back(span);
         if(!reverse||!locationSelected(region,range.Get(),options)||intersects(span,protectedRanges))continue;
         const auto type=integer(shape.Get(),L"Type");if(type!=1&&type!=2)continue;const auto cls=text(get(shape.Get(),L"OLEFormat").Get(),L"ClassType");if(cls.find(L"Equation.DSMT")!=0)continue;
         ScanItem item;item.span=span;item.source=text(range.Get(),L"Text");item.ready=type==1&&cls==L"Equation.DSMT4";
@@ -133,7 +188,7 @@ std::vector<Target> scanRegion(IDispatch* document,const Region& region,const Ex
     }
     if(reverse)return targets;
     // 注释引用和单元格末尾作为边界，LaTeX 识别复用正文词法器。
-    if(region.main)for(const auto* name:{L"Footnotes",L"Endnotes"}){auto notes=get(document,name);for(long i=1;i<=integer(notes.Get(),L"Count");++i)excluded.push_back(bounds(get(collectionItem(notes.Get(),i).Get(),L"Reference").Get()));}
+    if(region.main)for(const auto* name:{L"Footnotes",L"Endnotes"}){auto notes=get(document,name);const long count=integer(notes.Get(),L"Count");for(long i=1;i<=count;++i)excluded.push_back(bounds(get(collectionItem(notes.Get(),i).Get(),L"Reference").Get()));}
     auto paragraphs=get(root,L"Paragraphs");const long paragraphCount=integer(paragraphs.Get(),L"Count");
     for(long i=1;i<=paragraphCount;++i){auto range=get(collectionItem(paragraphs.Get(),i).Get(),L"Range");auto span=bounds(range.Get());
         if(!locationSelected(region,range.Get(),options))excluded.push_back(span);
@@ -162,7 +217,7 @@ std::vector<Target> scanRegion(IDispatch* document,const Region& region,const Ex
 // 预检与正式扫描使用同一套区域清单；区域内没有定界符、OMML 或 MathType 对象时不可能产生目标。
 bool regionHasCandidate(const Region& region,bool reverse) {
     auto range=region.range.Get();
-    if(reverse){auto shapes=get(range,L"InlineShapes");for(long i=1;i<=integer(shapes.Get(),L"Count");++i){auto shape=collectionItem(shapes.Get(),i);const long type=integer(shape.Get(),L"Type");
+    if(reverse){auto shapes=get(range,L"InlineShapes");const long count=integer(shapes.Get(),L"Count");for(long i=1;i<=count;++i){auto shape=collectionItem(shapes.Get(),i);const long type=integer(shape.Get(),L"Type");
         if(type!=1&&type!=2)continue;if(text(get(shape.Get(),L"OLEFormat").Get(),L"ClassType").find(L"Equation.DSMT")!=0)continue;return true;}return false;}
     if(integer(get(range,L"OMaths").Get(),L"Count")>0)return true;
     return hasTexMarkers(text(range,L"Text"));
@@ -175,7 +230,8 @@ std::vector<std::vector<unsigned char>> confirmedBodyNative(IDispatch* document)
 }
 std::vector<std::vector<unsigned char>> regionNativeFromShapes(IDispatch* root) {
     std::vector<std::vector<unsigned char>> native;auto shapes=get(root,L"InlineShapes");
-    for(long i=1;i<=integer(shapes.Get(),L"Count");++i){auto shape=collectionItem(shapes.Get(),i);if(integer(shape.Get(),L"Type")!=1)continue;if(text(get(shape.Get(),L"OLEFormat").Get(),L"ClassType").find(L"Equation.DSMT")!=0)continue;native.push_back(nativePayload(rangeNativeAsset(get(shape.Get(),L"Range").Get()).equation));}
+    const long count=integer(shapes.Get(),L"Count");
+    for(long i=1;i<=count;++i){auto shape=collectionItem(shapes.Get(),i);if(integer(shape.Get(),L"Type")!=1)continue;if(text(get(shape.Get(),L"OLEFormat").Get(),L"ClassType").find(L"Equation.DSMT")!=0)continue;native.push_back(nativePayload(rangeNativeAsset(get(shape.Get(),L"Range").Get()).equation));}
     return native;
 }
 Snapshot snapshotWithState(const Region& region,const DocumentState& state,std::vector<std::vector<unsigned char>> native) {
@@ -183,7 +239,7 @@ Snapshot snapshotWithState(const Region& region,const DocumentState& state,std::
     // 批量读取为空时逐范围兜底；正常任务不会重复导出正文样式包。
     if(native.empty())native=regionNativeFromShapes(region.range.Get());
     result.native=std::move(native);
-    auto fields=get(region.range.Get(),L"Fields");for(long i=1;i<=integer(fields.Get(),L"Count");++i){auto field=collectionItem(fields.Get(),i);if(integer(field.Get(),L"Type")==58)continue;result.fields.push_back(text(get(field.Get(),L"Code").Get(),L"Text")+L"\x1f"+text(get(field.Get(),L"Result").Get(),L"Text"));}
+    auto fields=get(region.range.Get(),L"Fields");const long count=integer(fields.Get(),L"Count");for(long i=1;i<=count;++i){auto field=collectionItem(fields.Get(),i);if(integer(field.Get(),L"Type")==58)continue;result.fields.push_back(text(get(field.Get(),L"Code").Get(),L"Text")+L"\x1f"+text(get(field.Get(),L"Result").Get(),L"Text"));}
     return result;
 }
 Snapshot snapshot(const Region& region,std::vector<std::vector<unsigned char>> native) {return snapshotWithState(region,documentState(region.range.Get()),std::move(native));}
@@ -193,10 +249,10 @@ std::wstring ommlSource(IDispatch* range) {
     check(dom->selectSingleNode(Value(L"//*[namespace-uri()='http://schemas.openxmlformats.org/officeDocument/2006/math' and local-name()='oMath']").v.bstrVal,&equation),"Select OMML content snapshot");require(equation!=nullptr,"OMML snapshot exists");
     Value xml;xml.v.vt=VT_BSTR;check(equation->get_xml(&xml.v.bstrVal),"OMML snapshot XML");return withoutWordRevisionIds(xml.v.bstrVal);
 }
-std::wstring ommlMathML(WordSession& word,IDispatch* range,ComPtr<IXMLDOMDocument2>& stylesheet,bool display) {
+std::wstring ommlMathML(WordSession& word,const std::wstring& sourcePackage,ComPtr<IXMLDOMDocument2>& stylesheet,bool display) {
     if(!stylesheet){const auto path=text(word.application.Get(),L"Path")+L"\\OMML2MML.XSL";
         stylesheet=xmlDocument(L"<root/>");VARIANT_BOOL loaded{};check(stylesheet->load(Value(path.c_str()).v,&loaded),"Load Office OMML transform");require(loaded!=VARIANT_FALSE,"OFFICE_OMML_TRANSFORM_MISSING");}
-    auto source=xmlDocument(text(range,L"WordOpenXML"));ComPtr<IXMLDOMNode> equation;
+    auto source=xmlDocument(sourcePackage);ComPtr<IXMLDOMNode> equation;
     check(source->selectSingleNode(Value(L"//*[namespace-uri()='http://schemas.openxmlformats.org/officeDocument/2006/math' and local-name()='oMath']").v.bstrVal,&equation),"Select source OMML");require(equation!=nullptr,"Source OMML exists");
     // 导入副本直接删除原生公式文本中的空格，交由 MathType 自动安排数学间距。
     ComPtr<IXMLDOMNodeList> texts;
@@ -213,24 +269,26 @@ std::wstring ommlMathML(WordSession& word,IDispatch* range,ComPtr<IXMLDOMDocumen
     // Office 的模板输出 MathML 片段，必须补上 math 根节点再交给厂商导入。
     std::wstring fragment=transformed.v.bstrVal;
     if(fragment.rfind(L"<?xml",0)==0){const auto end=fragment.find(L"?>");require(end!=std::wstring::npos,"Office MathML declaration");fragment.erase(0,end+2);}
-    return std::wstring(L"<math xmlns=\"http://www.w3.org/1998/Math/MathML\" display=\"")+(display?L"block":L"inline")+L"\">"+fragment+L"</math>";
+    auto math=xmlDocument(std::wstring(L"<math xmlns=\"http://www.w3.org/1998/Math/MathML\" display=\"")+(display?L"block":L"inline")+L"\">"+fragment+L"</math>");
+    compatibleMathML(math.Get());Value xml;xml.v.vt=VT_BSTR;check(math->get_xml(&xml.v.bstrVal),"Compatible MathML XML");return xml.v.bstrVal;
 }
 // 导入文本先准备好；真正写入只在目标文档的单式撤销事务内执行。
 namespace {
-std::wstring prepareInput(WordSession& word,const Target& target,IDispatch* range,ComPtr<IXMLDOMDocument2>& stylesheet) {
-    if(target.kind==L"OMML")return ommlMathML(word,range,stylesheet,target.item.display);
-    require(std::all_of(target.item.inner.begin(),target.item.inner.end(),[](wchar_t c){return c<=127;}),"UNSUPPORTED_NON_ASCII_TEX");
-    const auto tex=compatibleTex(target.item.inner);return target.item.display?L"\\["+tex+L"\\]":L"$"+tex+L"$";
+std::wstring prepareInput(WordSession& word,const Target& target,const std::wstring& sourcePackage,ComPtr<IXMLDOMDocument2>& stylesheet) {
+    if(target.kind==L"OMML")return ommlMathML(word,sourcePackage,stylesheet,target.item.display);
+    const auto tex=compatibleTex(target.item.inner);
+    require(experimentalFast||std::all_of(tex.begin(),tex.end(),[](wchar_t c){return c<=127;}),"UNSUPPORTED_NON_ASCII_TEX");
+    return target.item.display?L"\\["+tex+L"\\]":L"$"+tex+L"$";
 }
 }
 std::string ExperimentalItem::json() const {
     return std::string("{\"Id\":")+std::to_string(id)+",\"Experimental\":true,\"Region\":"+quote(region)+",\"Kind\":"+quote(kind)+",\"Source\":"+quote(source)+",\"Status\":"+quote(status)+",\"Reason\":"+quote(reason)+"}";
 }
 std::string ProcessingIssue::json() const {
-    return "{\"Key\":"+quote(key)+",\"Region\":"+quote(region)+",\"Stage\":"+quote(stage)+",\"Reason\":"+quote(reason)+",\"OriginalPreserved\":true}";
+    return "{\"Key\":"+quote(key)+",\"Region\":"+quote(region)+",\"Stage\":"+quote(stage)+",\"Reason\":"+quote(reason)+",\"OriginalPreserved\":"+(experimentalFast?"null":"true")+"}";
 }
 std::string ExperimentalResult::json() const {
-    std::string result="{\"Enabled\":"+std::string(enabled?"true":"false")+",\"Skipped\":"+quote(skipped)+",\"FormattingApplied\":false,\"Succeeded\":"+std::to_string(succeeded)+",\"FailedPreserved\":"+std::to_string(failed)+",\"RejectedPreserved\":"+std::to_string(rejected)+",\"NotAttempted\":"+std::to_string(unattempted)+",\"Items\":[";
+    std::string result="{\"Enabled\":"+std::string(enabled?"true":"false")+",\"Skipped\":"+quote(skipped)+",\"FormattingApplied\":false,\"Succeeded\":"+std::to_string(succeeded)+",\"FailedPreserved\":"+std::to_string(failed-failedUnverified)+",\"FailedUnverified\":"+std::to_string(failedUnverified)+",\"RejectedPreserved\":"+std::to_string(rejected)+",\"NotAttempted\":"+std::to_string(unattempted)+",\"Items\":[";
     for(size_t i=0;i<items.size();++i)result+=(i?",":"")+items[i].json();
     result+="],\"Issues\":[";for(size_t i=0;i<issues.size();++i)result+=(i?",":"")+issues[i].json();
     return result+"],\"Options\":{\"Tables\":"+(options.tables?"true":"false")+",\"Textboxes\":"+(options.textboxes?"true":"false")+",\"HeadersFooters\":"+(options.headers?"true":"false")+",\"FootnotesEndnotes\":"+(options.notes?"true":"false")+"}}";
@@ -248,7 +306,7 @@ static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const s
     ExperimentalResult result;result.options=options;result.enabled=true;
     const auto headers=options.headers?storedHeaders(path):std::vector<HeaderSlot>();
     auto documents=get(word.application.Get(),L"Documents");
-    word.document=asObject(invoke(documents.Get(),L"Open",DISPATCH_METHOD,{path.c_str(),false,false,false,Value(),Value(),false,Value(),Value(),Value(),Value(),false}));word.verifyOwnership();
+    if(!experimentalFast){word.document=asObject(invoke(documents.Get(),L"Open",DISPATCH_METHOD,{path.c_str(),false,false,false,Value(),Value(),false,Value(),Value(),Value(),Value(),false}));word.verifyOwnership();}
     std::vector<Region> regions;try{regions=collectRegions(word.document.Get(),options,headers);}
     catch(const std::exception& error){throw RegionError(L"*",L"实验区",L"ENUMERATING",error);}
     ComPtr<IXMLDOMDocument2> stylesheet;std::string defaults;bool connected=false;std::vector<Binding> bindings;
@@ -265,6 +323,7 @@ static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const s
     std::vector<long> bodyTables;std::map<std::wstring,long> bodyTableEnds;std::vector<std::wstring> bodyGaps,bodyLayout;std::wstring bodyOriginalText;
     auto prepare=[&](){
         if(prepared)return;
+        if(experimentalFast){prepared=true;return;}
         try{
             auto body=regions.front().range.Get();const long end=integer(body,L"End");long cursor=integer(body,L"Start");std::wstring before;
             bodyLayout=documentState(body).layout;bodyOriginalText=text(body,L"Text");
@@ -283,7 +342,7 @@ static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const s
         std::wstring stage=L"SCANNING";std::vector<Target> targets;
         try{
         // 同一脚注故事里的前一区域会移动后续坐标，扫描前再读取本区域的表格边界。
-        auto tables=get(region.range.Get(),L"Tables");for(long i=1;i<=integer(tables.Get(),L"Count");++i)region.tables.push_back(bounds(get(collectionItem(tables.Get(),i).Get(),L"Range").Get()));
+        auto tables=get(region.range.Get(),L"Tables");const long tableCount=integer(tables.Get(),L"Count");for(long i=1;i<=tableCount;++i)region.tables.push_back(bounds(get(collectionItem(tables.Get(),i).Get(),L"Range").Get()));
         std::printf("EXPERIMENTAL_REGION %s\n",utf8(region.key).c_str());require(!regionFault(region.key,L"SCAN"),"Injected experimental region scan failure");
         targets=scanRegion(word.document.Get(),region,options,reverse);std::sort(targets.begin(),targets.end(),[](const Target& a,const Target& b){return a.item.span.start>b.item.span.start;});
         for(const auto& target:targets)plans[region.key].push_back({0,region.label,target.kind,target.item.source,target.item.ready?L"NOT_ATTEMPTED":L"REJECTED_PRESERVED",target.item.ready?L"REGION_SKIPPED":target.item.reason});
@@ -295,25 +354,26 @@ static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const s
             if(!prepared)prepare();
             if(!converting){std::puts("UI_EXPERIMENTAL_PHASE CONVERTING");converting=true;}
             std::printf("UI_EXPERIMENTAL_ITEM %zu %s %s\n",report.id,wireHex(utf8(region.label)).c_str(),diagnosticExcerpt(item.source).c_str());
-            auto root=region.range.Get();auto range=sliceRange(root,item.span.start,item.span.end);require(text(range.Get(),L"Text")==item.source,"Experimental source rechecked");
-            const auto beforeText=text(root,L"Text"),beforeXml=sourceSignature(range.Get(),true);const auto sourcePackage=target.kind==L"OMML"?text(range.Get(),L"WordOpenXML"):std::wstring();
-            const auto beforeLayout=layoutSnapshot(root);const long rootEnd=integer(root,L"End");
-            const auto prefix=text(sliceRange(root,integer(root,L"Start"),item.span.start).Get(),L"Text"),suffix=text(sliceRange(root,item.span.end,rootEnd).Get(),L"Text");
-            require(prefix+item.source+suffix==beforeText,"Independent experimental range snapshot");
-            auto undo=get(word.application.Get(),L"UndoRecord");bool record=false,active=false;ComPtr<IDispatch> activeObject;NativeAsset removed;std::vector<unsigned char> native;std::wstring output,input;
+            auto root=region.range.Get();auto range=sliceRange(root,item.span.start,item.span.end);if(!experimentalFast)require(text(range.Get(),L"Text")==item.source,"Experimental source rechecked");
+            const auto beforeText=experimentalFast?std::wstring():text(root,L"Text"),sourcePackage=target.kind==L"OMML"?text(range.Get(),L"WordOpenXML"):std::wstring();
+            const auto beforeXml=experimentalFast?std::wstring():target.kind==L"OMML"?sourceSignature(sourcePackage,true):sourceSignature(range.Get(),true);
+            const auto beforeLayout=experimentalFast?std::vector<std::wstring>():layoutSnapshot(root);const long rootEnd=integer(root,L"End");
+            const auto prefix=experimentalFast?std::wstring():text(sliceRange(root,integer(root,L"Start"),item.span.start).Get(),L"Text"),suffix=experimentalFast?std::wstring():text(sliceRange(root,item.span.end,rootEnd).Get(),L"Text");
+            auto undo=get(word.application.Get(),L"UndoRecord");bool record=false,active=false,wrote=false;ComPtr<IDispatch> activeObject;NativeAsset removed;std::vector<unsigned char> native;std::wstring output,input;
             try{
-                if(!connected){if(!api.initialized){require(api.init(0,10)>0,"Initialize experimental MathType");api.initialized=true;taskMathTypeConnected();}defaults=readDefaultPrefs(api);connected=true;}
+                if(!connected){if(!api.initialized){require(api.init(0,10)>0,"Initialize experimental MathType");api.initialized=true;taskMathTypeConnected();}if(!experimentalFast)defaults=readDefaultPrefs(api);connected=true;}
                 if(reverse){removed=rangeNativeAsset(range.Get());output=exportedInner(exportNativeTex(api,nativePayload(removed.equation)),item.display);output=(item.display?(dollar?L"$$":L"\\["):L"$")+output+(item.display?(dollar?L"$$":L"\\]"):L"$");}
-                else input=prepareInput(word,target,range.Get(),stylesheet);
+                else input=prepareInput(word,target,sourcePackage,stylesheet);
                 // 首次真正写入前建立检查点；无目标或仅有拒绝项时不复制整份文件。
-                if(!checkpoint)checkpoint=std::make_unique<ConversionCheckpoint>(path,L".experimental-checkpoint");
+                if(!experimentalFast&&!checkpoint)checkpoint=std::make_unique<ConversionCheckpoint>(path,L".experimental-checkpoint");
                 invoke(word.document.Get(),L"Activate",DISPATCH_METHOD);invoke(undo.Get(),L"StartCustomRecord",DISPATCH_METHOD,{L"实验性公式替换"});record=true;
+                wrote=true;
                 if(reverse)invoke(range.Get(),L"Text",DISPATCH_PROPERTYPUT,{output.c_str()});
                 else{
                     invoke(range.Get(),L"Text",DISPATCH_PROPERTYPUT,{L""});invoke(range.Get(),L"Collapse",DISPATCH_METHOD,{1L});
                     auto shape=insertBlankEquation(word.document.Get(),range.Get(),api.install,root);auto ole=get(shape.Get(),L"OLEFormat");invoke(ole.Get(),L"DoVerb",DISPATCH_METHOD,{2L});activeObject=get(ole.Get(),L"Object");active=true;
-                    const auto empty=readNative(api,activeObject.Get());emptyNative.insert(empty);require(api.write(activeObject.Get(),target.kind==L"OMML"?2:1,input.c_str(),static_cast<long>(input.size()))==0,"Experimental equation import");
-                    native=readNative(api,activeObject.Get());require(native!=empty&&native.size()>empty.size(),"Experimental equation contains native data");
+                    const auto empty=experimentalFast?std::vector<unsigned char>():readNative(api,activeObject.Get());if(!experimentalFast)emptyNative.insert(empty);require(api.write(activeObject.Get(),target.kind==L"OMML"?2:1,input.c_str(),static_cast<long>(input.size()))==0,"Experimental equation import");
+                    if(!experimentalFast){native=readNative(api,activeObject.Get());require(native!=empty&&native.size()>empty.size(),"Experimental equation contains native data");}
                     require(api.close(OLECLOSE_NOSAVE,activeObject.Get())==0,"Close experimental converted equation");active=false;
                 }
                 taskTestBoundary(L"EXPERIMENTAL_REPLACED");
@@ -322,36 +382,44 @@ static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const s
                 // 开发自检在真实替换后注入失败，核对 Undo 能完整恢复公式与容器属性。
                 require(!(selfTest&&item.inner==L"experimental_rollback"),"Injected experimental replacement failure");
                 const long end=item.span.end+integer(root,L"End")-rootEnd;auto replacement=sliceRange(root,item.span.start,end);
-                if(!reverse){auto shapes=get(replacement.Get(),L"InlineShapes");require(integer(shapes.Get(),L"Count")==1,"One experimental object inserted");auto objectRange=get(collectionItem(shapes.Get(),1).Get(),L"Range");output=text(objectRange.Get(),L"Text");require(text(replacement.Get(),L"Text")==output&&nativePayload(rangeNativeAsset(objectRange.Get()).equation)==native,"Experimental native data bound to target");}
-                const auto currentText=text(root,L"Text");const auto currentLayout=layoutSnapshot(root);
-                if(currentText!=prefix+output+suffix||currentLayout!=beforeLayout)std::printf("EXPERIMENTAL_CHANGE text=%d layout=%d start=%ld end=%ld\n",currentText==prefix+output+suffix,currentLayout==beforeLayout,item.span.start,item.span.end);
-                require(currentText==prefix+output+suffix&&currentLayout==beforeLayout,"Experimental replacement preserves surrounding text and layout");
+                if(!reverse){auto shapes=get(replacement.Get(),L"InlineShapes");if(!experimentalFast)require(integer(shapes.Get(),L"Count")==1,"One experimental object inserted");auto objectRange=get(collectionItem(shapes.Get(),1).Get(),L"Range");output=text(objectRange.Get(),L"Text");if(!experimentalFast)require(text(replacement.Get(),L"Text")==output&&nativePayload(rangeNativeAsset(objectRange.Get()).equation)==native,"Experimental native data bound to target");}
+                // 含控件的表格在整段和切片中返回不同的结束标记，前后片段须分别核对。
+                if(!experimentalFast){
+                const long currentEnd=integer(root,L"End");const auto currentLayout=layoutSnapshot(root);
+                const bool textPreserved=text(sliceRange(root,integer(root,L"Start"),item.span.start).Get(),L"Text")==prefix&&
+                    text(sliceRange(root,end,currentEnd).Get(),L"Text")==suffix&&text(replacement.Get(),L"Text")==output;
+                if(!textPreserved||currentLayout!=beforeLayout)std::printf("EXPERIMENTAL_CHANGE text=%d layout=%d start=%ld end=%ld\n",textPreserved,currentLayout==beforeLayout,item.span.start,item.span.end);
+                require(textPreserved&&currentLayout==beforeLayout,"Experimental replacement preserves surrounding text and layout");
+                }
                 invoke(undo.Get(),L"EndCustomRecord",DISPATCH_METHOD);record=false;
-                if(reverse){require(std::find(bodyPackage.equations.begin(),bodyPackage.equations.end(),removed.equation)!=bodyPackage.equations.end(),"Experimental exported native belongs to source package");const auto payload=nativePayload(removed.equation);retained.equations.erase(std::remove_if(retained.equations.begin(),retained.equations.end(),[&](const auto& value){return nativePayload(value)==payload;}),retained.equations.end());
+                if(!experimentalFast){if(reverse){require(std::find(bodyPackage.equations.begin(),bodyPackage.equations.end(),removed.equation)!=bodyPackage.equations.end(),"Experimental exported native belongs to source package");const auto payload=nativePayload(removed.equation);retained.equations.erase(std::remove_if(retained.equations.begin(),retained.equations.end(),[&](const auto& value){return nativePayload(value)==payload;}),retained.equations.end());
                     for(const auto& preview:removed.previews)retained.media.erase(std::remove(retained.media.begin(),retained.media.end(),preview),retained.media.end());
                 }else{added.push_back(native);}
                 const long delta=end-item.span.end,rootStart=integer(root,L"Start");
                 for(auto& binding:bindings)if(binding.key==region.key){binding.span.start+=delta;binding.span.end+=delta;}
                 bindings.push_back({region.key,region.range,{item.span.start-rootStart,end-rootStart},native,output});
+                }
                 report.status=L"SUCCEEDED";++result.succeeded;modified=true;
             }catch(const std::exception& error){std::printf("EXPERIMENTAL_ITEM_FAILURE %s\n",error.what());if(active)require(api.close(OLECLOSE_NOSAVE,activeObject.Get())==0,"Close failed experimental equation");if(record)invoke(undo.Get(),L"EndCustomRecord",DISPATCH_METHOD);
-                if(text(root,L"Text")!=beforeText||sourceSignature(sliceRange(root,item.span.start,item.span.end).Get(),true)!=beforeXml){
+                if(experimentalFast?wrote:(text(root,L"Text")!=beforeText||sourceSignature(sliceRange(root,item.span.start,item.span.end).Get(),true)!=beforeXml)){
                     if(target.kind==L"OMML"){
                         auto replacement=sliceRange(root,item.span.start,item.span.end+integer(root,L"End")-rootEnd);invoke(replacement.Get(),L"InsertXML",DISPATCH_METHOD,{sourcePackage.c_str()});
                         const long extra=integer(root,L"End")-rootEnd;
                         if(extra>0){auto trailing=sliceRange(root,item.span.end,item.span.end+extra);require(text(trailing.Get(),L"Text")==std::wstring(static_cast<size_t>(extra),L'\r'),"Experimental OMML restoration adds only trailing paragraph markers");invoke(trailing.Get(),L"Text",DISPATCH_PROPERTYPUT,{L""});}
                     }else{auto restored=invoke(word.document.Get(),L"Undo",DISPATCH_METHOD,{1L});require(restored.v.vt==VT_BOOL&&restored.v.boolVal,"Undo failed experimental replacement");}}
-                const bool textRestored=text(root,L"Text")==beforeText,layoutRestored=layoutSnapshot(root)==beforeLayout,sourceRestored=sourceSignature(sliceRange(root,item.span.start,item.span.end).Get(),true)==beforeXml;
+                if(!experimentalFast){const bool textRestored=text(root,L"Text")==beforeText,layoutRestored=layoutSnapshot(root)==beforeLayout,sourceRestored=sourceSignature(sliceRange(root,item.span.start,item.span.end).Get(),true)==beforeXml;
                 std::printf("EXPERIMENTAL_RECOVERY text=%d layout=%d source=%d\n",textRestored,layoutRestored,sourceRestored);
                 require(textRestored&&layoutRestored&&sourceRestored,"Experimental recovery restores full original formula and layout");
                 require(!regionFault(region.key,L"RECOVERY"),"Injected experimental recovery verification failure");
-                report.status=L"FAILED_PRESERVED";const std::string reason=error.what();report.reason=std::wstring(reason.begin(),reason.end());++result.failed;
+                }
+                report.status=experimentalFast?L"FAILED_UNVERIFIED":L"FAILED_PRESERVED";result.failedUnverified+=experimentalFast;const std::string reason=error.what();report.reason=std::wstring(reason.begin(),reason.end());++result.failed;
             }
-            std::printf("UI_ITEM_RESULT %zu %s %s\n",report.id,report.status==L"SUCCEEDED"?"SUCCEEDED":"FAILED_PRESERVED",wireHex(utf8(report.reason)).c_str());result.items.push_back(std::move(report));
+            std::printf("UI_ITEM_RESULT %zu %s %s\n",report.id,report.status==L"SUCCEEDED"?"SUCCEEDED":experimentalFast?"FAILED_UNVERIFIED":"FAILED_PRESERVED",wireHex(utf8(report.reason)).c_str());result.items.push_back(std::move(report));
         }
-        }catch(const std::exception& error){require(!taskCancelled(),"TASK_CANCELLED");if(connected)require(readDefaultPrefs(api)==defaults,"Experimental conversion preserves global MathType preferences");throw failure(region.key,stage,error);}
+        }catch(const std::exception& error){require(!taskCancelled(),"TASK_CANCELLED");if(experimentalFast){result.issues.push_back(failure(region.key,stage,error).issue);continue;}if(connected)require(readDefaultPrefs(api)==defaults,"Experimental conversion preserves global MathType preferences");throw failure(region.key,stage,error);}
     }
-    if(connected)require(readDefaultPrefs(api)==defaults,"Experimental conversion preserves global MathType preferences");
+    if(connected&&!experimentalFast)require(readDefaultPrefs(api)==defaults,"Experimental conversion preserves global MathType preferences");
+    if(experimentalFast){if(plans.empty())result.skipped=L"NO_TARGETS";else if(!modified)result.skipped=L"NO_CHANGES";return result;}
     // 没有实验目标：不保存、不重开，直接复用正文阶段已保存并核验的副本。
     if(plans.empty()){
         invoke(word.document.Get(),L"Close",DISPATCH_METHOD,{0L});word.document.Reset();
@@ -416,6 +484,10 @@ static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const s
 ExperimentalResult convertExperimental(WordSession& word,MathTypeApi& api,const std::wstring& path,const ExperimentalOptions& options,bool reverse,bool dollar,size_t firstId,const PackageState& bodyPackage,bool selfTest) {
     if(!options.enabled())return {};
     std::unique_ptr<ConversionCheckpoint> checkpoint;std::set<std::wstring> skipped;std::vector<ProcessingIssue> issues;std::vector<ExperimentalItem> preserved;
+    if(experimentalFast){
+        try{return convertPass(word,api,path,options,reverse,dollar,firstId,selfTest,skipped,checkpoint,bodyPackage);}
+        catch(const std::exception& error){require(!taskCancelled(),"TASK_CANCELLED");const std::string reason=error.what();ExperimentalResult result;result.enabled=true;result.options=options;result.issues.push_back({L"*",L"实验区域",L"FAST_CONVERSION",std::wstring(reason.begin(),reason.end())});return result;}
+    }
     for(;;){
         try{
             auto result=convertPass(word,api,path,options,reverse,dollar,firstId,selfTest,skipped,checkpoint,bodyPackage);result.issues=issues;

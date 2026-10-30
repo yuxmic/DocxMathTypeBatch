@@ -64,6 +64,7 @@ tests/test-batch.ps1
 tests/test-cancel.ps1
 tests/test-diagnostics.ps1
 tests/test-experimental.ps1
+tests/test-experimental-fast.ps1
 tests/test-faults.ps1
 tests/test-gui.ps1
 tests/test-installation.ps1

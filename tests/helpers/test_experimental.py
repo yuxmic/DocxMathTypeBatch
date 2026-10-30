@@ -825,6 +825,23 @@ def check_spacing(folder):
     print('OMML_SPACING_NATIVE_CONTENT_PASSED')
 
 
+def blocked_fixture(folder):
+    """生成开启修订和限制编辑的两个小样，供两种模式的入口拒绝检查。"""
+    for kind in ("tracking", "protected"):
+        document = Document()
+        document.core_properties.author = "Synthetic test fixture"
+        document.add_paragraph("Blocked input $a+1$ stays unchanged.")
+        if kind == "tracking":
+            node = OxmlElement("w:trackRevisions")
+            node.set(qn("w:val"), "true")
+        else:
+            node = OxmlElement("w:documentProtection")
+            node.set(qn("w:edit"), "readOnly")
+            node.set(qn("w:enforcement"), "1")
+        document.settings.element.append(node)
+        document.save(folder / f"{kind}.docx")
+
+
 if __name__ == "__main__":
     command, target = sys.argv[1:3]
     if command == 'spacing-fixture':
@@ -873,5 +890,7 @@ if __name__ == "__main__":
         no_changes_fixture(Path(target))
     elif command == "check-no-changes":
         check_no_changes(Path(target))
+    elif command == "blocked-fixture":
+        blocked_fixture(Path(target))
     else:
         raise SystemExit("unknown command")

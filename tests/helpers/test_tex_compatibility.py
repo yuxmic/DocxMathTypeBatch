@@ -6,6 +6,7 @@ from collections import Counter
 from pathlib import Path
 from docx import Document
 from docx.shared import Pt
+from docx.oxml import parse_xml
 import fitz
 from audit_docx import audit
 
@@ -91,6 +92,87 @@ def check(folder):
     print(json.dumps({'Status': 'PASSED', 'MathType': count, 'NoRedResiduals': True, 'OriginalSyntaxPreserved': True, 'NestedAndExperimental': True}))
 
 
+# 顶饰单独集中回归，不必为了验证本次修改运行整个项目的测试。
+ACCENT_TEX = [
+    ('Ŷ+Y\u0302', (r'\hat', 'Y')),
+    (r'\mathrm{Ȳ}_i^2', (r'\bar', 'Y', 'i', '2')),
+    ('Ȭ', (r'\bar', r'\tilde', 'O')),
+    (r'\widetilde{XY}', (r'\widetilde', 'X', 'Y')),
+    (r'\mathring{Y}', (r'\circ', 'Y')),
+    (r'\hat{Y}+\dot{Y}+\vec{Y}', (r'\hat', r'\dot', r'\vec')),
+]
+ACCENT_OMML = [
+    ('precomposed', '<m:r><m:t>Ŷ</m:t></m:r>', (r'\hat', 'Y')),
+    ('word-middle', '<m:r><m:t>XŶZ</m:t></m:r>', ('X', r'\hat', 'Y', 'Z')),
+    ('combining', '<m:r><m:t>XY\u0302</m:t></m:r>', ('X', r'\hat', 'Y')),
+    ('split-run', '<m:r><m:t>Y</m:t></m:r><m:r><m:t>\u0302</m:t></m:r>', (r'\hat', 'Y')),
+    ('stacked', '<m:r><m:t>Ȭ</m:t></m:r>', (r'\overline', r'\tilde', 'O')),
+    ('bold', '<m:r><m:rPr><m:sty m:val="b"/></m:rPr><m:t>Ŷ</m:t></m:r>', (r'\hat', r'\mathbf', 'Y')),
+]
+for label, code, expected in [('hat', '0302', r'\hat'), ('bar', '0304', r'\bar'),
+                              ('breve', '0306', r'\smile'), ('dot', '0307', r'\dot'),
+                              ('tilde', '0303', r'\tilde')]:
+    ACCENT_OMML.append((label, f'<m:acc><m:accPr><m:chr m:val="&#x{code};"/></m:accPr><m:e><m:r><m:t>Y</m:t></m:r></m:e></m:acc>', (expected, 'Y')))
+
+
+def accent_fixture(folder):
+    document = Document()
+    document.core_properties.author = 'Synthetic test fixture'
+    document.core_properties.last_modified_by = ''
+    document.styles['Normal'].font.size = Pt(12)
+    namespace = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
+    for source, _ in ACCENT_TEX:
+        document.add_paragraph('LaTeX $' + source + '$')
+    for label, body, _ in ACCENT_OMML:
+        paragraph = document.add_paragraph('Word ' + label + ' ')
+        paragraph._p.append(parse_xml(f'<m:oMath xmlns:m="{namespace}">{body}</m:oMath>'))
+    # 表格同时覆盖 Unicode LaTeX 和 Word 原生公式两个共用入口。
+    table = document.add_table(rows=2, cols=1)
+    table.cell(0, 0).text = '$Ŷ+Y\u0302$'
+    table.cell(1, 0).paragraphs[0]._p.append(parse_xml(f'<m:oMath xmlns:m="{namespace}"><m:r><m:t>Ŷ</m:t></m:r></m:oMath>'))
+    document.add_paragraph(r'Unmapped $\text{中文}$ stays unchanged.')
+    document.add_paragraph('Unmapped $Ç$ stays unchanged.')
+    document.save(folder / 'accents-input.docx')
+
+
+def accent_check(folder):
+    report = json.loads((folder / 'accents.json').read_text(encoding='utf-8-sig'))
+    count = len(ACCENT_TEX) + len(ACCENT_OMML) + 2
+    assert report['Status'] == 'PARTIAL' and report['Succeeded'] == count
+    assert report['Experimental']['Succeeded'] == 2
+    failures = [item for item in report['Items'] if item['Status'] == 'FAILED_PRESERVED']
+    assert len(failures) == 2 and all(item['Reason'] == 'UNSUPPORTED_NON_ASCII_TEX' for item in failures)
+    assert report['OriginalFileBytesUnchanged'] and report['WordReopenVerified']
+    assert audit(folder / 'accents.docx')['MathType'] == count
+    body = (folder / 'accents-native.txt').read_text(encoding='utf-8').splitlines()
+    assert len(body) == count
+    expected = [tokens for _, tokens in ACCENT_TEX] + [tokens for _, _, tokens in ACCENT_OMML]
+    for tex, tokens in zip(body, expected):
+        for token in tokens:
+            assert token in tex, (token, tex)
+    assert all(r'\hat' in tex for tex in body[-2:])
+    # 这里只做开发页面检查；正式转换继续沿用既有缓存回显和成功判定。
+    with fitz.open(str(folder / 'accents.docx') + '.pdf') as pdf:
+        page_text = ''.join(page.get_text() for page in pdf)
+        assert '\ufffd' not in page_text and '\u25c6' not in page_text
+    print(json.dumps({'Status': 'PASSED', 'Converted': count, 'Preserved': 2, 'BodyAndTable': True}))
+
+
+def accent_reverse_check(folder):
+    # 短音符的嵌套美元符只影响该对象，其余公式必须正常交付。
+    target = folder / 'accents-reverse.docx'
+    report = json.loads(target.with_suffix('.json').read_text(encoding='utf-8-sig'))
+    count = len(ACCENT_TEX) + len(ACCENT_OMML) + 2
+    assert report['Status'] == 'PARTIAL' and report['FailedPreserved'] == 1
+    assert report['Succeeded'] == count + 1 and report['Experimental']['Succeeded'] == 2
+    failures = [item for item in report['Items'] if item['Status'] == 'FAILED_PRESERVED']
+    assert failures[0]['Reason'] == 'UNSUPPORTED_OR_INVALID_NATIVE_EXPORT'
+    assert report['OriginalFileBytesUnchanged'] and report['WordReopenVerified']
+    assert audit(target)['MathType'] == 1
+    print('ACCENT_REVERSE_PARTIAL_PASSED')
+
+
 if __name__ == '__main__':
     mode, directory = sys.argv[1:3]
-    (fixture if mode == 'fixture' else check)(Path(directory))
+    {'fixture': fixture, 'check': check, 'accent-fixture': accent_fixture, 'accent-check': accent_check,
+     'accent-reverse-check': accent_reverse_check}[mode](Path(directory))

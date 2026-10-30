@@ -16,6 +16,7 @@ param(
     [string]$DisplaySpacing='follow',
     [ValidateSet('bracket','dollar')][string]$DisplayDelimiter='bracket',
     [switch]$Tables,[switch]$Textboxes,[switch]$Headers,[switch]$Notes,
+    [switch]$FastConversion,
     [string]$TaskDirectory,
     [ValidateRange(5,3600)][int]$TimeoutSeconds=120
 )
@@ -34,6 +35,7 @@ try{
     if($reverse -and ($RightNumbers -or $null -ne $FontSize -or $InlineSpacing -ne 'follow' -or $DisplaySpacing -ne 'follow')){Throw-ConverterError 'INVALID_OPTIONS' '反向转换不添加编号，也不设置字号或段落行距。'}
     if($null -ne $FontSize -and (-not ($FontSize -ge 1 -and $FontSize -le 256))){Throw-ConverterError 'INVALID_OPTIONS' '字号范围为 1–256 磅。'}
     $connection=Get-ConverterConnection
+    if($FastConversion -and -not $connection.Description.ExperimentalFastConversion){Throw-ConverterError 'UNSUPPORTED_OPTION' '当前 EXE 不支持实验性快速转换，请更新程序。'}
     if(-not $TaskDirectory){$TaskDirectory=Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) ('DocxMathTypeBatch/agent-tasks/'+[Guid]::NewGuid().ToString('N'))}
     $task=[IO.Path]::GetFullPath($TaskDirectory)
     if(Test-Path -LiteralPath $task){Throw-ConverterError 'TASK_DIRECTORY_EXISTS' '每次调用必须使用全新的任务目录，以免混用旧报告或停止标记。'}
@@ -44,6 +46,7 @@ try{
     if($RightNumbers){$arguments+=@('--numbers',('--number-format='+$NumberFormat),('--number-start='+$NumberStart),('--number-chapter='+$NumberChapter),('--number-section='+$NumberSection));if($CustomNumber){$arguments+='--number-custom'}}
     if(-not $reverse){$arguments+=@(('--inline-spacing='+$InlineSpacing),('--display-spacing='+$DisplaySpacing))}
     foreach($entry in @(@($Tables,'tables'),@($Textboxes,'textboxes'),@($Headers,'headers'),@($Notes,'notes'))){if($entry[0]){$arguments+='--experimental-'+$entry[1]}}
+    if($FastConversion){$arguments+='--experimental-fast'}
     $start=[Diagnostics.ProcessStartInfo]::new();$start.FileName=$connection.Path
     $start.Arguments=(@($arguments|ForEach-Object{ConvertTo-ConverterArgument $_}) -join ' ')
     $start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
@@ -66,9 +69,9 @@ try{
     }else{
         if(-not [IO.File]::Exists($reportPath) -or -not [IO.File]::Exists($outputFile)){Throw-ConverterError 'INVALID_RESULT' '程序退出成功，但输出或报告缺失。'}
         $report=[IO.File]::ReadAllText($reportPath,[Text.Encoding]::UTF8)|ConvertFrom-Json
-        if($report.SchemaVersion -ne 1 -or $report.CliContractVersion -ne 1 -or $report.Status -notin @('COMPLETE','PARTIAL') -or -not $report.OriginalFileBytesUnchanged -or -not $report.WordReopenVerified){Throw-ConverterError 'INVALID_RESULT' '转换结果未满足调用契约的核验要求。'}
+        if($report.SchemaVersion -ne 1 -or $report.CliContractVersion -ne 1 -or $report.Status -notin @('COMPLETE','PARTIAL') -or [bool]$report.FastConversion -ne [bool]$FastConversion -or (-not $FastConversion -and (-not $report.OriginalFileBytesUnchanged -or -not $report.WordReopenVerified))){Throw-ConverterError 'INVALID_RESULT' '转换结果未满足本次模式的调用契约。'}
         $preserved=@($report.Items|Where-Object{$_.Status -ne 'SUCCEEDED'}|Select-Object Id,Region,Kind,Status,Reason)
-        Write-ConverterJson ([ordered]@{SchemaVersion=1;Event='FINISHED';Status=$report.Status;ExitCode=0;ApplicationVersion=$report.ApplicationVersion;Output=$outputFile;ReportPath=$reportPath;TaskDirectory=$task;StopFile=$stopFile;LogPath=$logPath;Targets=$report.Targets;Succeeded=$report.Succeeded;FailedPreserved=$report.FailedPreserved;RejectedPreserved=$report.RejectedPreserved;NotAttempted=$report.NotAttempted;NumbersAdded=$report.NumbersAdded;NumbersUpdated=$report.NumbersUpdated;NumberReferencesUpdated=$report.NumberReferencesUpdated;ExistingDisplaysFormatted=$report.ExistingDisplaysFormatted;Issues=@($report.Issues);PreservedItems=$preserved;OriginalFileBytesUnchanged=$true;WordReopenVerified=$true;MathematicalEquivalenceVerified=$false})
+        Write-ConverterJson ([ordered]@{SchemaVersion=1;Event='FINISHED';Status=$report.Status;ExitCode=0;ApplicationVersion=$report.ApplicationVersion;FastConversion=[bool]$report.FastConversion;Validation=$report.Validation;Output=$outputFile;ReportPath=$reportPath;TaskDirectory=$task;StopFile=$stopFile;LogPath=$logPath;Targets=$report.Targets;Succeeded=$report.Succeeded;FailedPreserved=$report.FailedPreserved;FailedUnverified=$report.FailedUnverified;RejectedPreserved=$report.RejectedPreserved;NotAttempted=$report.NotAttempted;NumbersAdded=$report.NumbersAdded;NumbersUpdated=$report.NumbersUpdated;NumberReferencesUpdated=$report.NumberReferencesUpdated;ExistingDisplaysFormatted=$report.ExistingDisplaysFormatted;Issues=@($report.Issues);PreservedItems=$preserved;OriginalFileBytesUnchanged=$report.OriginalFileBytesUnchanged;WordReopenVerified=$report.WordReopenVerified;MathematicalEquivalenceVerified=$false})
     }
 }catch{Write-ConverterFailure $_;$exitCode=1}
 finally{

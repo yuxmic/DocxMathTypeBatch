@@ -65,6 +65,17 @@ if($reverseResult.Succeeded -ne 5 -or $reversePackage.MathType -ne 0){throw '基
 $exports=($reverseResult.Items.OutputText -join '') -replace '\s',''
 foreach($part in @('x_1','a+1','-x','c','d','\leq')){if(-not $exports.Contains($part)){throw ('多行公式导出丢失分支：'+$part)}}
 $evidence.Cases+=@{Name='reverse';Report=$reverseReport;Output=$reverse;AllBranchesPresent=$true}
+
+# 生产反向恢复在已有后方成功结果时复用正文快照，不能只覆盖开发自检分支。
+$previousBodyFault=$env:DOCX_MATH_BODY_FAULT
+try{
+    $env:DOCX_MATH_BODY_FAULT='1|RECOVERY'
+    $null=Invoke-LightweightTask 'reverse-snapshot-recovery' @('--worker-reverse',(Join-Path $run 'all.docx'),(Join-Path $run 'reverse-snapshot-recovery.docx'),(Join-Path $run 'reverse-snapshot-recovery.json'),'bracket',(Join-Path $run 'stop.flag'))
+}finally{$env:DOCX_MATH_BODY_FAULT=$previousBodyFault}
+$recovered=Get-Content -LiteralPath (Join-Path $run 'reverse-snapshot-recovery.json') -Raw|ConvertFrom-Json
+if($recovered.Status -ne 'PARTIAL' -or $recovered.Succeeded -ne 4 -or $recovered.NotAttempted -ne 1 -or (Read-LightweightPackage (Join-Path $run 'reverse-snapshot-recovery.docx')).MathType -ne 1){throw '反向正文快照恢复回归失败。'}
+$evidence.Cases+=@{Name='reverse-snapshot-recovery';Report=(Join-Path $run 'reverse-snapshot-recovery.json');SourcePreserved=$true}
+
 $againReport=Join-Path $run 'again.json'
 $null=Invoke-LightweightTask 'again' @('--worker-convert',(Join-Path $run 'all.docx'),(Join-Path $run 'again.docx'),$againReport,'paragraph',(Join-Path $run 'stop.flag'))
 $again=Get-Content -LiteralPath $againReport -Raw|ConvertFrom-Json
@@ -133,6 +144,19 @@ $null=Invoke-LightweightTask 'tex-compatibility-reverse' @('--worker-reverse',(J
 if($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $compatibilityInput).Hash -ne $compatibilityHash){throw '兼容改写页面、内容或原件检查失败。'}
 $evidence.Cases+=@{Name='tex-compatibility';NoRedResiduals=$true;OriginalSyntaxPreserved=$true;NestedAndExperimental=$true}
 
+# 顶饰只增加一组正文/表格样本；开发核对结构，正式转换仍沿用原判定。
+& python -B -X utf8 $compatibilityHelper accent-fixture $run
+if($LASTEXITCODE -ne 0){throw '顶饰样本生成失败。'}
+$null=Invoke-LightweightTask 'accents' @('--self-test',(Join-Path $run 'accents-input.docx'),(Join-Path $run 'accents.docx'),(Join-Path $run 'accents.json'),'paragraph','--experimental-tables') (Join-Path $project 'build/bin/docx-math-convert.exe')
+$null=Invoke-LightweightTask 'accents-native' @('--accent-export',(Join-Path $run 'accents.docx'),(Join-Path $run 'accents-native.txt')) (Join-Path $project 'build/bin/native-api-probe.exe')
+& python -B -X utf8 $compatibilityHelper accent-check $run
+if($LASTEXITCODE -ne 0){throw '顶饰转换回归失败。'}
+$evidence.Cases+=@{Name='accents';UnicodeAndOmml=$true;BodyAndTable=$true;UnmappedPreserved=$true}
+$null=Invoke-LightweightTask 'accents-reverse' @('--worker-reverse',(Join-Path $run 'accents.docx'),(Join-Path $run 'accents-reverse.docx'),(Join-Path $run 'accents-reverse.json'),'bracket',(Join-Path $run 'stop.flag'),'--experimental-tables')
+& python -B -X utf8 $compatibilityHelper accent-reverse-check $run
+if($LASTEXITCODE -ne 0){throw '顶饰反向导出未能逐式保留异常对象。'}
+$evidence.Cases+=@{Name='accents-reverse';NestedDelimitersPreserved=$true;OtherFormulasExported=$true}
+
 # 合成定界符样本覆盖行内/行外上下文，输入不含论文内容。
 $source=Join-Path $run 'delimiters.docx';$output=Join-Path $run 'delimiters-output.docx'
 $null=Invoke-LightweightTask 'delimiters' @('--self-test',$source,$output,(Join-Path $run 'delimiters-output.json'),'paragraph') (Join-Path $project 'build\bin\docx-math-convert.exe')
@@ -158,6 +182,63 @@ $null=Invoke-LightweightTask 'embedded-forms-reverse' @('--worker-reverse',(Join
 & python -B -X utf8 $inputForms check $run
 if($LASTEXITCODE -ne 0){throw '定界符、百分号或嵌入资产保留回归失败。'}
 $evidence.Cases+=@{Name='input-forms';AsymmetricDelimiters=$true;PercentRoundtrip=$true;OtherEmbeddingsUnchanged=$true;PartialOutputPreserved=$true}
+
+# 同一物理资产被多个对象引用时，分别核对全导出和仍有表格引用的结果。
+& python -B -X utf8 $inputForms shared-fixture $run
+if($LASTEXITCODE -ne 0){throw '共享公式资产样本生成失败。'}
+foreach($name in @('shared','shared-table')){
+    $null=Invoke-LightweightTask $name @('--worker-reverse',(Join-Path $run ($name+'-input.docx')),(Join-Path $run ($name+'.docx')),(Join-Path $run ($name+'.json')),'bracket',(Join-Path $run 'stop.flag'))
+}
+& python -B -X utf8 $inputForms shared-check $run
+if($LASTEXITCODE -ne 0){throw '共享公式资产反向转换回归失败。'}
+$evidence.Cases+=@{Name='shared-reverse';AllReferencesExported=$true;TableReferencePreserved=$true}
+
+# 行外公式旁的空白控件及空结果域属于排除边界，不能因整段空白扩展而被删除。
+& python -B -X utf8 $inputForms boundary-fixture $run
+if($LASTEXITCODE -ne 0){throw '公式外侧边界样本生成失败。'}
+$null=Invoke-LightweightTask 'formula-boundaries' @('--worker-convert',(Join-Path $run 'formula-boundaries-input.docx'),(Join-Path $run 'formula-boundaries.docx'),(Join-Path $run 'formula-boundaries.json'),'paragraph',(Join-Path $run 'stop.flag'),'--experimental-tables')
+& python -B -X utf8 $inputForms boundary-check $run
+if($LASTEXITCODE -ne 0){throw '公式外侧控件或普通域未完整保留。'}
+$evidence.Cases+=@{Name='formula-boundaries';LatexAndOmml=$true;ControlsAndFieldsPreserved=$true}
+
+# 快速模式一次保存，正反向及错误继续输出均明确报告未经核验。
+$null=Invoke-LightweightTask 'formula-boundaries-fast' @('--worker-convert',(Join-Path $run 'formula-boundaries-input.docx'),(Join-Path $run 'formula-boundaries-fast.docx'),(Join-Path $run 'formula-boundaries-fast.json'),'paragraph',(Join-Path $run 'stop.flag'),'--experimental-tables','--experimental-fast','--numbers')
+$null=Invoke-LightweightTask 'formula-boundaries-fast-reverse' @('--worker-reverse',(Join-Path $run 'formula-boundaries-fast.docx'),(Join-Path $run 'formula-boundaries-fast-reverse.docx'),(Join-Path $run 'formula-boundaries-fast-reverse.json'),'bracket',(Join-Path $run 'stop.flag'),'--experimental-tables','--experimental-fast')
+$previousFastFault=$env:DOCX_MATH_BODY_FAULT
+try{
+    $env:DOCX_MATH_BODY_FAULT='1|RECOVERY'
+    $null=Invoke-LightweightTask 'formula-boundaries-fast-failure' @('--worker-convert',(Join-Path $run 'formula-boundaries-input.docx'),(Join-Path $run 'formula-boundaries-fast-failure.docx'),(Join-Path $run 'formula-boundaries-fast-failure.json'),'paragraph',(Join-Path $run 'stop.flag'),'--experimental-tables','--experimental-fast')
+}finally{$env:DOCX_MATH_BODY_FAULT=$previousFastFault}
+& python -B -X utf8 $inputForms fast-check $run
+if($LASTEXITCODE -ne 0){throw '实验快速模式的输出或核验标记不符。'}
+$evidence.Cases+=@{Name='experimental-fast';ForwardAndReverse=$true;FailureUnverified=$true;PostChecksSkipped=$true}
+
+# 原生行内公式的独立编号行应清掉空格和手动编号，并按行外布局居中。
+& python -B -X utf8 $inputForms manual-omml-fixture $run
+if($LASTEXITCODE -ne 0){throw '手动编号原生公式样本生成失败。'}
+foreach($manualCase in @(@{Name='manual-omml';Flags=@()},@{Name='manual-omml-fast';Flags=@('--experimental-fast')},@{Name='manual-omml-numbered';Flags=@('--numbers')})){
+    $null=Invoke-LightweightTask $manualCase.Name (@('--worker-convert',(Join-Path $run 'manual-omml-input.docx'),(Join-Path $run ($manualCase.Name+'.docx')),(Join-Path $run ($manualCase.Name+'.json')),'paragraph',(Join-Path $run 'stop.flag'))+$manualCase.Flags)
+}
+& python -B -X utf8 $inputForms manual-omml-check $run
+if($LASTEXITCODE -ne 0){throw '原生公式手动编号清理或居中失败。'}
+$evidence.Cases+=@{Name='manual-omml';ManualNumbersRemoved=$true;NativeDisplayCentered=$true;ControlsAndUnitsPreserved=$true}
+$previousManualFault=$env:DOCX_MATH_BODY_FAULT
+try{
+    $env:DOCX_MATH_BODY_FAULT='1|RECOVERY'
+    $null=Invoke-LightweightTask 'manual-omml-recovery' @('--worker-convert',(Join-Path $run 'manual-omml-input.docx'),(Join-Path $run 'manual-omml-recovery.docx'),(Join-Path $run 'manual-omml-recovery.json'),'paragraph',(Join-Path $run 'stop.flag'))
+}finally{$env:DOCX_MATH_BODY_FAULT=$previousManualFault}
+& python -B -X utf8 $inputForms manual-omml-recovery-check $run
+if($LASTEXITCODE -ne 0){throw '原生公式失败后的手动编号恢复检查失败。'}
+
+# LaTeX 四种定界符复用同一编号清理规则，字段和控件仍作为范围边界。
+& python -B -X utf8 $inputForms manual-latex-fixture $run
+if($LASTEXITCODE -ne 0){throw 'LaTeX 手动编号样本生成失败。'}
+foreach($manualCase in @(@{Name='manual-latex';Flags=@()},@{Name='manual-latex-fast';Flags=@('--experimental-fast')},@{Name='manual-latex-numbered';Flags=@('--numbers')})){
+    $null=Invoke-LightweightTask $manualCase.Name (@('--worker-convert',(Join-Path $run 'manual-latex-input.docx'),(Join-Path $run ($manualCase.Name+'.docx')),(Join-Path $run ($manualCase.Name+'.json')),'paragraph',(Join-Path $run 'stop.flag'))+$manualCase.Flags)
+}
+& python -B -X utf8 $inputForms manual-latex-check $run
+if($LASTEXITCODE -ne 0){throw 'LaTeX 手动编号清理或居中失败。'}
+$evidence.Cases+=@{Name='manual-latex';FourDelimiters=$true;ManualNumbersRemoved=$true;ControlsAndUnitsPreserved=$true}
 
 # 交换保存包中的两条不同公式，数量和字节多重集均相同，仍必须拒绝错误位置。
 $oldBoundary=$env:DOCX_MATH_FAULT_BOUNDARY;$oldGate=$env:DOCX_MATH_FAULT_GATE

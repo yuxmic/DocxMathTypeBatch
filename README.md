@@ -6,14 +6,24 @@ DocxMathTypeBatch 是一款 Windows 桌面工具，适合在 Word 中使用 LaTe
 
 [使用说明](docs/使用说明.md) · [公式书写与兼容性](docs/MathType兼容LaTeX书写规范.md)
 
-## 下载 v0.1.2
+## 下载 v0.1.3
 
-- **[下载 Windows x64 ZIP](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.2/DocxMathTypeBatch-v0.1.2-win-x64.zip)**：推荐，包含程序、简要使用说明和 MIT 许可证，解压后运行。
-- [下载单文件 EXE](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.2/DocxMathTypeBatch.exe)
-- [下载配套 Skill v0.1](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.2/docx-latex-to-mathtype-skill-v0.1.zip)：供 Agent 自动调用，可选安装。
-- [版本说明与校验文件](https://github.com/yuxmic/DocxMathTypeBatch/releases/tag/v0.1.2)
+- **[下载 Windows x64 ZIP](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.3/DocxMathTypeBatch-v0.1.3-win-x64.zip)**：包含程序、简要使用说明和 MIT 许可证，解压后运行。
+- [下载单文件 EXE](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.3/DocxMathTypeBatch.exe)
+- **[下载完整 Skill v0.2](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.3/docx-latex-to-mathtype-skill-v0.2.zip)**：供 Agent 自动调用，内含同版 EXE，无需另外下载转换器。
+- [版本说明与校验文件](https://github.com/yuxmic/DocxMathTypeBatch/releases/tag/v0.1.3)
 
 运行前请安装下方列出的 Word 和 MathType。程序尚未进行代码签名，首次运行可能出现 Windows 安全提示。
+
+## v0.1.3 更新
+
+- **快速转换**：首页提供独立开关，适合紧急取得结果；省略逐式复查和保存后核验，仅保存一次，允许漏转、错位或内容错误，结果标记为“快速、未经核验”。
+- **常规模式提速**：复用正文快照和 OMML XML，减少重复资产复制，并缓存只读扫描期间不变的集合数量；保留原有核验、恢复和原件保护。
+- **组合修复**：修复快速转换与页眉页脚同时开启时的文件占用冲突；两种模式均拒绝开启修订或限制编辑的文件，并给出中文提示。
+- **手动编号清理**：正文中独立 LaTeX 或 Word 原生公式后的括号数字编号及多余空白自动清除，公式改用行外居中布局；开启右编号时按当前设置生成 MathType 原生编号。
+- **界面与诊断**：快速开关仅响应滑块点击，采用平滑过渡；实验区只保留四项位置选择，后台日志分别记录 Word 退出、COM 释放与副本清理耗时。
+
+配套 Skill 更新为 v0.2，内含同版转换器 EXE，无需额外下载或登记路径，支持明确指定快速模式，调用接口仍为版本 1。
 
 ## v0.1.2 更新
 
@@ -56,21 +66,30 @@ DocxMathTypeBatch 是一款 Windows 桌面工具，适合在 Word 中使用 LaTe
 
 ## Agent 自动调用
 
-EXE 与独立的 [docx-latex-to-mathtype Skill](skills/docx-latex-to-mathtype/SKILL.md) 分别安装：
+新版 [docx-latex-to-mathtype Skill](skills/docx-latex-to-mathtype/SKILL.md) 包含 `bin/DocxMathTypeBatch.exe`，Agent 用户只需安装一个完整 Skill 包：
 
-1. 下载上方 Skill ZIP，将其中的 `docx-latex-to-mathtype` 文件夹安装到所用 Agent 的 Skill 目录，并重新加载 Skill。
-2. 正常打开 v0.1.2 EXE 一次，程序会在本机登记自身位置；也可向 Agent 提供一次 EXE 位置进行连接。
-3. 向 Agent 提出要求，例如：“将这份 DOCX 的公式转成 MathType，正文行外公式添加右编号，结果另存为新文件。”
+1. 下载上方完整 Skill v0.2 ZIP，将其中的 `docx-latex-to-mathtype` 文件夹放到所用 Agent 的 Skill 目录，并重新加载 Skill。
+2. 确认本机已有桌面 Word 和 MathType，向 Agent 提出要求，例如：“将这份 DOCX 的公式转成 MathType，正文行外公式添加右编号，结果另存为新文件。”
 
-移动 EXE 后重新打开或重新连接即可，Skill 目录可以与 EXE 分开存放。
+Skill 通过相对路径调用包内程序，整个目录移动后无需重新连接。更新时替换完整 Skill 包，避免脚本和 EXE 版本混用。旧版 v0.1 Skill 仍采用独立 EXE 的方式。
 
 普通界面操作无需安装 Skill。自动调用需要 Agent 能在装有 Word 和 MathType 的 Windows 本机执行脚本；原 v0.1 不支持连接协议。安装与使用见[使用说明](docs/使用说明.md#使用-agent-自动调用)。
+
+## 转换模式
+
+**常规模式以稳定和结果可核验为优先。** 速度优化集中在减少重复扫描、重复数据读取与不必要的 COM 调用，保留内容、版式、资产核验和失败恢复流程。
+
+**快速模式以紧急情况下尽快取得输出为优先，接受稳定性下降。** 可省略核验和完整恢复，允许漏转、错位或内容错误；输出需由用户自行检查。原件不覆盖，输出重名保护、取消与任务进程管理继续保留。
+
+两种模式均拒绝开启修订或限制编辑的文件，分别提示“文件开启修订”或“文件已限制编辑”。这些状态复用扫描结果，不增加 Word 属性读取。
 
 ## 额外位置的公式转换（实验性）
 
 正文中的 LaTeX 和 Word 原生公式（OMML）默认共同转换，参与字号、行距、行外布局和右编号；不需要额外开启 OMML。
 
 “高级设置”右侧提供默认关闭的实验性功能：两个基本方向均可按需开启表格、文本框、页眉页脚及脚注尾注中的公式转换。
+
+首页“转换设置”最后一行的 **快速转换** 开关默认关闭。开启后，正文及已启用的额外位置只执行核心转换并直接保存，省略转换前内容核验、逐式复查、保存重开、重扫和包资产核验。结果可能漏转、错位或包含错误；列表和报告会标记为快速、未核验，适合优先取得输出的场景。原件仍保留，输出不覆盖已有文件。
 
 实验项只替换公式，不应用字号、段落行距或右编号设置，仅在当前程序会话中保留勾选状态。表格、文本框选项也作用于已启用的其他文档区域，例如页眉内的文本框需要同时开启“页眉页脚”和“文本框”。
 
@@ -93,11 +112,11 @@ EXE 与独立的 [docx-latex-to-mathtype Skill](skills/docx-latex-to-mathtype/SK
 | 正文中的 Word 自带公式（OMML） | 默认正向转换，并参与正文格式和编号；反向保持 |
 | 表格、文本框、页眉页脚、脚注尾注 | 默认保持；可单独开启实验性转换 |
 
-公式代码目前以 **ASCII LaTeX** 为支持范围，包含中文等非 ASCII 字符的公式会保留原式；中文正文可正常保留。程序不自动拆分或缩放过长公式，也不将缺少定界符的裸 LaTeX 作为转换目标。兼容写法与示例见[公式书写与兼容性](docs/MathType兼容LaTeX书写规范.md)。
+公式代码以 **ASCII LaTeX** 为基础，并在导入副本中将 `Ŷ`、`Ȳ`、`Ŷ` 等可识别的 Unicode 顶饰写法转换为命令。适配后仍含中文等不支持字符的公式会保留原式；中文正文可正常保留。程序不自动拆分或缩放过长公式，也不将缺少定界符的裸 LaTeX 作为转换目标。兼容写法与示例见[公式书写与兼容性](docs/MathType兼容LaTeX书写规范.md)。
 
 ## 问题反馈
 
-个别公式或实验区域处理失败时，程序会保留原内容并输出已经核验的转换结果，文件状态显示“部分完成”。可打开结果，并在“转换详情”查看跳过的位置及原因。
+默认模式中，个别公式或实验区域处理失败时，程序会保留原内容并输出已经核验的转换结果，文件状态显示“部分完成”。可打开结果，并在“转换详情”查看跳过的位置及原因。快速模式只记录已保存、未核验的结果。
 
 反馈时请提供 Windows、Word 和 MathType 版本、复现步骤，以及脱敏后的最小公式或文档示例。遇到转换失败，可附上“转换详情”中的相关日志，并先移除其中的文档内容和个人路径。
 

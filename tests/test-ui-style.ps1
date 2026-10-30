@@ -14,6 +14,11 @@ public static class StyleCheck {
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc callback,IntPtr data);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd,out uint pid);
     [StructLayout(LayoutKind.Sequential)] public struct Rect {public int Left,Top,Right,Bottom;}
+    [StructLayout(LayoutKind.Sequential)] public struct Point {public int X,Y;}
+    [DllImport("user32.dll")] static extern IntPtr ChildWindowFromPointEx(IntPtr parent,Point point,uint flags);
+    [DllImport("user32.dll")] static extern int MapWindowPoints(IntPtr from,IntPtr to,ref Point point,uint count);
+    [DllImport("user32.dll")] static extern bool SystemParametersInfo(uint action,uint param,out bool value,uint flags);
+    [DllImport("dwmapi.dll")] public static extern int DwmFlush();
     [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr hwnd,int id);
     [DllImport("user32.dll",EntryPoint="GetWindowLongPtrW")] public static extern IntPtr GetWindowLongPtr(IntPtr hwnd,int index);
     [DllImport("user32.dll",EntryPoint="GetClassLongPtrW")] public static extern IntPtr GetClassLongPtr(IntPtr hwnd,int index);
@@ -31,6 +36,9 @@ public static class StyleCheck {
     public static void SetText(IntPtr hwnd,string text){SendText(hwnd,0xC,IntPtr.Zero,text);}
     public static IntPtr FindFont(IntPtr hwnd,string text){return SendText(hwnd,0x158,(IntPtr)(-1),text);}
     public static string Text(IntPtr hwnd){var s=new StringBuilder(SendMessage(hwnd,0xE,IntPtr.Zero,IntPtr.Zero).ToInt32()+1);ReadText(hwnd,0xD,(IntPtr)s.Capacity,s);return s.ToString();}
+    // 按屏幕坐标命中实际子控件，不用直接发送按钮命令替代鼠标命中检查。
+    public static IntPtr ClickAtScreen(IntPtr parent,int x,int y){var p=new Point{X=x,Y=y};MapWindowPoints(IntPtr.Zero,parent,ref p,1);var hit=ChildWindowFromPointEx(parent,p,0);MapWindowPoints(parent,hit,ref p,1);var pos=(IntPtr)((p.X&65535)|((p.Y&65535)<<16));SendMessage(hit,0x201,(IntPtr)1,pos);SendMessage(hit,0x202,IntPtr.Zero,pos);return hit;}
+    public static bool ClientAnimations(){bool value;return SystemParametersInfo(0x1042,0,out value,0)&&value;}
     public static IntPtr Dialog(uint pid,string title){IntPtr found=IntPtr.Zero;EnumWindows((hwnd,data)=>{uint owner;GetWindowThreadProcessId(hwnd,out owner);if(owner==pid&&Text(hwnd)==title){found=hwnd;return false;}return true;},IntPtr.Zero);return found;}
 }
 '@
@@ -56,6 +64,18 @@ function Get-ButtonPixel([string]$Path,[IntPtr]$Button) {
     $bitmap=[Drawing.Bitmap]::new($Path)
     try{return $bitmap.GetPixel($buttonRect.Left-$parentRect.Left+12,$buttonRect.Top-$parentRect.Top+12).ToArgb()}
     finally{$bitmap.Dispose();[GuiBatchCheck]::SetThreadDpiAwarenessContext($previousDpi)|Out-Null}
+}
+function Save-FastFrame([string]$Name) {
+    # 直接读取本次预览的滑块像素，避免整窗重绘耗时超过动画时长。
+    [GuiBatchCheck]::RedrawWindow($styleFast,[IntPtr]::Zero,[IntPtr]::Zero,0x101)|Out-Null
+    [StyleCheck]::DwmFlush()|Out-Null
+    $bounds=[StyleCheck+Rect]::new();[StyleCheck]::GetWindowRect($styleFast,[ref]$bounds)|Out-Null
+    $crop=[Drawing.Bitmap]::new($bounds.Right-$bounds.Left,$bounds.Bottom-$bounds.Top);$graphics=[Drawing.Graphics]::FromImage($crop)
+    try{
+        $graphics.CopyFromScreen($bounds.Left,$bounds.Top,0,0,$crop.Size)
+        $framePath=Join-Path $styleFolder ($Name+'.png');$crop.Save($framePath,[Drawing.Imaging.ImageFormat]::Png);$styleEvidence.Screenshots+=$framePath
+        return $crop.GetPixel([int]($crop.Width/4),[int]($crop.Height/2)).ToArgb()
+    }finally{$graphics.Dispose();$crop.Dispose()}
 }
 function Assert-QueueColumns {
     $queue=[StyleCheck]::GetDlgItem($styleWindow,138)
@@ -100,6 +120,47 @@ try {
     $styleStart=[StyleCheck]::GetDlgItem($styleWindow,125)
     $styleSize=[StyleCheck]::GetDlgItem($styleWindow,113)
     $styleSpin=[StyleCheck]::GetDlgItem($styleWindow,114)
+    # 首页开关保留原生勾选状态及空格键操作，默认关闭。
+    $styleFast=[StyleCheck]::GetDlgItem($styleWindow,146)
+    if($styleFast -eq [IntPtr]::Zero -or ([StyleCheck]::GetWindowLongPtr($styleFast,-16).ToInt64() -band 0x1001000F) -ne 0x10010003){throw '首页快速转换未使用原生可访问开关。'}
+    if([StyleCheck]::SendMessage($styleFast,0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 0){throw '快速转换默认开启。'}
+    $fastBounds=[StyleCheck+Rect]::new();$numberBounds=[StyleCheck+Rect]::new();$outputBounds=[StyleCheck+Rect]::new();$fastLabelBounds=[StyleCheck+Rect]::new()
+    [StyleCheck]::GetWindowRect($styleFast,[ref]$fastBounds)|Out-Null
+    [StyleCheck]::GetWindowRect([StyleCheck]::GetDlgItem($styleWindow,137),[ref]$numberBounds)|Out-Null
+    [StyleCheck]::GetWindowRect([StyleCheck]::GetDlgItem($styleWindow,116),[ref]$outputBounds)|Out-Null
+    [StyleCheck]::GetWindowRect([StyleCheck]::GetDlgItem($styleWindow,147),[ref]$fastLabelBounds)|Out-Null
+    if($fastBounds.Top -le $numberBounds.Bottom -or $fastBounds.Bottom -ge $outputBounds.Top -or $fastLabelBounds.Left -ne $outputBounds.Left -or $fastBounds.Left -ne $numberBounds.Left){throw '快速转换未在设置末行按标签及输入控件对齐。'}
+    # 点击文字、右侧空白都不应切换；只有滑块本身命中按钮。
+    $fastY=[int](($fastBounds.Top+$fastBounds.Bottom)/2)
+    foreach($fastX in @(($fastLabelBounds.Left+4),($outputBounds.Right-4))){
+        $hit=[StyleCheck]::ClickAtScreen($styleWindow,$fastX,$fastY)
+        if($hit -eq $styleFast -or [StyleCheck]::SendMessage($styleFast,0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 0){throw '点击快速转换文字或同行空白仍会触发开关。'}
+    }
+    $hit=[StyleCheck]::ClickAtScreen($styleWindow,[int](($fastBounds.Left+$fastBounds.Right)/2),$fastY)
+    if($hit -ne $styleFast -or [StyleCheck]::SendMessage($styleFast,0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 1){throw '点击滑块未切换。'}
+    [StyleCheck]::SendMessage($styleFast,0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
+    Start-Sleep -Milliseconds 220
+    # 动画期间保持预览窗口可见，避免反复显示窗口的系统动画耗尽中间帧时间。
+    [GuiBatchCheck]::ShowWindow($styleWindow,4)|Out-Null
+    [StyleCheck]::SetWindowPos($styleWindow,[IntPtr](-1),0,0,0,0,0x13)|Out-Null
+    Save-StyleFrame '00c-首页快速转换关闭'|Out-Null
+    $fastOffPixel=Save-FastFrame '00e-开关关闭细节'
+    [StyleCheck]::SendMessage($styleWindow,0x28,$styleFast,[IntPtr]1)|Out-Null
+    [StyleCheck]::SendMessage($styleFast,0x100,[IntPtr]0x20,[IntPtr]::Zero)|Out-Null
+    [StyleCheck]::SendMessage($styleFast,0x101,[IntPtr]0x20,[IntPtr]::Zero)|Out-Null
+    if([StyleCheck]::SendMessage($styleFast,0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 1){throw '快速开关空格键未生效。'}
+    Start-Sleep -Milliseconds 60
+    $fastMidPixel=Save-FastFrame '00f-开关切换中间帧'
+    # 动画期间再次关闭再打开，确认最终状态正确且视觉能继续过渡。
+    [StyleCheck]::SendMessage($styleFast,0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
+    [StyleCheck]::SendMessage($styleFast,0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
+    Start-Sleep -Milliseconds 220
+    $fastOnPixel=Save-FastFrame '00g-开关开启细节'
+    if([StyleCheck]::ClientAnimations() -and @($fastOffPixel,$fastMidPixel,$fastOnPixel|Select-Object -Unique).Count -ne 3){throw '快速开关未呈现独立的动画中间帧。'}
+    if([StyleCheck]::SendMessage($styleFast,0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 1){throw '连续切换后状态错误。'}
+    Save-StyleFrame '00d-首页快速转换开启'|Out-Null
+    [GuiBatchCheck]::ShowWindow($styleWindow,0)|Out-Null
+    [StyleCheck]::SetWindowPos($styleWindow,[IntPtr](-2),0,0,0,0,0x13)|Out-Null
     Assert-QueueColumns
     foreach($id in @(137,136,111)){Assert-ComboSelection ([StyleCheck]::GetDlgItem($styleWindow,$id)) 1}
     [StyleCheck]::SendMessage([StyleCheck]::GetDlgItem($styleWindow,111),0x14E,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
@@ -132,6 +193,7 @@ try {
     [StyleCheck]::SendMessage($advanced,0,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
     foreach($id in @(201,202,226,227)){Assert-ComboSelection ([StyleCheck]::GetDlgItem($advanced,$id)) 1}
     if([StyleCheck]::Text([StyleCheck]::GetDlgItem($advanced,238)) -ne '实验性功能'){throw '实验项未合并进高级设置右侧。'}
+    foreach($id in @(239,246,247,248,249,250)){if([StyleCheck]::GetDlgItem($advanced,$id) -ne [IntPtr]::Zero){throw '实验区仍有副标题、说明文字或快速转换控件。'}}
     if([StyleCheck]::GetDlgItem($advanced,240) -ne [IntPtr]::Zero){throw '默认正文 OMML 仍保留开关。'}
     foreach($id in 241..244){if([StyleCheck]::SendMessage([StyleCheck]::GetDlgItem($advanced,$id),0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 0){throw '实验项默认开启。'}}
     $leftBounds=[GuiBatchCheck+Rect]::new();$rightBounds=[GuiBatchCheck+Rect]::new()
@@ -142,8 +204,10 @@ try {
     if(-not (Save-GuiWindow -PidValue $styleProcess.Id -Path $advancedFrame -WindowHandle $advanced)){throw '高级设置截图失败。'}
     $styleEvidence.Screenshots+=$advancedFrame
     [StyleCheck]::SendMessage([StyleCheck]::GetDlgItem($advanced,241),0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
+    [StyleCheck]::SendMessage([StyleCheck]::GetDlgItem($advanced,235),0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
     [StyleCheck]::PostMessage($advanced,0x10,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
     [StyleCheck]::SendMessage($styleWindow,0,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
+    if([StyleCheck]::SendMessage($styleFast,0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 1){throw '取消高级设置错误地关闭了首页快速转换。'}
     # 取消不提交实验设置，确定后再次打开可见；恢复默认关闭全部实验项。
     [StyleCheck]::PostMessage($styleWindow,0x111,[IntPtr]143,[IntPtr]::Zero)|Out-Null
     $deadline=[DateTime]::UtcNow.AddSeconds(10)
@@ -226,6 +290,7 @@ try {
     Assert-QueueColumns
     [StyleCheck]::SendMessage([StyleCheck]::GetDlgItem($styleWindow,102),0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
     Save-StyleFrame '07-反向格式'|Out-Null
+    if(([StyleCheck]::GetWindowLongPtr($styleFast,-16).ToInt64() -band 0x10000000) -eq 0 -or -not [StyleCheck]::IsWindowEnabled($styleFast) -or [StyleCheck]::SendMessage($styleFast,0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 1){throw '切换方向未保留快速开关。'}
     if([StyleCheck]::Text([StyleCheck]::GetDlgItem($styleWindow,109)) -ne '导出格式'){throw '反向设置没有切换。'}
     [StyleCheck]::PostMessage($styleWindow,0x111,[IntPtr]143,[IntPtr]::Zero)|Out-Null
     $deadline=[DateTime]::UtcNow.AddSeconds(10)
@@ -240,6 +305,7 @@ try {
     [StyleCheck]::PostMessage($advanced,0x111,[IntPtr]1,[IntPtr]::Zero)|Out-Null
     [StyleCheck]::SendMessage($styleWindow,0,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
     if(Test-Path -LiteralPath (Join-Path $styleFolder 'gui-worker.log')){throw '预览意外启动转换。'}
+    if([StyleCheck]::SendMessage($styleFast,0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 0){throw '确认恢复默认后首页快速开关未关闭。'}
     # 通过 DPI 变化消息验证实际控件排版；高缩放下按钮可经键盘滚动到可见区域。
     $previousScale=[int][StyleCheck]::GetDpiForWindow($styleWindow)
     foreach($scale in @(96,120,144,192)){
@@ -260,6 +326,10 @@ try {
     }
     $styleEvidence.Checks=@{QueueFiveColumns=$true;QueueWidthUnchanged=$true;LogColumnOpensDetails=$true;ComboSelectionNoBlue=$true;AdvancedComboSelection=$true;FourButtonStates=$true;SizeArrow=$true;SizeFrameAligned=$true;ProgressSeparated=$true;ModeDropdown=$true;ModeSelection=$true;UnifiedSettings=$true;ReverseSettings=$true;NoOfficeTask=$true;NoSettingsWritten=$true;MinimumWidthScreenshot=$true}
     $styleEvidence.Checks.EmbeddedGreenIcons=$true
+    $styleEvidence.Checks.HomeFastToggle=$true
+    $styleEvidence.Checks.FastToggleHitArea=$true
+    $styleEvidence.Checks.FastToggleAnimation=[StyleCheck]::ClientAnimations()
+    $styleEvidence.Checks.ExperimentalCheckboxesOnly=$true
     $styleEvidence.Status='PASSED'
     $styleEvidence.ExecutableSHA256=(Get-FileHash -LiteralPath $styleExe).Hash
     $styleEvidence.SourceSHA256=[ordered]@{}

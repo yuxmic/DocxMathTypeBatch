@@ -48,6 +48,12 @@ try{
         $peBytes=[IO.File]::ReadAllBytes($exe);$pe=[BitConverter]::ToInt32($peBytes,0x3c);$optional=$pe+24;$clr=$optional+112+14*8
         if([BitConverter]::ToUInt16($peBytes,$pe+4) -ne 0x8664 -or [BitConverter]::ToUInt16($peBytes,$optional) -ne 0x20b -or [BitConverter]::ToUInt32($peBytes,$clr) -ne 0 -or [BitConverter]::ToUInt32($peBytes,$clr+4) -ne 0){throw '成品必须为原生 x64 PE。'}
         [ordered]@{Executable=('build/bin/'+$program.Name+'.exe');ExecutableSHA256=(Get-FileHash -LiteralPath $exe).Hash;ExeBytes=$peBytes.Length;Machine='x64';ImportedDlls=$dlls;ClrDirectory=0}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $bin $program.Info) -Encoding utf8
+        if($program.Target -eq 'Gui'){
+            # Skill 的运行程序是构建产物，放在忽略目录中；源码清单不提交二进制。
+            $skillBin=Join-Path $projectRoot 'skills/docx-latex-to-mathtype/bin'
+            New-Item -ItemType Directory -Path $skillBin -Force|Out-Null
+            Copy-Item -LiteralPath $exe -Destination (Join-Path $skillBin 'DocxMathTypeBatch.exe') -Force
+        }
         Write-Output ('BUILD_PASSED: build/bin/'+$program.Name+'.exe')
     }
 }finally{
