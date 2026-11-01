@@ -74,7 +74,7 @@ try{
         try{Assert-Agent ($process.WaitForExit(5000) -and $process.ExitCode -eq $entry[2]) '轻量入口失败或弹窗阻塞'}finally{$process.Dispose()}
     }
     $description=Get-Content -LiteralPath (Join-Path $run 'describe.jsonl') -Raw|ConvertFrom-Json
-    Assert-Agent ($description.Version -eq '0.1.3' -and $description.CliContractVersion -eq 1 -and $description.BodyOmmlDefault -and $description.OptionalOmmlConversion) '程序版本或接口能力不符'
+    Assert-Agent ($description.Version -eq '0.1.4' -and $description.CliContractVersion -eq 1 -and $description.BodyOmmlDefault -and $description.OptionalOmmlConversion) '程序版本或接口能力不符'
     $wordAfter=@(Get-Process WINWORD -ErrorAction SilentlyContinue|Select-Object -ExpandProperty Id)
     Assert-Agent (-not @($wordAfter|Where-Object{$_ -notin $wordBefore}).Count) '能力查询启动了 Word'
     $evidence.Cases+=@{Name='native-query-help-and-errors';Status='PASSED';WordNotStarted=$true}

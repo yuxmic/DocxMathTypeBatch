@@ -6,20 +6,20 @@ DocxMathTypeBatch 是一款 Windows 桌面工具，适合在 Word 中使用 LaTe
 
 [使用说明](docs/使用说明.md) · [公式书写与兼容性](docs/MathType兼容LaTeX书写规范.md)
 
-## 下载 v0.1.3
+## 下载 v0.1.4
 
-- **[下载 Windows x64 ZIP](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.3/DocxMathTypeBatch-v0.1.3-win-x64.zip)**：包含程序、简要使用说明和 MIT 许可证，解压后运行。
-- [下载单文件 EXE](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.3/DocxMathTypeBatch.exe)
-- **[已发布的完整 Skill v0.2](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.3/docx-latex-to-mathtype-skill-v0.2.zip)**：内含 EXE。当前源码及配套打包版本已更新为 Skill v0.2.1，程序版本仍为 v0.1.3；新版包由维护者另行提供。
-- [版本说明与校验文件](https://github.com/yuxmic/DocxMathTypeBatch/releases/tag/v0.1.3)
+- **[下载 Windows x64 ZIP](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.4/DocxMathTypeBatch-v0.1.4-win-x64.zip)**：包含程序、简要使用说明和 MIT 许可证，解压后运行。
+- [下载单文件 EXE](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.4/DocxMathTypeBatch.exe)
+- **[下载完整 Skill v0.2.1](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.4/docx-latex-to-mathtype-skill-v0.2.1.zip)**：供 Agent 无界面调用，内含 v0.1.4 EXE，无需另行下载转换器。
+- [版本说明与校验文件](https://github.com/yuxmic/DocxMathTypeBatch/releases/tag/v0.1.4)
 
 运行前请安装下方列出的 Word 和 MathType。程序尚未进行代码签名，首次运行可能出现 Windows 安全提示。
 
-## 当前源码更新（尚未发布）
+## v0.1.4 更新
 
 - **问题日志**：中文摘要只展开问题和版式提醒，提供原文页码、原式片段、原因及建议，可切换查看原始日志。
 - **OMML 转换开关**：高级设置默认开启，可按需关闭；正文和已启用的实验区域使用同一选择。
-- **版式提醒**：提示支持范围内可能超宽、固定行距下可能显示不全的公式；快速开关旁的问号提供悬停说明。
+- **版式提醒**：检查正文独占行外式的单栏/等宽栏可用宽度，以及本轮公式所在段落的固定行距，提示可能显示不全；不检查非等宽栏、容器宽高或编号碰撞，快速模式不核验版式。快速开关旁的问号提供悬停说明。
 - **转换优化**：缓存 OMML 转换资源，复用正文及实验区域已核验的快照，减少重复读取，保留常规模式的恢复和保存核验。
 - **Skill v0.2.1**：内含转换器 EXE，通过无界面后台入口调用；AI 摘要只返回计数、问题短片段和独立提醒，区分标准核验与快速未经核验，调用接口仍为版本 1。
 
@@ -76,7 +76,7 @@ DocxMathTypeBatch 是一款 Windows 桌面工具，适合在 Word 中使用 LaTe
 
 新版 [docx-latex-to-mathtype Skill](skills/docx-latex-to-mathtype/SKILL.md) 包含 `bin/DocxMathTypeBatch.exe`，Agent 用户只需安装一个完整 Skill 包：
 
-1. 安装维护者提供的完整 `docx-latex-to-mathtype-skill-v0.2.1.zip`，将其中的 `docx-latex-to-mathtype` 文件夹放到所用 Agent 的 Skill 目录，并重新加载 Skill。上方发布页的 v0.2 为旧包。
+1. 下载上方完整 Skill v0.2.1 ZIP，将其中的 `docx-latex-to-mathtype` 文件夹放到所用 Agent 的 Skill 目录，并重新加载 Skill。
 2. 确认本机已有桌面 Word 和 MathType，向 Agent 提出要求，例如：“将这份 DOCX 的公式转成 MathType，正文行外公式添加右编号，结果另存为新文件。”
 
 Skill 通过相对路径调用包内程序的 `--describe --json`、`--worker-convert` / `--worker-reverse` 入口，无界面启动；不搜索注册表、PATH 或外部 EXE，整个目录移动后无需重新连接。更新时替换完整 Skill 包。成功公式只回计数，问题项带原文位置、机器原因及最多 160 字符的片段，完整报告和日志按需读取。
