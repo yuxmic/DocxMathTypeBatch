@@ -7,12 +7,13 @@ $ProjectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $TestOutputRoot = Join-Path $ProjectRoot 'tests/output'
 New-Item -ItemType Directory -Path $TestOutputRoot,(Join-Path $TestOutputRoot 'work') -Force | Out-Null
 
-function Get-TestSourcePath([string]$Name) {
-    if ($Name -in @('native_api_probe.cpp','test_native_numbering.h','test_experimental_api.h')) { return Join-Path $ProjectRoot ('tests/native/' + $Name) }
-    if ([IO.Path]::GetExtension($Name) -in @('.cpp','.c','.h')) { return Join-Path $ProjectRoot ('src/' + $Name) }
-    if ($Name -like '*.py') { return Join-Path $ProjectRoot ('tests/helpers/' + $Name) }
-    if ($Name -like 'test-*.ps1') { return Join-Path $ProjectRoot ('tests/' + $Name) }
-    return Join-Path $ProjectRoot $Name
+function Get-TestSourceHashes {
+    # 公开清单同时覆盖程序、专项脚本和测试辅助文件，模块迁移后无需维护第二份列表。
+    $hashes=[ordered]@{}
+    foreach($relative in Get-Content -LiteralPath (Join-Path $ProjectRoot 'upload-files.txt') | Where-Object {$_ -and -not $_.StartsWith('#')}) {
+        $hashes[$relative]=(Get-FileHash -LiteralPath (Join-Path $ProjectRoot $relative)).Hash
+    }
+    return $hashes
 }
 
 function New-TestFixtures([switch]$Native) {

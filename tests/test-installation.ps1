@@ -82,8 +82,7 @@ try {
     $installEvidence.ExecutableSHA256=(Get-FileHash -LiteralPath $installExe).Hash
     $installEvidence.CliExecutableSHA256=(Get-FileHash -LiteralPath (Join-Path $ProjectRoot 'build\bin\docx-math-convert.exe')).Hash
     $installEvidence.ProbeExecutableSHA256=(Get-FileHash -LiteralPath $installProbe).Hash
-    $installEvidence.SourceSHA256=[ordered]@{}
-    foreach($installFile in @('gui.cpp','convert_docx.cpp','mathtype_api.h','native_api_probe.cpp','test-installation.ps1')){$installEvidence.SourceSHA256[$installFile]=(Get-FileHash -LiteralPath (Get-TestSourcePath $installFile)).Hash}
+    $installEvidence.SourceSHA256=Get-TestSourceHashes
     $installEvidence.Status='PASSED';Write-Output 'INSTALLATION_ACCEPTANCE_PASSED'
 }finally{
     # 组件副本属于本轮临时文件；日志和 DOCX 保留为验证证据。

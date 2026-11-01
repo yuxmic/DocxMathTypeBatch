@@ -1,5 +1,7 @@
 // 界面、命令行和编号预览共用同一组设置，默认不触发额外 Word 调用。
 #pragma once
+#include "app_error.h"
+#include <cwchar>
 #include <cmath>
 #include <string>
 

@@ -1,7 +1,32 @@
 #requires -Version 7.0
 # 逐阶段真实取消验收：本轮副本、真实停止按钮、阻塞的任务 Word 和发布竞态。
-param([switch]$SkipBuild)
+param([switch]$SkipBuild,[string[]]$Case)
 $ErrorActionPreference='Stop'
+# 先验证场景名，再创建样本或启动构建；未指定时保持全部阶段验收。
+$cancelCases=@(
+    @{Name='forward-startup';Boundary='WORD_STARTUP'},
+    @{Name='forward-scan';Boundary='SCAN_PROGRESS'},
+    @{Name='forward-active-ole';Boundary='NATIVE_STYLE_WRITTEN'},
+    @{Name='forward-before-save';Boundary='BEFORE_SAVE'},
+    @{Name='forward-saved';Boundary='SAVED_DOCUMENT'},
+    @{Name='forward-rescan';Boundary='RESCAN_PROGRESS'},
+    @{Name='forward-before-publish';Boundary='BEFORE_PUBLISH'},
+    @{Name='forward-output-moved';Boundary='AFTER_OUTPUT_MOVE'},
+    @{Name='forward-committed';Boundary='AFTER_COMMIT'},
+    @{Name='reverse-scan';Boundary='SCAN_PROGRESS';Reverse=$true},
+    @{Name='reverse-before-save';Boundary='BEFORE_SAVE';Reverse=$true},
+    @{Name='reverse-rescan';Boundary='RESCAN_PROGRESS';Reverse=$true},
+    @{Name='reverse-output-moved';Boundary='AFTER_OUTPUT_MOVE';Reverse=$true},
+    @{Name='scan-worker';Boundary='SCAN_PROGRESS';Scan=$true},
+    @{Name='gui-scan';Boundary='SCAN_PROGRESS';Gui=$true},
+    @{Name='gui-reverse-committed';Boundary='AFTER_COMMIT';Gui=$true;Reverse=$true},
+    @{Name='gui-blocked-com';Boundary='NATIVE_STYLE_WRITTEN';Gui=$true;Block=$true}
+)
+if($PSBoundParameters.ContainsKey('Case')){
+    $unknown=@($Case|Where-Object {$_ -notin $cancelCases.Name})
+    if(-not $Case -or $unknown.Count){throw ('请指定有效的取消场景；不支持：'+($unknown -join ', '))}
+    $selectedCases=@($cancelCases|Where-Object {$_.Name -in $Case})
+}else{$selectedCases=$cancelCases}
 . (Join-Path $PSScriptRoot 'helpers/common.ps1')
 $cancelRoot=[IO.Path]::GetFullPath((Join-Path $ProjectRoot 'tests\output\work'))
 $cancelIdentity=[Guid]::NewGuid().ToString('N')
@@ -9,7 +34,7 @@ $cancelTask=Join-Path $cancelRoot ('取消验收-'+$cancelIdentity)
 $cancelPublished=Join-Path $ProjectRoot ('tests\output\取消验收-'+$cancelIdentity)
 New-Item -ItemType Directory -Path $cancelTask|Out-Null
 $cancelExe=Join-Path $ProjectRoot 'build\bin\DocxMathTypeBatch.exe'
-$cancelEvidence=[ordered]@{Status='FAILED';CheckedAt=(Get-Date -Format 'yyyy-MM-dd HH:mm:ss');Cases=@();Checks=@{};SampleDirectory=$cancelPublished}
+$cancelEvidence=[ordered]@{Status='FAILED';CheckedAt=(Get-Date -Format 'yyyy-MM-dd HH:mm:ss');SelectedCases=@($selectedCases.Name);ChecksScope='SelectedCases';Cases=@();Checks=@{};SampleDirectory=$cancelPublished}
 $cancelOldBoundary=$env:DOCX_MATH_FAULT_BOUNDARY;$cancelOldGate=$env:DOCX_MATH_FAULT_GATE
 Add-Type -TypeDefinition @'
 using System;
@@ -48,25 +73,7 @@ try {
     if(-not $SkipBuild){& (Join-Path $ProjectRoot 'build.ps1') -Target All}
     $cancelBase = New-TestFixtures -Native
     $cancelStyle = 'paragraph'
-    foreach($cancelCase in @(
-        @{Name='forward-startup';Boundary='WORD_STARTUP'},
-        @{Name='forward-scan';Boundary='SCAN_PROGRESS'},
-        @{Name='forward-active-ole';Boundary='NATIVE_STYLE_WRITTEN'},
-        @{Name='forward-before-save';Boundary='BEFORE_SAVE'},
-        @{Name='forward-saved';Boundary='SAVED_DOCUMENT'},
-        @{Name='forward-rescan';Boundary='RESCAN_PROGRESS'},
-        @{Name='forward-before-publish';Boundary='BEFORE_PUBLISH'},
-        @{Name='forward-output-moved';Boundary='AFTER_OUTPUT_MOVE'},
-        @{Name='forward-committed';Boundary='AFTER_COMMIT'},
-        @{Name='reverse-scan';Boundary='SCAN_PROGRESS';Reverse=$true},
-        @{Name='reverse-before-save';Boundary='BEFORE_SAVE';Reverse=$true},
-        @{Name='reverse-rescan';Boundary='RESCAN_PROGRESS';Reverse=$true},
-        @{Name='reverse-output-moved';Boundary='AFTER_OUTPUT_MOVE';Reverse=$true},
-        @{Name='scan-worker';Boundary='SCAN_PROGRESS';Scan=$true},
-        @{Name='gui-scan';Boundary='SCAN_PROGRESS';Gui=$true},
-        @{Name='gui-reverse-committed';Boundary='AFTER_COMMIT';Gui=$true;Reverse=$true},
-        @{Name='gui-blocked-com';Boundary='NATIVE_STYLE_WRITTEN';Gui=$true;Block=$true}
-    )){
+    foreach($cancelCase in $selectedCases){
         $cancelFolder=Join-Path $cancelTask $cancelCase.Name;New-Item -ItemType Directory -Path $cancelFolder|Out-Null
         $cancelInput=Join-Path $cancelFolder 'input.docx';Copy-Item -LiteralPath $(if($cancelCase.Reverse){$cancelBase.Output}else{$cancelBase.Input}) -Destination $cancelInput
         $cancelInputHash=(Get-FileHash -LiteralPath $cancelInput).Hash
@@ -116,13 +123,13 @@ try {
             $cancelProcess.Dispose()
         }
     }
-    # 多次硬取消后，真实 MathType 连接和正常保存核验必须仍可复用。
+    # 选中场景取消后，真实 MathType 连接和正常保存核验必须仍可复用。
     $env:DOCX_MATH_FAULT_BOUNDARY=$null;$env:DOCX_MATH_FAULT_GATE=$null
     $cancelNext=Start-CancelTask @('--worker-convert',$cancelBase.Input,(Join-Path $cancelTask 'next.docx'),(Join-Path $cancelTask 'next.json'),$cancelStyle,(Join-Path $cancelTask 'next-stop.flag')) $cancelTask 'next-task'
-    try{Wait-CancelProcess $cancelNext;if($cancelNext.ExitCode -ne 0){throw '多次取消后下一次转换失败。'}}finally{$cancelNext.Dispose()}
-    $cancelEvidence.Checks=@{AllStages=$true;PublicationRollback=$true;BlockedComImmediate=$true;NoPostCancelProcessing=$true;NoRecoveryWord=$true;NoPartialOutput=$true;OriginalAndExistingFilesUnchanged=$true;NextConversionPassed=$true}
+    try{Wait-CancelProcess $cancelNext;if($cancelNext.ExitCode -ne 0){throw '取消后下一次转换失败。'}}finally{$cancelNext.Dispose()}
+    $cancelEvidence.Checks=@{AllStages=($selectedCases.Count -eq $cancelCases.Count);PublicationRollback=(@($selectedCases|Where-Object {$_.Boundary -in @('AFTER_OUTPUT_MOVE','AFTER_COMMIT')}).Count -gt 0);BlockedComImmediate=(@($selectedCases|Where-Object {$_.Block}).Count -gt 0);NoPostCancelProcessing=$true;NoRecoveryWord=$true;NoPartialOutput=$true;OriginalAndExistingFilesUnchanged=$true;NextConversionPassed=$true}
     $cancelEvidence.ExecutableSHA256=(Get-FileHash -LiteralPath $cancelExe).Hash
-    $cancelEvidence.SourceSHA256=[ordered]@{};foreach($cancelSource in @('gui.cpp','convert_docx.cpp','docx_scan.h','word_automation.h','task_guard.h','test-cancel.ps1')){$cancelEvidence.SourceSHA256[$cancelSource]=(Get-FileHash -LiteralPath (Get-TestSourcePath $cancelSource)).Hash}
+    $cancelEvidence.SourceSHA256=Get-TestSourceHashes
     $cancelEvidence.Status='PASSED';Write-Output 'CANCELLATION_ACCEPTANCE_PASSED'
 }finally{
     $env:DOCX_MATH_FAULT_BOUNDARY=$cancelOldBoundary;$env:DOCX_MATH_FAULT_GATE=$cancelOldGate

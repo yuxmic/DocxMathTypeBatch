@@ -58,7 +58,7 @@ try{
     $linkEvidence.Checks=@{RealAutomaticWordLink=$true;PrivateOnCallAndRestoration=$true;CachedPreviewUnchanged=$true;FinalUpdateModeRestored=$true;WordGlobalOptionUnchanged=$true;InputAndLinkedSourceUnchanged=$true;IndependentAudit=$true}
     $linkEvidence.ExecutableSHA256=(Get-FileHash -LiteralPath (Join-Path $ProjectRoot 'build\bin\DocxMathTypeBatch.exe')).Hash
     $linkEvidence.ProbeExecutableSHA256=(Get-FileHash -LiteralPath (Join-Path $ProjectRoot 'build\bin\native-api-probe.exe')).Hash
-    $linkEvidence.SourceSHA256=[ordered]@{};foreach($linkFile in @('docx_scan.h','convert_docx.cpp','word_automation.h','native_api_probe.cpp','test-link-updates.ps1')){$linkEvidence.SourceSHA256[$linkFile]=(Get-FileHash -LiteralPath (Get-TestSourcePath $linkFile)).Hash}
+    $linkEvidence.SourceSHA256=Get-TestSourceHashes
     $linkEvidence.Status='PASSED';Write-Output 'LINK_UPDATES_ACCEPTANCE_PASSED'
 }finally{
     if($linkOwned){if($linkDocument){$linkDocument.Close(0)};if($linkSourceDocument){$linkSourceDocument.Close(0)};if($null -ne $linkOriginalOption){$linkWord.Options.UpdateLinksAtOpen=$linkOriginalOption};$linkWord.Quit(0)}

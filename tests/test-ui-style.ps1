@@ -1,6 +1,6 @@
 #requires -Version 7.0
 # 原生界面外观验收：真实控件状态、最小窗口布局和截图；不启动 Office，不写用户设置。
-param([switch]$SkipBuild)
+param([switch]$SkipBuild,[ValidateSet('All','Fast','Help')][string]$Case='All')
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'helpers/common.ps1')
 if(-not $SkipBuild){& (Join-Path $ProjectRoot 'build.ps1') -Target Gui}
@@ -13,10 +13,14 @@ public static class StyleCheck {
     public delegate bool EnumProc(IntPtr hwnd,IntPtr data);
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc callback,IntPtr data);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr hwnd,out uint pid);
+    [DllImport("user32.dll",EntryPoint="GetClassNameW",CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr hwnd,StringBuilder name,int capacity);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd);
     [StructLayout(LayoutKind.Sequential)] public struct Rect {public int Left,Top,Right,Bottom;}
     [StructLayout(LayoutKind.Sequential)] public struct Point {public int X,Y;}
+    [DllImport("user32.dll")] public static extern bool GetCursorPos(out Point point);
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int x,int y);
     [DllImport("user32.dll")] static extern IntPtr ChildWindowFromPointEx(IntPtr parent,Point point,uint flags);
-    [DllImport("user32.dll")] static extern int MapWindowPoints(IntPtr from,IntPtr to,ref Point point,uint count);
+    [DllImport("user32.dll")] public static extern int MapWindowPoints(IntPtr from,IntPtr to,ref Point point,uint count);
     [DllImport("user32.dll")] static extern bool SystemParametersInfo(uint action,uint param,out bool value,uint flags);
     [DllImport("dwmapi.dll")] public static extern int DwmFlush();
     [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr hwnd,int id);
@@ -40,6 +44,7 @@ public static class StyleCheck {
     public static IntPtr ClickAtScreen(IntPtr parent,int x,int y){var p=new Point{X=x,Y=y};MapWindowPoints(IntPtr.Zero,parent,ref p,1);var hit=ChildWindowFromPointEx(parent,p,0);MapWindowPoints(parent,hit,ref p,1);var pos=(IntPtr)((p.X&65535)|((p.Y&65535)<<16));SendMessage(hit,0x201,(IntPtr)1,pos);SendMessage(hit,0x202,IntPtr.Zero,pos);return hit;}
     public static bool ClientAnimations(){bool value;return SystemParametersInfo(0x1042,0,out value,0)&&value;}
     public static IntPtr Dialog(uint pid,string title){IntPtr found=IntPtr.Zero;EnumWindows((hwnd,data)=>{uint owner;GetWindowThreadProcessId(hwnd,out owner);if(owner==pid&&Text(hwnd)==title){found=hwnd;return false;}return true;},IntPtr.Zero);return found;}
+    public static IntPtr Tooltip(uint pid){IntPtr found=IntPtr.Zero;EnumWindows((hwnd,data)=>{uint owner;GetWindowThreadProcessId(hwnd,out owner);var name=new StringBuilder(64);GetClassName(hwnd,name,name.Capacity);if(owner==pid&&name.ToString()=="tooltips_class32"&&IsWindowVisible(hwnd)){found=hwnd;return false;}return true;},IntPtr.Zero);return found;}
 }
 '@
 $styleFolder=Join-Path $ProjectRoot ('tests\output\UI样式-'+[Guid]::NewGuid().ToString('N'))
@@ -49,7 +54,8 @@ $styleExe=Join-Path $ProjectRoot 'build\bin\DocxMathTypeBatch.exe'
 $styleCopy=Join-Path $styleFolder '研究报告.docx';[IO.File]::WriteAllText($styleCopy,'UI preview only')
 $styleProcess=$null
 $styleDpi=[GuiBatchCheck]::SetThreadDpiAwarenessContext([IntPtr](-4))
-$styleEvidence=[ordered]@{Status='FAILED';Direction='A按钮质感+B布局';Screenshots=@();Checks=[ordered]@{}}
+$styleEvidence=[ordered]@{Status='FAILED';Case=$Case;Direction='A按钮质感+B布局';Screenshots=@();Checks=[ordered]@{}}
+$fastHelpText='舍弃版式检查，提高转换速度，但存在错位风险'
 function Save-StyleFrame([string]$Name) {
     $framePath=Join-Path $styleFolder ($Name+'.png')
     if(-not (Save-GuiWindow -PidValue $styleProcess.Id -Path $framePath)){throw ('截图失败：'+$Name)}
@@ -65,9 +71,9 @@ function Get-ButtonPixel([string]$Path,[IntPtr]$Button) {
     try{return $bitmap.GetPixel($buttonRect.Left-$parentRect.Left+12,$buttonRect.Top-$parentRect.Top+12).ToArgb()}
     finally{$bitmap.Dispose();[GuiBatchCheck]::SetThreadDpiAwarenessContext($previousDpi)|Out-Null}
 }
-function Save-FastFrame([string]$Name) {
+function Save-FastFrame([string]$Name,[switch]$NoRedraw) {
     # 直接读取本次预览的滑块像素，避免整窗重绘耗时超过动画时长。
-    [GuiBatchCheck]::RedrawWindow($styleFast,[IntPtr]::Zero,[IntPtr]::Zero,0x101)|Out-Null
+    if(-not $NoRedraw){[GuiBatchCheck]::RedrawWindow($styleFast,[IntPtr]::Zero,[IntPtr]::Zero,0x101)|Out-Null}
     [StyleCheck]::DwmFlush()|Out-Null
     $bounds=[StyleCheck+Rect]::new();[StyleCheck]::GetWindowRect($styleFast,[ref]$bounds)|Out-Null
     $crop=[Drawing.Bitmap]::new($bounds.Right-$bounds.Left,$bounds.Bottom-$bounds.Top);$graphics=[Drawing.Graphics]::FromImage($crop)
@@ -76,6 +82,62 @@ function Save-FastFrame([string]$Name) {
         $framePath=Join-Path $styleFolder ($Name+'.png');$crop.Save($framePath,[Drawing.Imaging.ImageFormat]::Png);$styleEvidence.Screenshots+=$framePath
         return $crop.GetPixel([int]($crop.Width/4),[int]($crop.Height/2)).ToArgb()
     }finally{$graphics.Dispose();$crop.Dispose()}
+}
+function Assert-FastHelp {
+    # 问号保留完整可访问名称和 16 DIP 点击区，圈形约 12 DIP，允许轻微光学对齐调整。
+    $help=[StyleCheck]::GetDlgItem($styleWindow,148)
+    if($help -eq [IntPtr]::Zero -or [StyleCheck]::Text($help) -ne $fastHelpText -or
+       ([StyleCheck]::GetWindowLongPtr($help,-16).ToInt64() -band 0x1000000F) -ne 0x1000000B){throw '快速转换帮助缺失、可访问名称不符或未采用可见自绘按钮。'}
+    $helpBounds=[StyleCheck+Rect]::new();$toggleBounds=[StyleCheck+Rect]::new();$labelBounds=[StyleCheck+Rect]::new();$clientBounds=[StyleCheck+Rect]::new()
+    [StyleCheck]::GetWindowRect($help,[ref]$helpBounds)|Out-Null
+    [StyleCheck]::GetWindowRect($styleFast,[ref]$toggleBounds)|Out-Null
+    [StyleCheck]::GetWindowRect([StyleCheck]::GetDlgItem($styleWindow,147),[ref]$labelBounds)|Out-Null
+    [StyleCheck]::GetClientRect($styleWindow,[ref]$clientBounds)|Out-Null
+    $origin=[StyleCheck+Point]::new();[StyleCheck]::MapWindowPoints($styleWindow,[IntPtr]::Zero,[ref]$origin,1)|Out-Null
+    $scale=[StyleCheck]::GetDpiForWindow($styleWindow)/96.0
+    $centerOffset=[Math]::Abs(($helpBounds.Top+$helpBounds.Bottom-$labelBounds.Top-$labelBounds.Bottom)/2.0)
+    if([Math]::Abs($labelBounds.Right-$labelBounds.Left-52*$scale) -gt 1 -or [Math]::Abs($helpBounds.Left-$labelBounds.Left-56*$scale) -gt 1 -or
+       $centerOffset -gt 2*$scale+1 -or [Math]::Abs($helpBounds.Right-$helpBounds.Left-16*$scale) -gt 1 -or
+       [Math]::Abs($helpBounds.Bottom-$helpBounds.Top-16*$scale) -gt 1){throw '快速转换问号帮助尺寸或位置不符。'}
+    if($helpBounds.Left -lt $labelBounds.Right -or $helpBounds.Right -gt $toggleBounds.Left -or
+       $helpBounds.Right -gt $origin.X+$clientBounds.Right -or $helpBounds.Bottom -gt $origin.Y+$clientBounds.Bottom){throw '快速转换问号帮助未独立位于标签与滑块之间。'}
+    return $helpBounds
+}
+function Assert-FastHelpTooltip {
+    # 只移动鼠标到本轮窗口验证真实悬停；无论成败均恢复原鼠标位置。
+    $savedCursor=[StyleCheck+Point]::new()
+    if(-not [StyleCheck]::GetCursorPos([ref]$savedCursor)){throw '无法保存鼠标位置。'}
+    try{
+        $helpBounds=Assert-FastHelp
+        $labelBounds=[StyleCheck+Rect]::new();[StyleCheck]::GetWindowRect([StyleCheck]::GetDlgItem($styleWindow,147),[ref]$labelBounds)|Out-Null
+        $awayX=$labelBounds.Left+2;$awayY=[int](($labelBounds.Top+$labelBounds.Bottom)/2)
+        [StyleCheck]::SetCursorPos($awayX,$awayY)|Out-Null
+        # 留出一次真实移出消息处理时间，避免紧接的移入被系统合并。
+        Start-Sleep -Milliseconds 100
+        $deadline=[DateTime]::UtcNow.AddSeconds(5)
+        do{Start-Sleep -Milliseconds 50;$tooltip=[StyleCheck]::Tooltip($styleProcess.Id);if([DateTime]::UtcNow -gt $deadline){throw '帮助提示离开问号后仍常驻显示。'}}while($tooltip -ne [IntPtr]::Zero)
+        [StyleCheck]::SetCursorPos([int](($helpBounds.Left+$helpBounds.Right)/2),[int](($helpBounds.Top+$helpBounds.Bottom)/2))|Out-Null
+        # 指针已真实移入，再通知帮助控件中心，仍由系统悬停计时显示提示。
+        $helpPoint=[IntPtr](([int](($helpBounds.Right-$helpBounds.Left)/2)) -bor (([int](($helpBounds.Bottom-$helpBounds.Top)/2)) -shl 16))
+        [StyleCheck]::SendMessage([StyleCheck]::GetDlgItem($styleWindow,148),0x200,[IntPtr]::Zero,$helpPoint)|Out-Null
+        $deadline=[DateTime]::UtcNow.AddSeconds(5)
+        do{Start-Sleep -Milliseconds 50;$tooltip=[StyleCheck]::Tooltip($styleProcess.Id);if([DateTime]::UtcNow -gt $deadline){throw '真实悬停问号后未显示原生帮助提示。'}}while($tooltip -eq [IntPtr]::Zero)
+        $tooltipText=[StyleCheck]::Text($tooltip)
+        if($tooltipText -ne $fastHelpText){throw '原生帮助提示未显示完整风险说明。'}
+        # 等待系统提示淡入结束，避免截图只取得接近透明的第一帧。
+        Start-Sleep -Milliseconds 200
+        [StyleCheck]::DwmFlush()|Out-Null
+        $bounds=[StyleCheck+Rect]::new();[StyleCheck]::GetWindowRect($tooltip,[ref]$bounds)|Out-Null
+        $framePath=Join-Path $styleFolder '00k-快速帮助悬停提示.png'
+        $bitmap=[Drawing.Bitmap]::new($bounds.Right-$bounds.Left,$bounds.Bottom-$bounds.Top);$graphics=[Drawing.Graphics]::FromImage($bitmap)
+        try{$graphics.CopyFromScreen($bounds.Left,$bounds.Top,0,0,$bitmap.Size);$bitmap.Save($framePath,[Drawing.Imaging.ImageFormat]::Png)}
+        finally{$graphics.Dispose();$bitmap.Dispose()}
+        $styleEvidence.Screenshots+=$framePath
+        [StyleCheck]::SetCursorPos($awayX,$awayY)|Out-Null
+        $deadline=[DateTime]::UtcNow.AddSeconds(5)
+        do{Start-Sleep -Milliseconds 50;if([DateTime]::UtcNow -gt $deadline){throw '移开鼠标后帮助提示未自动隐藏。'}}while([StyleCheck]::IsWindowVisible($tooltip))
+        $styleEvidence.FastHelpTooltip=@{Text=$tooltipText;WindowClass='tooltips_class32';VisibleOnHover=$true;HiddenOnLeave=$true;Screenshot=$framePath}
+    }finally{[StyleCheck]::SetCursorPos($savedCursor.X,$savedCursor.Y)|Out-Null}
 }
 function Assert-QueueColumns {
     $queue=[StyleCheck]::GetDlgItem($styleWindow,138)
@@ -104,6 +166,8 @@ try {
         $styleWindow=[GuiBatchCheck]::Find($styleProcess.Id)
         if($styleProcess.HasExited -or [DateTime]::UtcNow -gt $deadline){throw '样式预览启动失败。'}
     }while($styleWindow -eq [IntPtr]::Zero)
+    # Fast 定向入口只检查首页开关，不执行图标和高级设置等完整样式组。
+    if($Case -eq 'All'){
     # 真实窗口大小图标都必须来自内嵌资源，预览保存供目视核验。
     foreach($iconKind in @(@{Name='large';Index=-14},@{Name='small';Index=-34})){
         $handle=[StyleCheck]::GetClassLongPtr($styleWindow,$iconKind.Index)
@@ -115,6 +179,7 @@ try {
             if($green -lt 5){throw '窗口图标不含预期绿色。'}
             $bitmap.Save((Join-Path $styleFolder ('icon-'+$iconKind.Name+'.png')),[Drawing.Imaging.ImageFormat]::Png)
         }finally{$bitmap.Dispose()}
+    }
     }
     Start-Sleep -Milliseconds 200
     $styleStart=[StyleCheck]::GetDlgItem($styleWindow,125)
@@ -130,9 +195,27 @@ try {
     [StyleCheck]::GetWindowRect([StyleCheck]::GetDlgItem($styleWindow,116),[ref]$outputBounds)|Out-Null
     [StyleCheck]::GetWindowRect([StyleCheck]::GetDlgItem($styleWindow,147),[ref]$fastLabelBounds)|Out-Null
     if($fastBounds.Top -le $numberBounds.Bottom -or $fastBounds.Bottom -ge $outputBounds.Top -or $fastLabelBounds.Left -ne $outputBounds.Left -or $fastBounds.Left -ne $numberBounds.Left){throw '快速转换未在设置末行按标签及输入控件对齐。'}
+    $fastHelpBounds=Assert-FastHelp
+    if($Case -eq 'Help'){
+        # 问号专项只验证本次改动，不依赖动画中间帧或其他控件的焦点截图。
+        [GuiBatchCheck]::ShowWindow($styleWindow,4)|Out-Null
+        [StyleCheck]::SetWindowPos($styleWindow,[IntPtr](-1),0,0,0,0,0x13)|Out-Null
+        Assert-FastHelpTooltip
+        $outer=[StyleCheck+Rect]::new();$client=[StyleCheck+Rect]::new()
+        [StyleCheck]::GetWindowRect($styleWindow,[ref]$outer)|Out-Null;[StyleCheck]::GetClientRect($styleWindow,[ref]$client)|Out-Null
+        $scale=[StyleCheck]::GetDpiForWindow($styleWindow)/96.0
+        [StyleCheck]::SetWindowPos($styleWindow,[IntPtr]::Zero,0,0,[int](800*$scale+$outer.Right-$outer.Left-$client.Right),$outer.Bottom-$outer.Top,0x16)|Out-Null
+        Assert-FastHelp|Out-Null
+        Save-StyleFrame '00j-最小800宽快速帮助'|Out-Null
+        $styleEvidence.Checks=@{FastHelpAccessibleName=$true;FastHelpPosition=$true;FastHelpTooltipOnHover=$true;FastHelpTooltipHidesOnLeave=$true;MinimumFastHelpVisible=$true;NoOfficeTask=$true}
+        $styleEvidence.Status='PASSED';$styleEvidence.ExecutableSHA256=(Get-FileHash -LiteralPath $styleExe).Hash
+        $styleEvidence.SourceSHA256=Get-TestSourceHashes
+        Write-Output ('UI_STYLE_PASSED: '+$styleFolder)
+        return
+    }
     # 点击文字、右侧空白都不应切换；只有滑块本身命中按钮。
     $fastY=[int](($fastBounds.Top+$fastBounds.Bottom)/2)
-    foreach($fastX in @(($fastLabelBounds.Left+4),($outputBounds.Right-4))){
+    foreach($fastX in @(($fastLabelBounds.Left+4),([int](($fastHelpBounds.Left+$fastHelpBounds.Right)/2)),($outputBounds.Right-4))){
         $hit=[StyleCheck]::ClickAtScreen($styleWindow,$fastX,$fastY)
         if($hit -eq $styleFast -or [StyleCheck]::SendMessage($styleFast,0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 0){throw '点击快速转换文字或同行空白仍会触发开关。'}
     }
@@ -156,9 +239,40 @@ try {
     [StyleCheck]::SendMessage($styleFast,0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
     Start-Sleep -Milliseconds 220
     $fastOnPixel=Save-FastFrame '00g-开关开启细节'
-    if([StyleCheck]::ClientAnimations() -and @($fastOffPixel,$fastMidPixel,$fastOnPixel|Select-Object -Unique).Count -ne 3){throw '快速开关未呈现独立的动画中间帧。'}
+    if($Case -eq 'All' -and [StyleCheck]::ClientAnimations() -and @($fastOffPixel,$fastMidPixel,$fastOnPixel|Select-Object -Unique).Count -ne 3){throw '快速开关未呈现独立的动画中间帧。'}
     if([StyleCheck]::SendMessage($styleFast,0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 1){throw '连续切换后状态错误。'}
     Save-StyleFrame '00d-首页快速转换开启'|Out-Null
+    # 显式显示键盘焦点，再隐藏焦点提示；同一开关状态的两帧用于核验实线轮廓。
+    foreach($target in @($styleWindow,$styleFast)){[StyleCheck]::SendMessage($target,0x127,[IntPtr](2 -bor (1 -shl 16)),[IntPtr]::Zero)|Out-Null}
+    [StyleCheck]::SendMessage($styleWindow,0x28,$styleFast,[IntPtr]1)|Out-Null
+    if(([StyleCheck]::SendMessage($styleFast,0x129,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -band 1) -ne 0 -or
+       ([StyleCheck]::SendMessage($styleFast,0xF2,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -band 8) -eq 0){throw '快速开关未取得可见的键盘焦点。'}
+    # 此处不由截图辅助函数补画，保留焦点消息处理后的真实即时外观。
+    Save-FastFrame '00h-开关实线焦点' -NoRedraw|Out-Null
+    foreach($target in @($styleWindow,$styleFast)){[StyleCheck]::SendMessage($target,0x127,[IntPtr](1 -bor (1 -shl 16)),[IntPtr]::Zero)|Out-Null}
+    if(([StyleCheck]::SendMessage($styleFast,0x129,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -band 1) -eq 0){throw '快速开关未隐藏焦点提示。'}
+    Save-FastFrame '00i-开关隐藏焦点' -NoRedraw|Out-Null
+    $focusHash=(Get-FileHash -LiteralPath (Join-Path $styleFolder '00h-开关实线焦点.png')).Hash
+    $hiddenFocusHash=(Get-FileHash -LiteralPath (Join-Path $styleFolder '00i-开关隐藏焦点.png')).Hash
+    if($focusHash -eq $hiddenFocusHash){throw '快速开关显示及隐藏键盘焦点的两帧相同。'}
+    $styleEvidence.FastFocusFrames=@{VisibleSHA256=$focusHash;HiddenSHA256=$hiddenFocusHash}
+    Assert-FastHelpTooltip
+    if($Case -eq 'Fast'){
+        # 定向入口仅增加一次 800 DIP 客户宽度检查，随后由原 finally 关闭预览并保存证据。
+        $outer=[StyleCheck+Rect]::new();$client=[StyleCheck+Rect]::new()
+        [StyleCheck]::GetWindowRect($styleWindow,[ref]$outer)|Out-Null;[StyleCheck]::GetClientRect($styleWindow,[ref]$client)|Out-Null
+        $scale=[StyleCheck]::GetDpiForWindow($styleWindow)/96.0
+        [StyleCheck]::SetWindowPos($styleWindow,[IntPtr]::Zero,0,0,[int](800*$scale+$outer.Right-$outer.Left-$client.Right),$outer.Bottom-$outer.Top,0x16)|Out-Null
+        Assert-FastHelp|Out-Null
+        Save-StyleFrame '00j-最小800宽快速帮助'|Out-Null
+        if(Test-Path -LiteralPath (Join-Path $styleFolder 'gui-worker.log')){throw '预览意外启动转换。'}
+        $styleEvidence.Checks=@{HomeFastToggle=$true;FastHelpAccessibleName=$true;FastHelpPosition=$true;FastToggleHitArea=$true;FastHelpClickDoesNotToggle=$true;FastHelpTooltipOnHover=$true;FastHelpTooltipHidesOnLeave=$true;FastToggleSpaceKey=$true;FastToggleFocusCue=$true;FastFocusFramesDiffer=$true;FastToggleAnimationFramesCaptured=$true;MinimumFastHelpVisible=$true;NoOfficeTask=$true}
+        $styleEvidence.Status='PASSED'
+        $styleEvidence.ExecutableSHA256=(Get-FileHash -LiteralPath $styleExe).Hash
+        $styleEvidence.SourceSHA256=Get-TestSourceHashes
+        Write-Output ('UI_STYLE_PASSED: '+$styleFolder)
+        return
+    }
     [GuiBatchCheck]::ShowWindow($styleWindow,0)|Out-Null
     [StyleCheck]::SetWindowPos($styleWindow,[IntPtr](-2),0,0,0,0,0x13)|Out-Null
     Assert-QueueColumns
@@ -184,7 +298,10 @@ try {
     do{Start-Sleep -Milliseconds 30;$details=[StyleCheck]::Dialog($styleProcess.Id,'转换详情');if([DateTime]::UtcNow -gt $deadline){throw '日志列未打开详情。'}}while($details -eq [IntPtr]::Zero)
     [StyleCheck]::SendMessage($details,0,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
     $detailsText=[StyleCheck]::Text([StyleCheck]::GetDlgItem($details,301))
-    if(-not $detailsText.Contains($styleCopy) -or -not $detailsText.Contains('本次后台日志')){throw '日志列打开了错误的文档详情。'}
+    if(-not $detailsText.Contains([IO.Path]::GetFileName($styleCopy)) -or -not $detailsText.Contains('条问题') -or $detailsText.Contains($styleCopy) -or $detailsText.Contains('本次后台日志')){throw '日志列未默认显示对应文档的简短问题摘要。'}
+    [StyleCheck]::SendMessage([StyleCheck]::GetDlgItem($details,303),0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
+    $detailsText=[StyleCheck]::Text([StyleCheck]::GetDlgItem($details,301))
+    if(-not $detailsText.Contains($styleCopy) -or -not $detailsText.Contains('本次后台日志')){throw '切换原始日志后未显示对应文档的完整技术详情。'}
     [StyleCheck]::PostMessage($details,0x10,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
     [StyleCheck]::SendMessage($styleWindow,0,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
     [StyleCheck]::PostMessage($styleWindow,0x111,[IntPtr]143,[IntPtr]::Zero)|Out-Null
@@ -193,8 +310,9 @@ try {
     [StyleCheck]::SendMessage($advanced,0,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
     foreach($id in @(201,202,226,227)){Assert-ComboSelection ([StyleCheck]::GetDlgItem($advanced,$id)) 1}
     if([StyleCheck]::Text([StyleCheck]::GetDlgItem($advanced,238)) -ne '实验性功能'){throw '实验项未合并进高级设置右侧。'}
-    foreach($id in @(239,246,247,248,249,250)){if([StyleCheck]::GetDlgItem($advanced,$id) -ne [IntPtr]::Zero){throw '实验区仍有副标题、说明文字或快速转换控件。'}}
-    if([StyleCheck]::GetDlgItem($advanced,240) -ne [IntPtr]::Zero){throw '默认正文 OMML 仍保留开关。'}
+    foreach($id in @(239,247,248,249,250)){if([StyleCheck]::GetDlgItem($advanced,$id) -ne [IntPtr]::Zero){throw '实验区仍有副标题、说明文字或快速转换控件。'}}
+    if([StyleCheck]::GetDlgItem($advanced,246) -eq [IntPtr]::Zero -or [StyleCheck]::SendMessage([StyleCheck]::GetDlgItem($advanced,246),0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 1){throw 'Word 原生公式（OMML）未默认勾选。'}
+    if([StyleCheck]::GetDlgItem($advanced,240) -ne [IntPtr]::Zero){throw '旧版 OMML 控件仍存在。'}
     foreach($id in 241..244){if([StyleCheck]::SendMessage([StyleCheck]::GetDlgItem($advanced,$id),0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 0){throw '实验项默认开启。'}}
     $leftBounds=[GuiBatchCheck+Rect]::new();$rightBounds=[GuiBatchCheck+Rect]::new()
     [GuiBatchCheck]::GetWindowRect([StyleCheck]::GetDlgItem($advanced,229),[ref]$leftBounds)|Out-Null
@@ -329,11 +447,18 @@ try {
     $styleEvidence.Checks.HomeFastToggle=$true
     $styleEvidence.Checks.FastToggleHitArea=$true
     $styleEvidence.Checks.FastToggleAnimation=[StyleCheck]::ClientAnimations()
+    $styleEvidence.Checks.FastHelpAccessibleName=$true
+    $styleEvidence.Checks.FastHelpPosition=$true
+    $styleEvidence.Checks.FastHelpClickDoesNotToggle=$true
+    $styleEvidence.Checks.FastHelpTooltipOnHover=$true
+    $styleEvidence.Checks.FastHelpTooltipHidesOnLeave=$true
+    $styleEvidence.Checks.FastToggleSpaceKey=$true
+    $styleEvidence.Checks.FastToggleFocusCue=$true
+    $styleEvidence.Checks.FastFocusFramesDiffer=$true
     $styleEvidence.Checks.ExperimentalCheckboxesOnly=$true
     $styleEvidence.Status='PASSED'
     $styleEvidence.ExecutableSHA256=(Get-FileHash -LiteralPath $styleExe).Hash
-    $styleEvidence.SourceSHA256=[ordered]@{}
-    foreach($source in @('gui.cpp','build.ps1','assets/app.rc','assets/app_icon.ico','assets/app_icon.png','assets/build-icon.ps1','assets/icon-source.json','test-ui-style.ps1','test-gui.ps1')){$styleEvidence.SourceSHA256[$source]=(Get-FileHash -LiteralPath (Get-TestSourcePath $source)).Hash}
+    $styleEvidence.SourceSHA256=Get-TestSourceHashes
     Write-Output ('UI_STYLE_PASSED: '+$styleFolder)
 }finally {
     [GuiBatchCheck]::SetThreadDpiAwarenessContext($styleDpi)|Out-Null

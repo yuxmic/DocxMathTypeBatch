@@ -147,8 +147,7 @@ try {
         $experienceEvidence.Output=Join-Path $experiencePublished ([IO.Path]::GetFileName($experienceOutput));$experienceEvidence.Directory=$experiencePublished
         $experienceEvidence.ReadyScreenshot=Join-Path $experiencePublished '准备就绪.png';$experienceEvidence.ResultScreenshot=Join-Path $experiencePublished '转换完成.png'
         $experienceEvidence.ExecutableSHA256=(Get-FileHash -LiteralPath (Join-Path $ProjectRoot 'build\bin\DocxMathTypeBatch.exe')).Hash
-        $experienceEvidence.SourceSHA256=[ordered]@{}
-        foreach($experienceFile in @('gui.cpp','convert_docx.cpp','docx_scan.h','word_automation.h','mathtype_api.h','task_guard.h','build.ps1','test-ui-experience.ps1')){$experienceEvidence.SourceSHA256[$experienceFile]=(Get-FileHash -LiteralPath (Get-TestSourcePath $experienceFile)).Hash}
+        $experienceEvidence.SourceSHA256=Get-TestSourceHashes
         $experienceEvidence|ConvertTo-Json -Depth 8|Set-Content -LiteralPath (Join-Path $experiencePublished 'experience.json') -Encoding utf8
         $experienceEvidence|ConvertTo-Json -Depth 8|Set-Content -LiteralPath (Join-Path $TestOutputRoot 'ui-experience-results.json') -Encoding utf8
     }

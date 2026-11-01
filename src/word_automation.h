@@ -2,6 +2,7 @@
 #pragma once
 #define NOMINMAX
 #include <windows.h>
+#include "app_error.h"
 #include <oleauto.h>
 #include <oleidl.h>
 #include <tlhelp32.h>
@@ -40,9 +41,7 @@ struct Value {
     ~Value() { VariantClear(&v); }
 };
 
-static void require(bool ok, const char* label) {
-    if (!ok) throw std::runtime_error(label);
-}
+
 
 static void check(HRESULT status, const char* label) {
     if (FAILED(status)) {

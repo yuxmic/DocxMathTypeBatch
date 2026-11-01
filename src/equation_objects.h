@@ -1,10 +1,9 @@
-// 共用公式对象、包资产和安全快照；正文与实验分支使用相同的内容校验。
+// Word 公式对象的插入、原生资产读取和范围快照。
 #pragma once
 #include "docx_scan.h"
-#include "mathtype_api.h"
+#include "docx_package.h"
 #include <xmllite.h>
 #include <wincrypt.h>
-#include <set>
 // 检查点仅复制本任务的私有副本；恢复前由调用方关闭 Word 文档并释放范围。
 struct ConversionCheckpoint {
     std::wstring path;
@@ -24,47 +23,6 @@ inline std::string diagnosticExcerpt(const std::wstring& source) {
     if(!excerpt.empty()&&excerpt.back()>=0xd800&&excerpt.back()<=0xdbff)excerpt.pop_back();
     if(excerpt.size()<source.size())excerpt+=L"…";
     return wireHex(utf8(excerpt));
-}
-// 只读包检查使用系统 Packaging API/结构化存储，不激活任何既有 MathType。
-// 依据：https://learn.microsoft.com/en-us/windows/win32/api/msopc/nf-msopc-iopcfactory-readpackagefromstream
-inline std::vector<unsigned char> streamBytes(IStream* stream) {
-    STATSTG stat{};
-    check(stream->Stat(&stat, STATFLAG_NONAME), "Package stream size");
-    require(stat.cbSize.QuadPart <= 128 * 1024 * 1024, "Package part exceeds 128 MiB safety limit");
-    LARGE_INTEGER zero{};
-    check(stream->Seek(zero, STREAM_SEEK_SET, nullptr), "Package stream seek");
-    std::vector<unsigned char> bytes(static_cast<size_t>(stat.cbSize.QuadPart));
-    ULONG read{};
-    if (!bytes.empty()) {
-        check(stream->Read(bytes.data(), static_cast<ULONG>(bytes.size()), &read), "Package stream read");
-        require(read == bytes.size(), "Complete package part read");
-    }
-    return bytes;
-}
-struct PackageState {
-    std::vector<std::vector<unsigned char>> equations, media, otherEmbeddings;
-    bool displayStyle{};
-};
-// WordOpenXML 的单对象包和 DOCX 的 OLE part 共用系统结构化存储读取。
-inline std::vector<unsigned char> nativeFromOle(const std::vector<unsigned char>& bytes) {
-    // XLSX 等嵌入包不是复合存储，原样保留，不送入 OLE 读取器。
-    constexpr unsigned char signature[]{0xd0,0xcf,0x11,0xe0,0xa1,0xb1,0x1a,0xe1};
-    if(bytes.size()<sizeof(signature)||memcmp(bytes.data(),signature,sizeof(signature))!=0)return {};
-    ComPtr<ILockBytes> locked;
-    check(CreateILockBytesOnHGlobal(nullptr, TRUE, &locked), "OLE byte storage");
-    ULARGE_INTEGER offset{}; ULONG written{};
-    require(bytes.size() <= MAXDWORD, "OLE storage size bounds");
-    check(locked->WriteAt(offset, bytes.data(), static_cast<ULONG>(bytes.size()), &written), "Copy OLE bytes");
-    require(written == bytes.size(), "Complete OLE byte copy");
-    ComPtr<IStorage> storage;
-    check(StgOpenStorageOnILockBytes(locked.Get(), nullptr, STGM_READ | STGM_SHARE_EXCLUSIVE, nullptr, 0, &storage), "Read OLE storage");
-    ComPtr<IStream> native;
-    const auto status = storage->OpenStream(L"Equation Native", nullptr, STGM_READ | STGM_SHARE_EXCLUSIVE, 0, &native);
-    if (status == STG_E_FILENOTFOUND) return {};
-    check(status, "Read Equation Native stream");
-    auto equation = streamBytes(native.Get());
-    require(!equation.empty(), "Nonempty Equation Native stream");
-    return equation;
 }
 struct NativeAsset { std::vector<unsigned char> equation; std::vector<std::vector<unsigned char>> previews; };
 // 从指定对象 Range 的 Word 原生 Flat OPC 包取资产，扫描不激活 MathType 服务。
@@ -110,13 +68,6 @@ inline NativeAsset rangeNativeAsset(IDispatch* range) {
     require(status == S_FALSE && !asset.equation.empty(), "Complete single-object native package");
     return asset;
 }
-inline std::vector<unsigned char> nativePayload(const std::vector<unsigned char>& stream) {
-    require(stream.size() >= 12, "Equation Native header bounds"); DWORD header{}, length{};
-    memcpy(&header, stream.data(), 4); memcpy(&length, stream.data() + 8, 4);
-    require(header >= 12 && header <= stream.size() && length > 0 && length == stream.size() - header && length < 1000000,
-            "Equation Native header and payload length");
-    return {stream.begin() + header, stream.end()};
-}
 // 一次导出正文 Flat OPC，按正文对象顺序关联关系和原生流，省去逐式导出整个样式包。
 inline std::vector<std::vector<unsigned char>> bodyNativeAssets(IDispatch* document) {
     auto content=get(document,L"Content");const auto xml=text(content.Get(),L"WordOpenXML");
@@ -157,84 +108,8 @@ inline std::vector<std::vector<unsigned char>> bodyNativeAssets(IDispatch* docum
     }
     return result;
 }
-inline PackageState inspectPackage(const std::wstring& path,const char* progressStage=nullptr,bool styleOnly=false) {
-    ComPtr<IOpcFactory> factory;
-    check(CoCreateInstance(__uuidof(OpcFactory), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)), "Packaging factory");
-    ComPtr<IStream> stream;
-    check(factory->CreateStreamOnFile(path.c_str(), OPC_STREAM_IO_READ, nullptr, 0, &stream), "Open OPC stream");
-    ComPtr<IOpcPackage> package;
-    check(factory->ReadPackageFromStream(stream.Get(), OPC_VALIDATE_ON_LOAD, &package), "Read OPC package");
-    ComPtr<IOpcPartSet> parts;
-    check(package->GetPartSet(&parts), "Package parts");
-    ComPtr<IOpcPartEnumerator> enumerator;
-    check(parts->GetEnumerator(&enumerator), "Package part enumerator");
-    PackageState state;
-    auto relationships = [&](IOpcRelationshipSet* relations) {
-        ComPtr<IOpcRelationshipEnumerator> entries;
-        check(relations->GetEnumerator(&entries), "Relationship enumerator");
-        for (;;) {
-            BOOL more{}; check(entries->MoveNext(&more), "Next relationship"); if (!more) break;
-            ComPtr<IOpcRelationship> relation; check(entries->GetCurrent(&relation), "Current relationship");
-            OPC_URI_TARGET_MODE mode{}; check(relation->GetTargetMode(&mode), "Relationship target mode");
-            if (mode == OPC_URI_TARGET_MODE_EXTERNAL) continue; // 不联网或打开外部关系。
-            ComPtr<IOpcUri> source; ComPtr<IUri> target; ComPtr<IOpcPartUri> combined;
-            check(relation->GetSourceUri(&source), "Relationship source");
-            check(relation->GetTargetUri(&target), "Relationship target");
-            check(source->CombinePartUri(target.Get(), &combined), "Resolve internal relationship");
-            BOOL exists{}; check(parts->PartExists(combined.Get(), &exists), "Relationship part exists");
-            require(exists != FALSE, "Missing internal relationship part");
-        }
-    };
-    ComPtr<IOpcRelationshipSet> relations;
-    if(!styleOnly){check(package->GetRelationshipSet(&relations), "Package relationships"); relationships(relations.Get());}
-    // 只枚举部件引用获得总数，内容仍各读一次，不为显示进度重复解析文档。
-    std::vector<ComPtr<IOpcPart>> allParts;
-    for (;;) {
-        BOOL more{}; check(enumerator->MoveNext(&more), "Next package part"); if (!more) break;
-        ComPtr<IOpcPart> part; check(enumerator->GetCurrent(&part), "Current package part");
-        allParts.push_back(std::move(part));
-    }
-    StageProgress partProgress(progressStage,allParts.size());
-    for(const auto& part:allParts) {
-        ComPtr<IOpcPartUri> name; check(part->GetName(&name), "Package part URI");
-        BSTR raw{}; check(name->GetAbsoluteUri(&raw), "Package part name");
-        const std::wstring uri(raw, SysStringLen(raw)); SysFreeString(raw);
-        if(styleOnly&&uri!=L"/word/styles.xml")continue;
-        ComPtr<IStream> content; check(part->GetContentStream(&content), "Package content stream");
-        auto bytes = streamBytes(content.Get()); // 读取全部 part，不能只读目录就宣称容器可用。
-        if(uri==L"/word/styles.xml"){
-            LARGE_INTEGER zero{};check(content->Seek(zero,STREAM_SEEK_SET,nullptr),"Rewind style definitions");ComPtr<IXmlReader> reader;
-            check(CreateXmlReader(__uuidof(IXmlReader),reinterpret_cast<void**>(reader.GetAddressOf()),nullptr),"Read native display style definition");check(reader->SetInput(content.Get()),"Style definition input");
-            XmlNodeType node{};HRESULT status{};
-            while((status=reader->Read(&node))==S_OK){if(node!=XmlNodeType_Element)continue;const wchar_t* local{};check(reader->GetLocalName(&local,nullptr),"Style element name");
-                if(!wcscmp(local,L"name")&&reader->MoveToAttributeByName(L"val",L"http://schemas.openxmlformats.org/wordprocessingml/2006/main")==S_OK){const wchar_t* value{};check(reader->GetValue(&value,nullptr),"Style name");if(!wcscmp(value,L"MTDisplayEquation"))state.displayStyle=true;}}
-            check(status,"Complete style definitions");
-        }
-        if(styleOnly)return state;
-        check(part->GetRelationshipSet(&relations), "Part relationships"); relationships(relations.Get());
-        if (uri.find(L"/word/media/") == 0) state.media.push_back(std::move(bytes));
-        if (uri.find(L"/word/embeddings/") == 0) {
-            auto equation = nativeFromOle(bytes);
-            if(!equation.empty())state.equations.push_back(std::move(equation));
-            else state.otherEmbeddings.push_back(std::move(bytes));
-        }
-        partProgress.advance();
-    }
-    return state;
-}
-inline void requireContains(const std::vector<std::vector<unsigned char>>& after,
-                            const std::vector<std::vector<unsigned char>>& before, const char* label) {
-    // 只索引现有字节，不复制媒体；比较及重复数量仍按完整内容核对。
-    auto compare=[](const auto* left,const auto* right){return *left<*right;};
-    std::multiset<const std::vector<unsigned char>*,decltype(compare)> remaining(compare);
-    for (const auto& value : after) remaining.insert(&value);
-    for (const auto& value : before) {
-        const auto found = remaining.find(&value);
-        require(found != remaining.end(), label); remaining.erase(found);
-    }
-}
 // 厂商书签含 QUOTE 域，解除域后只留下一个 OLE，避免把模板域带进用户文档。
-inline ComPtr<IDispatch> insertBlankEquation(IDispatch* document,IDispatch* range,const std::wstring& install,IDispatch* storyRoot=nullptr) {
+inline ComPtr<IDispatch> insertBlankEquation(IDispatch* document,IDispatch* range,const std::wstring& install,IDispatch* storyRoot=nullptr,bool fast=false) {
     auto content=storyRoot?get(storyRoot,L"Duplicate"):get(document,L"Content");const ScanRangeContext context{document,storyRoot};
     const long start=integer(range,L"Start"),beforeEnd=integer(content.Get(),L"End");
     const auto templatePath=install+L"\\Office Support\\BlankEqn.doc";
@@ -242,56 +117,13 @@ inline ComPtr<IDispatch> insertBlankEquation(IDispatch* document,IDispatch* rang
     auto inserted=docRange(context,start,start+integer(content.Get(),L"End")-beforeEnd);
     auto fields=get(inserted.Get(),L"Fields");
     for(long i=integer(fields.Get(),L"Count");i>0;--i){auto field=collectionItem(fields.Get(),i);const long type=integer(field.Get(),L"Type");
-        require(experimentalFast||type==35||type==58,"Vendor blank equation field type");if(type==35)invoke(field.Get(),L"Unlink",DISPATCH_METHOD);}
+        require(fast||type==35||type==58,"Vendor blank equation field type");if(type==35)invoke(field.Get(),L"Unlink",DISPATCH_METHOD);}
     inserted=docRange(context,start,start+integer(content.Get(),L"End")-beforeEnd);
-    auto shapes=get(inserted.Get(),L"InlineShapes");if(!experimentalFast)require(integer(shapes.Get(),L"Count")==1,"Blank template inserts one object only");
+    auto shapes=get(inserted.Get(),L"InlineShapes");if(!fast)require(integer(shapes.Get(),L"Count")==1,"Blank template inserts one object only");
     auto shape=collectionItem(shapes.Get(),1);
-    if(!experimentalFast)require(text(inserted.Get(),L"Text")==text(get(shape.Get(),L"Range").Get(),L"Text"),"Blank template has no extra text");return shape;
+    if(!fast)require(text(inserted.Get(),L"Text")==text(get(shape.Get(),L"Range").Get(),L"Text"),"Blank template has no extra text");return shape;
 }
 
-inline std::wstring withoutWordRevisionIds(std::wstring xml) {
-    // ponytail: 仅规范化 Word 生产的 rsid 元数据；通用 XML 比较再用 XmlLite。
-    // Undo 可以换 rsid，不能因此把已恢复的正文/样式误判为损坏。
-    for (size_t start = xml.find(L" w:rsid"); start != std::wstring::npos; start = xml.find(L" w:rsid", start)) {
-        const auto equals = xml.find(L'=', start);
-        require(equals != std::wstring::npos, "Word rsid attribute");
-        const auto valueStart = xml.find(L'\"', equals), end = xml.find(L'\"', valueStart + 1);
-        require(valueStart != std::wstring::npos && end != std::wstring::npos, "Word rsid value");
-        xml.erase(start, end + 1 - start);
-    }
-    return xml;
-}
-inline std::wstring sourceSignature(const std::wstring& package, bool normalizeObjectId = false) {
-    // Range.WordOpenXML 还带全局 settings/styles；只比较本范围正文，避免全局 rsids 列表变化。
-    const auto bodyStart = package.find(L"<w:body>"), bodyEnd = package.find(L"</w:body>");
-    require(bodyStart != std::wstring::npos && bodyEnd != std::wstring::npos && bodyEnd > bodyStart, "Word range XML body");
-    auto xml = withoutWordRevisionIds(package.substr(bodyStart, bodyEnd + 9 - bodyStart));
-    if (normalizeObjectId) {
-        // Word Undo 会重新分配 OLE ObjectID；原生流和预览另作完整字节比较，不能仅比ID。
-        for (size_t start = xml.find(L" ObjectID=\""); start != std::wstring::npos; start = xml.find(L" ObjectID=\"", start)) {
-            const auto end = xml.find(L'\"', start + 11); require(end != std::wstring::npos, "OLE ObjectID attribute");
-            xml.erase(start, end + 1 - start);
-        }
-    }
-    return xml;
-}
 inline std::wstring sourceSignature(IDispatch* range, bool normalizeObjectId = false) {
     return sourceSignature(text(range,L"WordOpenXML"),normalizeObjectId);
-}
-inline std::wstring exportedInner(const std::string& value, bool display) {
-    require(experimentalFast||std::all_of(value.begin(), value.end(), [](unsigned char c) {return c < 128;}), "UNSUPPORTED_NON_ASCII_EXPORT");
-    std::wstring tex(value.begin(), value.end());
-    const auto first = tex.find_first_not_of(L" \t\r\n"), last = tex.find_last_not_of(L" \t\r\n");
-    require(first != std::wstring::npos, "EMPTY_NATIVE_EXPORT"); tex = tex.substr(first, last - first + 1);
-    const std::wstring open = display ? L"\\[" : L"$", close = display ? L"\\]" : L"$";
-    require(tex.size() >= open.size() + close.size() && tex.substr(0, open.size()) == open &&
-            tex.substr(tex.size() - close.size()) == close, "Native export delimiter matches true equation type");
-    auto inner = tex.substr(open.size(), tex.size() - open.size() - close.size());
-    require(lexicalReason(inner).empty(), "UNSUPPORTED_OR_INVALID_NATIVE_EXPORT");
-    // 嵌套定界符会让保存后的扫描拆出多个公式，导出前拒绝以便只保留当前对象。
-    for(size_t i=0;!experimentalFast&&i<inner.size();++i){
-        if(inner[i]==L'\\'&&i+1<inner.size()){require(std::wstring_view(L"[]()").find(inner[++i])==std::wstring_view::npos,"UNSUPPORTED_OR_INVALID_NATIVE_EXPORT");continue;}
-        require(inner[i]!=L'$',"UNSUPPORTED_OR_INVALID_NATIVE_EXPORT");
-    }
-    return normalizedTex(inner);
 }

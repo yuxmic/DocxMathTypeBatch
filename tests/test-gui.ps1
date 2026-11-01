@@ -44,8 +44,7 @@ try {
         Write-Output ('GUI_CASE_PASSED: '+$case.Name)
     }
     $guiEvidence.Status='PASSED';$guiEvidence.ExecutableSHA256=(Get-FileHash -LiteralPath $guiEvidence.Executable).Hash
-    $guiEvidence.SourceSHA256=@{}
-    foreach($file in @('gui.cpp','convert_docx.cpp','docx_scan.h','test-gui.ps1')){$guiEvidence.SourceSHA256[$file]=(Get-FileHash -LiteralPath (Get-TestSourcePath $file)).Hash}
+    $guiEvidence.SourceSHA256=Get-TestSourceHashes
 }finally{
     # 两个绝对路径均由项目的固定临时根与验证根构造，仅移动本轮证据。
     if(-not [IO.Path]::GetFullPath($guiTask).StartsWith($guiTempRoot+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw 'GUI 证据来源超出临时目录。'}

@@ -131,9 +131,7 @@ $null=Invoke-LightweightTask 'aligned-reverse' @('--worker-reverse',$alignedOutp
 if($LASTEXITCODE -ne 0){throw 'aligned 内容、行列或红色残留检查失败。'}
 $evidence.Cases+=@{Name='aligned';AllRowsAndColumnsVerified=$true;NoRedResiduals=$true;Pdf=($alignedOutput+'.pdf');Report=(Join-Path $run 'aligned-output.json')}
 
-# 兼容规则必须保持命令边界、嵌套内容和实验区域，纯文本耗时单独计量。
-& (Join-Path $project 'build/bin/native-api-probe.exe') --compatible-tex-self-test
-if($LASTEXITCODE -ne 0){throw '兼容改写纯逻辑检查失败。'}
+# 此处验证真实导入；兼容改写的纯规则由 test.ps1 在 Office 专项前检查。
 $compatibilityHelper=Join-Path $PSScriptRoot 'helpers/test_tex_compatibility.py'
 & python -B -X utf8 $compatibilityHelper fixture $run
 if($LASTEXITCODE -ne 0){throw '兼容改写样本生成失败。'}
@@ -297,7 +295,6 @@ if(-not $SkipPerformance){
     }
 }
 $evidence.Status='PASSED'
-$evidence.SourceSHA256=@{}
-foreach($file in @('gui.cpp','convert_docx.cpp','equation_objects.h','experimental_conversion.cpp','layout_options.h','native_numbering.h','docx_scan.h','mathtype_api.h','word_automation.h','task_guard.h','native_api_probe.cpp','test-lightweight.ps1','test_lightweight_fixtures.py','test_display_layout.py','test_delimiters.py','test_input_forms.py','test_tex_compatibility.py','test_aligned.py')){$evidence.SourceSHA256[$file]=(Get-FileHash -LiteralPath (Get-TestSourcePath $file)).Hash}
+$evidence.SourceSHA256=Get-TestSourceHashes
 $evidence|ConvertTo-Json -Depth 12|Set-Content -LiteralPath (Join-Path $TestOutputRoot 'lightweight-results.json') -Encoding utf8
 Write-Output ('LIGHTWEIGHT_PASSED: '+$run)

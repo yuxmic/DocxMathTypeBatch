@@ -27,10 +27,11 @@ try{
         if($LASTEXITCODE -ne 0){throw '图标资源编译失败。'}
     }
     $programs=@(
-        @{Target='Native';Source=@('tests/native/native_api_probe.cpp');Name='native-api-probe';Info='build-info.json'},
+        @{Target='Native';Source=@('tests/native/native_api_probe.cpp','src/omml_adapter.cpp');Name='native-api-probe';Info='build-info.json'},
+        @{Target='Native';Source=@('tests/native/test_worker_client.cpp','src/worker_client.cpp');Name='worker-client-tests';Info='worker-test-build-info.json'},
         @{Target='Scan';Source=@('src/scan_docx.cpp');Name='docx-math-scan';Info='scan-build-info.json'},
-        @{Target='Convert';Source=@('src/convert_docx.cpp','src/experimental_conversion.cpp');Name='docx-math-convert';Info='convert-build-info.json'},
-        @{Target='Gui';Source=@('src/gui.cpp','src/convert_docx.cpp','src/experimental_conversion.cpp');Name='DocxMathTypeBatch';Info='gui-build-info.json'}
+        @{Target='Convert';Source=@('src/convert_docx.cpp','src/body_conversion.cpp','src/experimental_conversion.cpp','src/omml_adapter.cpp');Name='docx-math-convert';Info='convert-build-info.json'},
+        @{Target='Gui';Source=@('src/gui.cpp','src/worker_client.cpp','src/convert_docx.cpp','src/body_conversion.cpp','src/experimental_conversion.cpp','src/omml_adapter.cpp');Name='DocxMathTypeBatch';Info='gui-build-info.json'}
     )
     foreach($program in ($programs|Where-Object {$Target -eq 'All' -or $_.Target -eq $Target})){
         $exe=Join-Path $bin ($program.Name+'.exe')

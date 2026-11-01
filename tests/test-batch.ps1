@@ -1,6 +1,6 @@
 #requires -Version 7.0
 # 真实多文件拖入、顺序转换、失败清理后继续、取消整批及高级设置生效回归。
-param([switch]$SkipBuild)
+param([switch]$SkipBuild,[switch]$PreviewOnly)
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'helpers/common.ps1')
 if(-not $SkipBuild){& (Join-Path $ProjectRoot 'build.ps1') -Target Gui}
@@ -8,8 +8,8 @@ if(-not $SkipBuild){& (Join-Path $ProjectRoot 'build.ps1') -Target Gui}
 $run=Join-Path $ProjectRoot ('tests\output\批量转换-'+[Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $run|Out-Null
 $exe=Join-Path $ProjectRoot 'build\bin\DocxMathTypeBatch.exe'
-$baseline = New-TestFixtures -Native
-$evidence=[ordered]@{Status='FAILED';Directory=$run;ExecutableSHA256=(Get-FileHash -LiteralPath $exe).Hash;Cases=@();AdvancedSettingsApplied=$false;QueueEditingVerified=$false;Screenshots=@()}
+$baseline = New-TestFixtures -Native:(!$PreviewOnly)
+$evidence=[ordered]@{Status='FAILED';Scope=$(if($PreviewOnly){'AdvancedSettingsOnly'}else{'FullBatch'});PreviewOnly=[bool]$PreviewOnly;Directory=$run;ExecutableSHA256=(Get-FileHash -LiteralPath $exe).Hash;Cases=@();AdvancedSettingsApplied=$false;OmmlToggleVerified=$false;QueueEditingVerified=$false;Screenshots=@()}
 Add-Type -TypeDefinition @'
 using System;
 using System.Text;
@@ -17,6 +17,7 @@ using System.Runtime.InteropServices;
 public static class BatchUi {
     public delegate bool EnumProc(IntPtr window,IntPtr data);
     [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr window,int id);
+    [DllImport("user32.dll")] public static extern bool IsWindowEnabled(IntPtr window);
     [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr window,uint message,IntPtr wp,IntPtr lp);
     [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr window,uint message,IntPtr wp,IntPtr lp);
     [DllImport("user32.dll",EntryPoint="SendMessageW",CharSet=CharSet.Unicode)] static extern IntPtr SendText(IntPtr window,uint message,IntPtr wp,string text);
@@ -65,6 +66,9 @@ try{
         [BatchUi]::PostMessage([BatchUi]::GetDlgItem($window,143),0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
         $deadline=[DateTime]::UtcNow.AddSeconds(10)
         do{$dialog=[BatchUi]::Dialog($process.Id);if([DateTime]::UtcNow -gt $deadline){throw '高级设置未打开。'};Start-Sleep -Milliseconds 25}while($dialog -eq [IntPtr]::Zero)
+        $ommlControl=[BatchUi]::GetDlgItem($dialog,246)
+        if($ommlControl -eq [IntPtr]::Zero -or -not [BatchUi]::IsWindowEnabled($ommlControl) -or [BatchUi]::SendMessage($ommlControl,0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 1){throw '原生公式转换开关默认未开启。'}
+        [BatchUi]::SendMessage($ommlControl,0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
         foreach($id in @(201,202)){
             [BatchUi]::SendMessage([BatchUi]::GetDlgItem($dialog,$id),0x14E,[IntPtr]4,[IntPtr]::Zero)|Out-Null
             [BatchUi]::SendMessage($dialog,0x111,[IntPtr]($id -bor (1 -shl 16)),[BatchUi]::GetDlgItem($dialog,$id))|Out-Null
@@ -88,15 +92,35 @@ try{
         [BatchUi]::PostMessage([BatchUi]::GetDlgItem($window,143),0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
         $deadline=[DateTime]::UtcNow.AddSeconds(10)
         do{$dialog=[BatchUi]::Dialog($process.Id);if([DateTime]::UtcNow -gt $deadline){throw '高级设置未重新打开。'};Start-Sleep -Milliseconds 25}while($dialog -eq [IntPtr]::Zero)
+        if([BatchUi]::SendMessage([BatchUi]::GetDlgItem($dialog,246),0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 0){throw '关闭原生公式转换后没有保存。'}
         if([BatchUi]::Text([BatchUi]::GetDlgItem($dialog,203)) -notmatch '^18' -or [BatchUi]::Text([BatchUi]::GetDlgItem($dialog,204)) -notmatch '^24' -or [BatchUi]::Text([BatchUi]::GetDlgItem($dialog,233)) -ne '预览：[IV-b-AA]'){throw '高级设置或编号预览没有保存。'}
         [BatchUi]::SetWindowText([BatchUi]::GetDlgItem($dialog,203),'99')|Out-Null
         [BatchUi]::SendMessage([BatchUi]::GetDlgItem($dialog,221),0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
         [BatchUi]::SetWindowText([BatchUi]::GetDlgItem($dialog,229),'(#C1.#E1)')|Out-Null
         if([BatchUi]::Text([BatchUi]::GetDlgItem($dialog,233)) -ne '预览：(4.27)'){throw '自定义编号预览未生效。'}
         [BatchUi]::SendMessage([BatchUi]::GetDlgItem($dialog,235),0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
-        if([BatchUi]::Text([BatchUi]::GetDlgItem($dialog,233)) -ne '预览：(1)' -or [BatchUi]::SendMessage([BatchUi]::GetDlgItem($dialog,201),0x147,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 0){throw '恢复默认未生效。'}
+        if([BatchUi]::Text([BatchUi]::GetDlgItem($dialog,233)) -ne '预览：(1)' -or [BatchUi]::SendMessage([BatchUi]::GetDlgItem($dialog,201),0x147,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 0 -or [BatchUi]::SendMessage([BatchUi]::GetDlgItem($dialog,246),0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 1){throw '恢复默认未生效。'}
         [BatchUi]::PostMessage($dialog,0x111,[IntPtr]2,[IntPtr]::Zero)|Out-Null
         Start-Sleep -Milliseconds 100
+        # 取消恢复默认不提交 OMML 开关；反向禁用该控件且不能改写正向选择。
+        [BatchUi]::SendMessage([BatchUi]::GetDlgItem($window,102),0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
+        [BatchUi]::PostMessage([BatchUi]::GetDlgItem($window,143),0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
+        $deadline=[DateTime]::UtcNow.AddSeconds(10)
+        do{$dialog=[BatchUi]::Dialog($process.Id);if([DateTime]::UtcNow -gt $deadline){throw '反向高级设置未打开。'};Start-Sleep -Milliseconds 25}while($dialog -eq [IntPtr]::Zero)
+        $ommlControl=[BatchUi]::GetDlgItem($dialog,246)
+        if([BatchUi]::IsWindowEnabled($ommlControl) -or [BatchUi]::SendMessage($ommlControl,0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 0){throw '反向原生公式控件未禁用，或取消修改被意外提交。'}
+        [BatchUi]::SendMessage([BatchUi]::GetDlgItem($dialog,235),0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
+        [BatchUi]::PostMessage($dialog,0x111,[IntPtr]1,[IntPtr]::Zero)|Out-Null
+        Start-Sleep -Milliseconds 100
+        [BatchUi]::SendMessage([BatchUi]::GetDlgItem($window,101),0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
+        [BatchUi]::PostMessage([BatchUi]::GetDlgItem($window,143),0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
+        $deadline=[DateTime]::UtcNow.AddSeconds(10)
+        do{$dialog=[BatchUi]::Dialog($process.Id);if([DateTime]::UtcNow -gt $deadline){throw '正向高级设置未恢复。'};Start-Sleep -Milliseconds 25}while($dialog -eq [IntPtr]::Zero)
+        $ommlControl=[BatchUi]::GetDlgItem($dialog,246)
+        if(-not [BatchUi]::IsWindowEnabled($ommlControl) -or [BatchUi]::SendMessage($ommlControl,0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 0){throw '切回正向后原生公式选择未保留。'}
+        [BatchUi]::PostMessage($dialog,0x111,[IntPtr]2,[IntPtr]::Zero)|Out-Null
+        Start-Sleep -Milliseconds 100
+        $evidence.OmmlToggleVerified=$true
         # 实际列表消息覆盖去重、Delete 和清空；这些操作只能改队列。
         $second=Join-Path $preview 'second.docx';$third=Join-Path $preview 'third.docx'
         Copy-Item -LiteralPath $previewInput -Destination $second;Copy-Item -LiteralPath $previewInput -Destination $third
@@ -117,11 +141,13 @@ try{
         $deadline=[DateTime]::UtcNow.AddSeconds(120)
         while([BatchUi]::Text([BatchUi]::GetDlgItem($window,123)) -ne '批次完成'){if($process.HasExited -or [DateTime]::UtcNow -gt $deadline){throw '高级设置界面转换失败。'};Start-Sleep -Milliseconds 100}
         $report=Get-Content -LiteralPath (Join-Path $preview 'report.json') -Raw|ConvertFrom-Json
-        if($report.Status -ne 'COMPLETE' -or $report.InlineSpacing -ne 'exact:18.000000' -or $report.DisplaySpacing -ne 'exact:24.000000' -or $report.NumberFormat -ne '[#CI-#Sa-#EA]' -or $report.NumbersAdded -ne 4){throw '界面设置未传给转换进程。'}
+        if($report.Status -ne 'COMPLETE' -or $report.InlineSpacing -ne 'exact:18.000000' -or $report.DisplaySpacing -ne 'exact:24.000000' -or $report.NumberFormat -ne '[#CI-#Sa-#EA]' -or $report.NumbersAdded -ne 4 -or $report.ConvertOmml -ne $false){throw '界面设置未传给转换进程。'}
         & python -B -X utf8 -c 'import sys;sys.path.insert(0,sys.argv[2]);from docx import Document;from native_number_text import native_visible_numbers;d=Document(sys.argv[1]);p=[p for p in d.paragraphs if p._p.xpath(".//w:object")];assert len(p)==5;assert [p.paragraph_format.line_spacing.pt for p in p]==[18,24,24,24,24];assert native_visible_numbers(d.element.body)==["[IV-b-AA]","[IV-b-BB]","[IV-b-CC]","[IV-b-DD]"]' $report.Output (Join-Path $PSScriptRoot 'helpers')
         if($LASTEXITCODE -ne 0){throw '高级行距或编号未写入 Word。'}
         $evidence.AdvancedSettingsApplied=$true
     }finally{Stop-BatchTestWindow $process}
+
+    if($PreviewOnly){$evidence.Status='PASSED';return}
 
     foreach($kind in @('failed-middle','native-fault','cancel','reverse')){
         $folder=Join-Path $run $kind;New-Item -ItemType Directory -Path $folder|Out-Null
@@ -193,7 +219,7 @@ try{
     }
     $evidence.Status='PASSED'
 }finally{
-    $evidence.SourceSHA256=@{};foreach($file in @('gui.cpp','convert_docx.cpp','layout_options.h','native_numbering.h','native_number_text.py','docx_scan.h','task_guard.h','test-batch.ps1','test-gui.ps1')){$evidence.SourceSHA256[$file]=(Get-FileHash -LiteralPath (Get-TestSourcePath $file)).Hash}
+    $evidence.SourceSHA256=Get-TestSourceHashes
     $evidence|ConvertTo-Json -Depth 10|Set-Content -LiteralPath (Join-Path $run 'batch-results.json') -Encoding utf8
     $evidence|ConvertTo-Json -Depth 10|Set-Content -LiteralPath (Join-Path $TestOutputRoot 'batch-results.json') -Encoding utf8
 }

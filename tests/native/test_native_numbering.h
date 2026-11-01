@@ -22,6 +22,9 @@ inline void checkNativeNumbering(const std::wstring& input,const std::wstring& d
     const auto working=copy+L".work.docx";taskCopy(input,working);taskTrackWordOwner(working);
     std::wstring problem;const auto install=findMathTypeInstall(problem);require(problem.empty(),"Installed MathType required");
     WordSession word;auto docs=get(word.application.Get(),L"Documents");word.document=asObject(invoke(docs.Get(),L"Open",DISPATCH_METHOD,{working.c_str(),false,false,false,Value(),Value(),false,Value(),Value(),Value(),Value(),false}));word.verifyOwnership();auto doc=word.document.Get();
+    // 沿用本轮转换输出核对内部跟踪书签，避免另开 Word 或新造回归框架。
+    if(!fixture){auto bookmarks=get(doc,L"Bookmarks");const long count=integer(bookmarks.Get(),L"Count");
+        for(long i=1;i<=count;++i)require(text(collectionItem(bookmarks.Get(),i).Get(),L"Name").rfind(L"DMTBNum_",0)!=0,"Published document has no internal numbering tracking bookmarks");}
     invoke(word.application.Get(),L"AutomationSecurity",DISPATCH_PROPERTYPUT,{1L});
     invoke(get(word.application.Get(),L"AddIns").Get(),L"Add",DISPATCH_METHOD,{(install+L"\\Office Support\\64\\MathType Commands 2016.dotm").c_str(),true});
     invoke(word.application.Get(),L"Run",DISPATCH_METHOD,{L"MathTypeCommands.MTLibCommon.SetDLLPath"});

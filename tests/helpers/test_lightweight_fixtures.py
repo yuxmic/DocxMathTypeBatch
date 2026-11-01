@@ -4,6 +4,7 @@ from pathlib import Path
 from docx import Document
 from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import qn
 
 root = Path(sys.argv[1]).resolve()
@@ -110,4 +111,35 @@ for count, paragraphs in ((20, 80), (100, 400), (10, 2000)):
     for index in range(paragraphs):
         document.add_paragraph(r'\[x_1+1\]' if index % (paragraphs // count) == 0 else f'普通正文 {index} ABC 123。')
     document.save(root / f'performance-{count}-{paragraphs}.docx')
+
+# 等价来源对照只改变公式表示：20 个同结构分式、80 段、12 磅，行外位置完全相同。
+for source in ('latex', 'omml'):
+    document = Document()
+    document.core_properties.author = "Synthetic test fixture"
+    document.core_properties.last_modified_by = ""
+    document.styles['Normal'].font.size = Pt(12)
+    for index in range(80):
+        paragraph = document.add_paragraph()
+        if index % 4:
+            paragraph.add_run(f'普通正文 {index} ABC 123。')
+            continue
+        value = index // 4 + 1
+        paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        if source == 'latex':
+            paragraph.add_run(r'\[\frac{x+' + str(value) + r'}{2}\]').font.size = Pt(12)
+        else:
+            equation = parse_xml(
+                '<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math" '
+                'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                '<m:f><m:num><m:r><w:rPr><w:sz w:val="24"/></w:rPr>'
+                f'<m:t>x+{value}</m:t></m:r></m:num>'
+                '<m:den><m:r><w:rPr><w:sz w:val="24"/></w:rPr>'
+                '<m:t>2</m:t></m:r></m:den></m:f></m:oMath>')
+            wrapper = OxmlElement('m:oMathPara')
+            wrapper.append(equation)
+            paragraph._p.append(wrapper)
+    assert len(document.paragraphs) == 80
+    assert len(document._element.xpath('//m:oMath')) == (20 if source == 'omml' else 0)
+    assert sum(p.text.startswith(r'\[\frac{') for p in document.paragraphs) == (20 if source == 'latex' else 0)
+    document.save(root / f'performance-{source}-20-80.docx')
 print(root)

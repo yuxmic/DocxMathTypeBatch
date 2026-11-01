@@ -1,5 +1,5 @@
 // 阶段 2：只读扫描正文与表格；样本创建仅用于自检。
-#include "docx_scan.h"
+#include "scan_file.h"
 
 // 下方仅自检入口创建/格式化任务副本；正式 --scan 路径从不保存 Word 文档。
 static void makeFixture(WordSession& word, const std::wstring& base, const std::wstring& directory) {

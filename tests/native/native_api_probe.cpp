@@ -1,6 +1,8 @@
 // 阶段 1 的原生接口小样：仅操作自建文档，不扫描或转换用户文件。
 #include "mathtype_api.h"
 #include "docx_scan.h"
+#include "docx_package.h"
+#include "equation_objects.h"
 
 // Find 只定位本轮固定小样文本，不是阶段 2 的通用定界符扫描器。
 static ComPtr<IDispatch> findSampleRange(IDispatch* document, const wchar_t* source) {
@@ -507,8 +509,59 @@ static void installationSelfTest(const std::wstring& directory) {
 
 #include "test_native_numbering.h"
 #include "test_experimental_api.h"
+#include "test_omml_adapter.h"
+#include "test_layout_warnings.h"
+
+static void diagnosticPages(const std::wstring& input,const std::wstring& output,const std::wstring& report) {
+    // 独立只读探测固定测试标记，证明实际分页漂移；不复用生产定位缓存。
+    const auto inputBytes=sampleFileBytes(input),outputBytes=sampleFileBytes(output);
+    requireDocxZip(input);requireDocxZip(output);WordSession word;
+    auto documents=get(word.application.Get(),L"Documents");
+    word.document=asObject(invoke(documents.Get(),L"Add",DISPATCH_METHOD,{Value(),false,Value(),false}));word.verifyOwnership();
+    invoke(word.application.Get(),L"DisplayAlerts",DISPATCH_PROPERTYPUT,{0L});
+    invoke(word.application.Get(),L"AutomationSecurity",DISPATCH_PROPERTYPUT,{3L});
+    invoke(word.document.Get(),L"Close",DISPATCH_METHOD,{0L});word.document.Reset();
+    auto pages=[&](const std::wstring& path){
+        word.document=asObject(invoke(documents.Get(),L"Open",DISPATCH_METHOD,{path.c_str(),false,true,false,Value(),Value(),false,Value(),Value(),Value(),Value(),false}));
+        const auto readOnly=invoke(word.document.Get(),L"ReadOnly",DISPATCH_PROPERTYGET);require(readOnly.v.vt==VT_BOOL&&readOnly.v.boolVal,"Page probe opens files read-only");
+        invoke(word.document.Get(),L"Repaginate",DISPATCH_METHOD);
+        auto content=get(word.document.Get(),L"Content");const auto span=bounds(content.Get());std::vector<long> values;
+        for(const auto* marker:{L"DIAGNOSTIC_PAGE_TWO",L"DIAGNOSTIC_RESTART"}){
+            auto range=findLiteral(ScanRangeContext{word.document.Get()},span.start,span.end,marker);require(range!=nullptr,"Page probe fixture marker exists");
+            invoke(range.Get(),L"Collapse",DISPATCH_METHOD,{1L});values.push_back(information(range.Get(),3));values.push_back(information(range.Get(),1));
+        }
+        content.Reset();invoke(word.document.Get(),L"Close",DISPATCH_METHOD,{0L});word.document.Reset();return values;
+    };
+    const auto before=pages(input),after=pages(output);documents.Reset();word.shutdown();
+    require(sampleFileBytes(input)==inputBytes&&sampleFileBytes(output)==outputBytes,"Page probing preserves both DOCX byte sequences");
+    const std::string json="{\"SourcePage\":"+std::to_string(before[0])+",\"SourceAdjustedPage\":"+std::to_string(before[1])+",\"OutputPage\":"+std::to_string(after[0])+",\"OutputAdjustedPage\":"+std::to_string(after[1])+",\"SourceRestartPage\":"+std::to_string(before[2])+",\"SourceRestartAdjustedPage\":"+std::to_string(before[3])+",\"OutputRestartPage\":"+std::to_string(after[2])+",\"OutputRestartAdjustedPage\":"+std::to_string(after[3])+",\"OriginalsUnchanged\":true}\n";
+    TaskHandle file(CreateFileW(report.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr));require(file.value!=INVALID_HANDLE_VALUE,"Create diagnostic page evidence");taskTrackFile(report,file.value,true);
+    DWORD written{};require(WriteFile(file.value,json.data(),static_cast<DWORD>(json.size()),&written,nullptr)&&written==json.size()&&FlushFileBuffers(file.value),"Write diagnostic page evidence");
+    taskCommit();std::puts("DIAGNOSTIC_PAGES_PASSED");
+}
+
 int wmain(int argc, wchar_t** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
+    if(argc==5&&std::wstring(argv[1])==L"--diagnostic-pages")return superviseTask(argc,argv,false);
+    if(argc==7&&std::wstring(argv[1])==L"--task-run"&&std::wstring(argv[3])==L"--diagnostic-pages"){
+        if(FAILED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED)))return 1;int result=1;
+        try{TaskMapping mapping(argv[2],false);taskShared=mapping.state;diagnosticPages(absolutePath(argv[4]),absolutePath(argv[5]),absolutePath(argv[6]));taskShared=nullptr;result=0;}
+        catch(const std::exception& error){std::printf("DIAGNOSTIC_PAGES_FAILED %s\n",error.what());taskShared=nullptr;}
+        CoUninitialize();return result;
+    }
+    if(argc==3&&std::wstring(argv[1])==L"--omml-word-snapshot-self-test")return superviseTask(argc,argv,false);
+    if(argc==5&&std::wstring(argv[1])==L"--task-run"&&std::wstring(argv[3])==L"--omml-word-snapshot-self-test"){
+        if(FAILED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED)))return 1;int result=1;
+        try{TaskMapping mapping(argv[2],false);taskShared=mapping.state;omml_adapter_tests::checkWordSources(absolutePath(argv[4]));taskShared=nullptr;result=0;}
+        catch(const std::exception& error){std::printf("OMML_WORD_SNAPSHOT_FAILED %s\n",error.what());taskShared=nullptr;}
+        CoUninitialize();return result;
+    }
+    if(argc==3&&std::wstring(argv[1])==L"--omml-adapter-self-test"){
+        // 仅使用系统 MSXML 与本机 Office 样式表，不创建 Office 或厂商服务实例。
+        const auto initialized=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);if(FAILED(initialized))return 1;
+        int result=1;try{omml_adapter_tests::run(absolutePath(argv[2]));result=0;}catch(const std::exception& error){std::printf("OMML_ADAPTER_SELF_TEST_FAILED %s\n",error.what());}
+        CoUninitialize();return result;
+    }
     if(argc==2&&std::wstring(argv[1])==L"--task-power-self-test"){
         // 检查实际线程电源请求及嵌套恢复，不改变系统电源计划，不启动 Office。
         const auto previous=SetThreadExecutionState(ES_CONTINUOUS);
@@ -537,12 +590,19 @@ int wmain(int argc, wchar_t** argv) {
         }catch(const std::exception& error){taskShared=nullptr;std::printf("TASK_POWER_SELF_TEST_FAILED %s\n",error.what());return 1;}
     }
     if(argc==2&&std::wstring(argv[1])==L"--compatible-tex-self-test"){
-        // 只测正式文本改写函数，不启动 Word、MathType 或 COM。
+        // 检查文本、编号和包资产纯规则，不启动 Word、MathType 或 COM。
         try{
-            require(compatibleTex(L"\\bm{x}+\\mathup{abc}")==L"\\boldsymbol{x}+\\mathrm{abc}","Compatible command rewrite");
-            require(compatibleTex(L"\\bmfoo+\\\\bm+\\text{\\bm}")==L"\\bmfoo+\\\\bm+\\text{\\bm}","Compatible command boundaries");
+            layout_warning_tests::run();
+            require(compatibleTex(L"\\begin{aligned}a&=b\\\\c&=d\\end{aligned}") == L"\\begin{array}{rl}a&=b\\\\c&=d\\end{array}", "Aligned two columns");
+            require(compatibleTex(L"\\begin{aligned}[t]a&=b,&c&=d\\end{aligned}") == L"\\begin{array}{rlrl}a&=b,&c&=d\\end{array}", "Aligned four columns and position");
+            require(compatibleTex(L"\\begin{aligned}a&=\\begin{matrix}x&y\\\\z&w\\end{matrix}\\end{aligned}") == L"\\begin{array}{rl}a&=\\begin{matrix}x&y\\\\z&w\\end{matrix}\\end{array}", "Nested matrix columns stay separate");
+            require(compatibleTex(L"\\text{aligned} a\\&b") == L"\\text{aligned} a\\&b", "Ordinary TeX stays exact");
+            require(compatibleTex(L"\\bm{x}+\\mathup{abc}+\\lvert y\\rvert")==L"\\boldsymbol{x}+\\mathrm{abc}+\\vert y\\vert","Known command aliases");
+            require(compatibleTex(L"\\bmfoo+\\\\bm+\\text{\\bm}+\\textnormal{literal \\bm}")==L"\\bmfoo+\\\\bm+\\text{\\bm}+\\text{literal \\bm}","Command boundaries, escaped slashes and text arguments");
             require(compatibleTex(L"\\operatorname*{literal \\bm}")==L"\\operatorname*{literal \\bm}","Starred operator text stays exact");
-            require(compatibleTex(L"\\begin{alignedat}{n}a&=b\\end{alignedat}")==L"\\begin{alignedat}{n}a&=b\\end{alignedat}","Unknown column argument unchanged");
+            require(compatibleTex(L"\\begin{gathered}a=b\\\\c=d\\end{gathered}")==L"\\begin{array}{c}a=b\\\\c=d\\end{array}","Gathered rows centered");
+            require(compatibleTex(L"\\begin{alignedat}{2}a&=b&c&=d\\end{alignedat}")==L"\\begin{array}{rlrl}a&=b&c&=d\\end{array}","Alignedat column count consumed");
+            require(compatibleTex(L"\\begin{alignedat}{n}a&=b\\end{alignedat}")==L"\\begin{alignedat}{n}a&=b\\end{alignedat}"&&compatibleTex(L"\\unknown{x}\\boxed{y}")==L"\\unknown{x}\\boxed{y}","Unknown or nonliteral forms stay untouched");
             require(compatibleTex(L"\u0176+Y\u0302+\u022c")==L"\\hat{Y}+\\hat{Y}+\\bar{\\tilde{O}}","Precomposed and stacked Unicode accents");
             require(compatibleTex(L"\\mathrm{\u0176}_i^2+\\widetilde{XY}+\\mathring{Y}")==L"\\mathrm{\\hat{Y}}_i^2+\\tilde{XY}+\\overset{\\circ}{Y}","Accent aliases and styled Unicode");
             require(compatibleTex(L"\\text{\u0176 \\widetilde}+\\widetildefoo")==L"\\text{\u0176 \\widetilde}+\\widetildefoo","Text and longer command names unchanged");
@@ -551,8 +611,9 @@ int wmain(int argc, wchar_t** argv) {
             require(lexicalReason(L"\\begin{aligned}a&=1% ignored\v\\\\b&=2\\end{aligned}")==L"UNSUPPORTED_TEX_COMMENT"&&
                     lexicalReason(L"x\\\\%comment")==L"UNSUPPORTED_TEX_COMMENT"&&lexicalReason(L"x\\%+y").empty(),"TeX comments preserved without rejecting escaped percent");
             require(exportedInner("$x\\$+50\\%$",false)==L"x\\$+50\\%","Escaped export delimiters remain valid");
+            require(exportedInner("\\[50\\%\\]",true)==L"50\\%"&&exportedInner("$x\\\\\\%$",false)==L"x\\\\\\%","Escaped percent exports stay exact");
             // 厂商短音符等导出可能夹带嵌套定界符，必须在替换对象前拦住。
-            for(const auto* tex:{"$x$y$","$x\\[y\\]$","$x\\(y\\)$","$x\\\\$y$","$x%comment$"}){
+            for(const auto* tex:{"$x$y$","$x\\[y\\]$","$x\\(y\\)$","$x\\\\$y$","$x%comment$","$x\\\\%comment$"}){
                 bool rejected=false;try{exportedInner(tex,false);}catch(const std::exception&){rejected=true;}
                 require(rejected,"Invalid native export preserved before replacing its object");
             }
@@ -561,12 +622,23 @@ int wmain(int argc, wchar_t** argv) {
             requireContains(assets,{{1,2},{3},{1,2}},"Asset references preserve duplicate contents");
             bool missing=false;try{requireContains(assets,{{1,2},{1,2},{1,2}},"Missing duplicate asset");}catch(const std::exception&){missing=true;}
             require(missing,"Missing duplicate asset is rejected");
+            require(nativeFromOle({}).empty()&&nativeFromOle({'P','K',3,4,0,0,0,0}).empty(),"Non-OLE embeddings stay opaque");
+            // 字号与编号格式是纯规则，不能依赖 Word 启动后才得到回归覆盖。
+            require(parseSpacing(L"multiple:1.25").value==1.25&&parseSpacing(L"exact:24").mode==4,"Spacing modes and values");
+            EquationNumbering testNumber;testNumber.format=L"[#CI.#Sa-#EA]";testNumber.chapter=4;testNumber.section=2;
+            const auto parts=numberParts(testNumber,28);require(parts.before==L"[IV.b-"&&parts.digits==L"BB"&&parts.after==L"]","Number format tokens and alphabetic boundary");
+            // 编号识别保持原有域类型、大小写和序列边界，扫描与更新使用同一规则。
+            require(nativeNumberField(51,L" MACROBUTTON MTPlaceRef \\* MERGEFORMAT ")&&!nativeNumberField(12,L"MACROBUTTON MTPlaceRef"),"Native number requires its macrobutton field type");
+            require(nativeSequenceField(12,L" SEQ MTChap \\r 4 ",L"MTChap")&&!nativeSequenceField(12,L" SEQ MTChapExtra \\r 4 ")&&!nativeSequenceField(51,L" SEQ MTEqn "),"Native sequence names and field types stay exact");
+            require(nativeResetSeed(12,L" SEQ MTSec \\r 2 ",L"MTSec")&&!nativeResetSeed(12,L" SEQ MTSec \\c "),"Only reset sequences are numbering seeds");
+            require(nativeCurrentCounter(L" SEQ MTEqn \\c ")&&!nativeIncrementCounter(L" SEQ MTEqn \\c ")&&nativeIncrementCounter(L" SEQ MTEqn \\h "),"Current and increment counters remain distinct");
+            require(nativeNumberWithoutSeparator(L" MACROBUTTON MTEditEquationSection ")&&!nativeNumberWithoutSeparator(L"MACROBUTTON MTPlaceRef "),"Native empty result bounds preserve the original prefix rule");
             // 同一份原始 XML 可供签名和 OMML 导入共用，签名只去掉易变元数据。
             require(sourceSignature(L"<pkg><w:body><w:p w:rsidR=\"1\"><w:r ObjectID=\"2\"/></w:p></w:body></pkg>",true)==
                     L"<w:body><w:p><w:r/></w:p></w:body>","Signature from cached source XML");
-            // 实验快速模式可以跳过语法预检，退出后恢复默认严格规则。
-            experimentalFast=true;require(lexicalReason(L"x{ % invalid").empty(),"Fast conversion skips lexical verification");
-            experimentalFast=false;require(!lexicalReason(L"x{ % invalid").empty(),"Default conversion retains lexical verification");
+            // 快速模式显式跳过语法预检，默认参数继续使用常规严格规则。
+            require(lexicalReason(L"x{ % invalid",true).empty(),"Fast conversion skips lexical verification");
+            require(!lexicalReason(L"x{ % invalid").empty(),"Default conversion retains lexical verification");
             std::wstring sample=L"\\begin{align*}a&=\\bm{x}+\\mathup{y}\\\\c&=\\lvert z\\rvert\\end{align*}";sample.append(900,L'x');
             LARGE_INTEGER frequency{},before{},after{};require(QueryPerformanceFrequency(&frequency)&&QueryPerformanceCounter(&before),"Start text rewrite timing");
             size_t checksum{};constexpr size_t count=10000;for(size_t i=0;i<count;++i)checksum+=compatibleTex(sample).size();

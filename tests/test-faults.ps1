@@ -185,8 +185,7 @@ try {
         }
     }
     $faultEvidence.Checks=@{ActualWordProcessDisconnected=$true;BothDirectionsAndGUI=$true;NoUnknownResultPublished=$true;TaskCopiesCleanedAfterDisconnect=$true;OriginalBytesUnchanged=$true;UnrelatedWordAndMathTypeUnchanged=$true;SuspendedComServiceReallyBlocks=$true;CloseRequestsImmediateCancel=$true;NoPartialCopyOnCancel=$true;TaskIdentityIncludesCreationTime=$true;AutomaticHardTimeout=$false;PhysicalMouseKeyboard=$false;OtherMachine=$false}
-    $faultEvidence.SourceSHA256=[ordered]@{}
-    foreach($faultFile in @('gui.cpp','convert_docx.cpp','docx_scan.h','word_automation.h','mathtype_api.h','task_guard.h','test-faults.ps1')) {$faultEvidence.SourceSHA256[$faultFile]=(Get-FileHash -LiteralPath (Get-TestSourcePath $faultFile) -Algorithm SHA256).Hash}
+    $faultEvidence.SourceSHA256=Get-TestSourceHashes
     $faultEvidence.ExecutableSHA256=(Get-FileHash -LiteralPath $faultExe -Algorithm SHA256).Hash
     $faultEvidence.Status='PASSED'
     Write-Output 'REAL_WORD_FAULT_ACCEPTANCE_PASSED'

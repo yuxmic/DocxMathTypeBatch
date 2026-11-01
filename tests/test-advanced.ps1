@@ -1,17 +1,21 @@
 #requires -Version 7.0
 # 高级设置只测真实效果，不将自定义行距和编号计入默认性能测量。
-param([switch]$SkipBuild)
+param([switch]$SkipBuild,[ValidateSet('All','Omml')][string]$Case='All')
 $ErrorActionPreference='Stop'
+$selectedCase=$Case
 . (Join-Path $PSScriptRoot 'helpers/common.ps1')
 if(-not $SkipBuild){& (Join-Path $ProjectRoot 'build.ps1') -Target Gui}
 $run=Join-Path $ProjectRoot ('tests\output\高级设置-'+[Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $run|Out-Null
 $exe=Join-Path $ProjectRoot 'build\bin\DocxMathTypeBatch.exe'
-$evidence=[ordered]@{Status='FAILED';Directory=$run;ExecutableSHA256=(Get-FileHash -LiteralPath $exe).Hash;Cases=@()}
-& python -B -X utf8 (Join-Path $PSScriptRoot 'helpers/test_advanced.py') fixture $run
-if($LASTEXITCODE -ne 0){throw '高级样本生成失败。'}
-$source=Join-Path $run 'advanced-input.docx';$hash=(Get-FileHash -LiteralPath $source).Hash
+$evidence=[ordered]@{Status='FAILED';Case=$selectedCase;Directory=$run;ExecutableSHA256=(Get-FileHash -LiteralPath $exe).Hash;Cases=@()}
+if($Case -eq 'All'){
+    & python -B -X utf8 (Join-Path $PSScriptRoot 'helpers/test_advanced.py') fixture $run
+    if($LASTEXITCODE -ne 0){throw '高级样本生成失败。'}
+    $source=Join-Path $run 'advanced-input.docx';$hash=(Get-FileHash -LiteralPath $source).Hash
+}
 try{
+    if($Case -eq 'All'){
     foreach($case in @(
         @{Name='follow';Inline='follow';Display='follow';Extra=@()},
         @{Name='single';Inline='single';Display='double';Extra=@()},
@@ -40,9 +44,31 @@ try{
         try{if(-not $process.WaitForExit(30000) -or $process.ExitCode -eq 0 -or (Test-Path -LiteralPath (Join-Path $run ($case.Name+'.docx')))){throw '无效配置未安全拒绝。'}}finally{$process.Dispose()}
         $evidence.Cases+=@{Name=$case.Name;RejectedWithoutOutput=$true}
     }
+    }
+    # 只增加一组开关回归；反向复用关闭后的输出，默认开启沿用同一份区域混合样本。
+    $ommlRun=Join-Path $run 'omml-switch';New-Item -ItemType Directory -Path $ommlRun|Out-Null
+    $helper=Join-Path $PSScriptRoot 'helpers/test_advanced.py'
+    & python -B -X utf8 $helper omml-switch-fixture $ommlRun
+    if($LASTEXITCODE -ne 0){throw 'OMML 开关样本生成失败。'}
+    foreach($name in @('default-on','off-normal','off-fast','off-reverse','off-no-targets')){
+        $reverse=$name -eq 'off-reverse';$inputFile=Join-Path $ommlRun $(if($reverse){'off-normal.docx'}elseif($name -eq 'off-no-targets'){'omml-only-input.docx'}else{'input.docx'})
+        $inputHash=(Get-FileHash -LiteralPath $inputFile).Hash
+        $output=Join-Path $ommlRun ($name+'.docx');$report=Join-Path $ommlRun ($name+'.json');$log=Join-Path $ommlRun ($name+'.log')
+        $arguments=@($(if($reverse){'--worker-reverse'}else{'--worker-convert'}),$inputFile,$output,$report,$(if($reverse){'bracket'}else{'paragraph'}),(Join-Path $ommlRun ($name+'.flag')))
+        $arguments+=@('tables','textboxes','headers','notes'|ForEach-Object{'--experimental-'+$_})
+        if($name -ne 'default-on'){$arguments+='--skip-omml'}
+        if($name -eq 'off-fast'){$arguments+='--experimental-fast'}
+        $process=Start-Process -FilePath $exe -ArgumentList @($arguments|ForEach-Object{'"'+$_+'"'}) -WindowStyle Hidden -RedirectStandardOutput $log -RedirectStandardError (Join-Path $ommlRun ($name+'.errors')) -PassThru
+        try{if(-not $process.WaitForExit(180000) -or $process.ExitCode -ne 0){throw ('OMML 开关转换失败：'+$name+'；'+$log)}}finally{$process.Dispose()}
+        if((Get-FileHash -LiteralPath $inputFile).Hash -ne $inputHash){throw ('OMML 开关测试修改了原件：'+$name)}
+        $check=(& python -B -X utf8 $helper omml-switch-check $ommlRun $name)|ConvertFrom-Json
+        if($LASTEXITCODE -ne 0 -or $check.Status -ne 'PASSED'){throw ('OMML 开关独立检查失败：'+$name)}
+        $evidence.Cases+=@{Name=$name;Check=$check;InputSHA256=$inputHash;Report=$report}
+        Write-Output ('OMML_SWITCH_CASE_PASSED: '+$name)
+    }
     $evidence.Status='PASSED'
 }finally{
-    $evidence.SourceSHA256=@{};foreach($file in @('gui.cpp','convert_docx.cpp','layout_options.h','native_numbering.h','native_number_text.py','test-advanced.ps1','test_advanced.py','test_native_display.py')){$evidence.SourceSHA256[$file]=(Get-FileHash -LiteralPath (Get-TestSourcePath $file)).Hash}
+    $evidence.SourceSHA256=Get-TestSourceHashes
     $evidence|ConvertTo-Json -Depth 10|Set-Content -LiteralPath (Join-Path $run 'advanced-results.json') -Encoding utf8
     $evidence|ConvertTo-Json -Depth 10|Set-Content -LiteralPath (Join-Path $TestOutputRoot 'advanced-results.json') -Encoding utf8
 }

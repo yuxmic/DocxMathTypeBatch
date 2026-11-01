@@ -268,8 +268,7 @@ try {
     }
     $timeoutEvidence.Checks=[ordered]@{AutomaticHardTimeoutVerified=$true;PermanentWordBlockVerified=$true;NoUnknownPublication=$true;OwnedWordAndCopiesCleaned=$true;TaskIdentityIncludesCreationTime=$true;UnrelatedSessionsPreserved=$true;SharedMathTypeNeverKilledByProduct=$true;NoPendingSharedStyles=(@($timeoutEvidence.Cases | Where-Object NoPendingSharedStyle -EQ $true).Count -eq 3);NextConversionAfterTimeout=(@($timeoutEvidence.Cases | Where-Object RestoredNextTask -EQ 'COMPLETE').Count -eq 1);PhysicalMouseKeyboard=$false;OtherMachine=$false}
     $timeoutEvidence.FullSuite=-not $Cases
-    $timeoutEvidence.SourceSHA256=[ordered]@{}
-    foreach ($timeoutSource in @('task_guard.h','gui.cpp','convert_docx.cpp','docx_scan.h','word_automation.h','mathtype_api.h','native_api_probe.cpp','test-timeouts.ps1','build.ps1')) { $timeoutEvidence.SourceSHA256[$timeoutSource]=(Get-FileHash -LiteralPath (Get-TestSourcePath $timeoutSource)).Hash }
+    $timeoutEvidence.SourceSHA256=Get-TestSourceHashes
     $timeoutEvidence.ExecutableSHA256=(Get-FileHash -LiteralPath $timeoutExe).Hash
     $timeoutEvidence.CliExecutableSHA256=(Get-FileHash -LiteralPath $timeoutCli).Hash; $timeoutEvidence.ScanExecutableSHA256=(Get-FileHash -LiteralPath $timeoutScan).Hash
     $timeoutEvidence.Status='PASSED'; Write-Output 'PRODUCT_TIMEOUT_ACCEPTANCE_PASSED'

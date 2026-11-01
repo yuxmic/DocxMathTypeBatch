@@ -57,8 +57,7 @@ Copy-Item -LiteralPath $numbered -Destination (Join-Path $interop 'converted.doc
 if($LASTEXITCODE -ne 0){throw '原生编号更新、格式化或追加检查失败。'}
 & python -B -X utf8 (Join-Path $PSScriptRoot 'helpers/test_native_numbering.py') check $interop 5 new
 if($LASTEXITCODE -ne 0){throw '原生更新、格式化后的可见 PDF 编号错误。'}
-$evidence=[ordered]@{Status='PASSED';Directory=$run;ExecutableSHA256=(Get-FileHash -LiteralPath $exe).Hash;Unnumbered=$unnumbered;LegacyNormalized=$legacyOutput;NumberedLater=$numbered;ExistingNumbersPreserved=$preserved;Repeated=$again;Mixed=$mixedOutput;Reset=$reset;ReferenceUpdated=$referenceOutput;NoDuplicateNumbers=$true;OriginalsUnchanged=$true;OldEquationDataUnchanged=$true;NumberOnlyNoMathTypeActivation=$true;NativeManualInsertRightAligned=$true;NativeUpdateFormatAppend=$true;SourceSHA256=[ordered]@{}}
-foreach($file in @('gui.cpp','convert_docx.cpp','docx_scan.h','native_numbering.h','native_api_probe.cpp','test_native_numbering.h','test-native-display.ps1','test_native_display.py')){$evidence.SourceSHA256[$file]=(Get-FileHash -LiteralPath (Get-TestSourcePath $file)).Hash}
+$evidence=[ordered]@{Status='PASSED';Directory=$run;ExecutableSHA256=(Get-FileHash -LiteralPath $exe).Hash;Unnumbered=$unnumbered;LegacyNormalized=$legacyOutput;NumberedLater=$numbered;ExistingNumbersPreserved=$preserved;Repeated=$again;Mixed=$mixedOutput;Reset=$reset;ReferenceUpdated=$referenceOutput;NoDuplicateNumbers=$true;OriginalsUnchanged=$true;OldEquationDataUnchanged=$true;NumberOnlyNoMathTypeActivation=$true;NativeManualInsertRightAligned=$true;NativeUpdateFormatAppend=$true;SourceSHA256=(Get-TestSourceHashes)}
 $evidence|ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $run 'native-display-results.json') -Encoding utf8
 $evidence|ConvertTo-Json -Depth 5|Set-Content -LiteralPath (Join-Path $TestOutputRoot 'native-display-results.json') -Encoding utf8
 Write-Output ('NATIVE_DISPLAY_PASSED: '+$run)

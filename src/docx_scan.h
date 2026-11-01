@@ -1,84 +1,28 @@
 // 只读扫描与批处理实际共用的主故事范围、定界符及清单检查。
 #pragma once
 #include "word_automation.h"
-#include <climits>
-#include <cwctype>
-#include <msopc.h>
-#include <msxml6.h>
-#include <map>
-#include <cmath>
-
-using DocxLinkUpdates = std::map<std::wstring, std::vector<std::wstring>>;
-// 只修改私有副本的 OLE 外链更新方式，正常保存后恢复，不修改 Word 全局选项。
-inline DocxLinkUpdates setDocxLinkUpdates(const std::wstring& path, const DocxLinkUpdates* restore = nullptr) {
-    if (restore && restore->empty()) return {};
-    ComPtr<IOpcFactory> factory; check(CoCreateInstance(__uuidof(OpcFactory),nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&factory)),"Link settings package factory");
-    ComPtr<IStream> input; check(factory->CreateStreamOnFile(path.c_str(),OPC_STREAM_IO_READ,nullptr,0,&input),"Read private link settings");
-    ComPtr<IOpcPackage> package; check(factory->ReadPackageFromStream(input.Get(),OPC_VALIDATE_ON_LOAD,&package),"Read private package for links");
-    DocxLinkUpdates updates; size_t restored{};
-    {
-        ComPtr<IOpcPartSet> parts;check(package->GetPartSet(&parts),"Link settings parts");
-        ComPtr<IOpcPartEnumerator> entries;check(parts->GetEnumerator(&entries),"Link settings part enumeration");BOOL more{};HRESULT advanced{};
-        while((advanced=entries->MoveNext(&more))==S_OK&&more){
-            taskPulse();ComPtr<IOpcPart> part;check(entries->GetCurrent(&part),"Link settings current part");
-            ComPtr<IOpcPartUri> uri;check(part->GetName(&uri),"Link settings part name");Value name;name.v.vt=VT_BSTR;check(uri->GetAbsoluteUri(&name.v.bstrVal),"Link settings part URI");
-            const std::wstring partName=name.v.bstrVal;
-            if(partName.rfind(L"/word/",0)!=0||(partName.size()<4)||(partName.substr(partName.size()-4)!=L".xml"&&partName.substr(partName.size()-4)!=L".vml"))continue;
-            if(restore&&restore->find(partName)==restore->end())continue;
-            ComPtr<IStream> content;check(part->GetContentStream(&content),"Read XML link settings");
-            ComPtr<IXMLDOMDocument2> document;check(CoCreateInstance(__uuidof(DOMDocument60),nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&document)),"System XML link settings reader");
-            check(document->put_async(VARIANT_FALSE),"Synchronous link settings XML");check(document->put_preserveWhiteSpace(VARIANT_TRUE),"Keep XML whitespace");
-            check(document->put_resolveExternals(VARIANT_FALSE),"Disable XML external resolution");check(document->setProperty(Value(L"ProhibitDTD").v.bstrVal,Value(true).v),"Disable XML DTD");
-            Value source;source.v.vt=VT_UNKNOWN;source.v.punkVal=content.Get();source.v.punkVal->AddRef();VARIANT_BOOL loaded{};
-            check(document->load(source.v,&loaded),"Load private XML part");require(loaded!=VARIANT_FALSE,"Valid private XML part");
-            ComPtr<IXMLDOMNodeList> links;check(document->selectNodes(Value(L"//*[local-name()='OLEObject' and namespace-uri()='urn:schemas-microsoft-com:office:office' and @Type='Link']").v.bstrVal,&links),"Find linked OLE objects");
-            long count{};check(links->get_length(&count),"Count linked OLE objects");if(!count&&!restore)continue;
-            if(restore){require(static_cast<size_t>(count)==restore->at(partName).size(),"Saved linked OLE objects preserved");++restored;}
-            for(long index=0;index<count;++index){
-                ComPtr<IXMLDOMNode> node;check(links->get_item(index,&node),"Read linked OLE node");ComPtr<IXMLDOMElement> element;check(node.As(&element),"Linked OLE element");
-                if(!restore){Value mode;check(element->getAttribute(Value(L"UpdateMode").v.bstrVal,&mode.v),"Read original OLE update mode");
-                    require(mode.v.vt==VT_NULL||mode.v.vt==VT_BSTR,"OLE update mode type");updates[partName].push_back(mode.v.vt==VT_BSTR?mode.v.bstrVal:L"");
-                    check(element->setAttribute(Value(L"UpdateMode").v.bstrVal,Value(L"OnCall").v),"Disable private OLE automatic update");
-                }else{const auto& mode=restore->at(partName)[static_cast<size_t>(index)];
-                    if(mode.empty())check(element->removeAttribute(Value(L"UpdateMode").v.bstrVal),"Restore absent OLE update mode");
-                    else check(element->setAttribute(Value(L"UpdateMode").v.bstrVal,Value(mode.c_str()).v),"Restore original OLE update mode");
-                }
-            }
-            ULARGE_INTEGER zeroSize{};LARGE_INTEGER zero{};check(content->SetSize(zeroSize),"Replace private XML part");check(content->Seek(zero,STREAM_SEEK_SET,nullptr),"Rewind private XML output");
-            check(document->save(source.v),"Write private OLE link settings");
-        }
-        check(advanced,"Complete linked OLE part enumeration");
-    }
-    if(restore)require(restored==restore->size(),"All original linked OLE parts preserved");
-    if(!restore&&updates.empty())return updates;
-    ComPtr<IStream> output;check(CreateStreamOnHGlobal(nullptr,TRUE,&output),"Private package rewrite buffer");
-    check(factory->WritePackageToStream(package.Get(),OPC_WRITE_DEFAULT,output.Get()),"Write private link settings package");package.Reset();input.Reset();
-    LARGE_INTEGER zero{};check(output->Seek(zero,STREAM_SEEK_SET,nullptr),"Rewind private package buffer");
-    ComPtr<IStream> destination;check(factory->CreateStreamOnFile(path.c_str(),OPC_STREAM_IO_WRITE,nullptr,0,&destination),"Replace owned private package");
-    ULARGE_INTEGER all{};all.QuadPart=~0ULL;check(output->CopyTo(destination.Get(),all,nullptr,nullptr),"Complete private package rewrite");return updates;
-}
-
-// 只在 GUI 工作进程输出计数；阶段首尾立即发送，中途最多每 150 ms 更新一次。
-inline bool guiStageProgress{},checkingSavedDocument{},experimentalFast{};
-struct StageProgress {
-    const char* stage{};size_t total{},completed{};ULONGLONG lastUpdate{};
-    StageProgress(const char* name,size_t count):stage(name),total(count) {
-        if(guiStageProgress&&stage&&total){std::printf("UI_STAGE_PROGRESS %s 0 %zu\n",stage,total);lastUpdate=GetTickCount64();}
-    }
-    void advance(){++completed;if(completed==1&&stage){
-        if(!strcmp(stage,"SCAN_TEXT"))taskTestBoundary(L"SCAN_PROGRESS");
-        if(!strcmp(stage,"RESCAN_TEXT"))taskTestBoundary(L"RESCAN_PROGRESS");
-    }if(!guiStageProgress||!stage||!total)return;const auto now=GetTickCount64();
-        if(completed==total||now-lastUpdate>=150){std::printf("UI_STAGE_PROGRESS %s %zu %zu\n",stage,completed,total);lastUpdate=now;}}
-};
+#include "latex_rules.h"
+#include "worker_protocol.h"
+#include "numbering_rules.h"
+#include <utility>
 
 struct Span { long start{}, end{}; };
+// 原文定位在首次修改前冻结；0 页表示未能取得页码，绝不借用转换后的排版。
+struct SourcePosition {
+    long sourceStart{-1},page{};
+    std::wstring location;
+};
 struct ScannedShape {Span span;std::wstring classType;long type{};};
 struct ScannedField {Span codeSpan;long kind{};std::wstring code,result;Span span;};
 enum class EquationScope { All, Inline, Display };
-inline EquationScope equationScope = EquationScope::All;
-inline bool selectedEquation(bool display) {
-    return equationScope == EquationScope::All || (display ? equationScope == EquationScope::Display : equationScope == EquationScope::Inline);
+struct ScanOptions {
+    EquationScope scope{EquationScope::All};
+    bool fast{},saved{},progress{};
+    bool capturePoints{true};
+    bool convertOmml{true};
+};
+inline bool selectedEquation(bool display,EquationScope scope=EquationScope::All) {
+    return scope == EquationScope::All || (display ? scope == EquationScope::Display : scope == EquationScope::Inline);
 }
 struct ScanItem {
     Span span;
@@ -90,6 +34,7 @@ struct ScanItem {
     long existingNativeOrdinal{};
     bool existingReference{};
     long ommlOrdinal{};
+    SourcePosition position;
 };
 struct ScanResult {
     std::vector<ScanItem> items;
@@ -116,6 +61,18 @@ inline long information(IDispatch* range, long type) {
     require(value.v.vt == VT_I4, "Word Information type");
     return value.v.lVal;
 }
+inline SourcePosition originalSourcePosition(IDispatch* document,long start,const std::wstring& region,bool paginated) {
+    SourcePosition result;result.sourceStart=start;
+    if(paginated&&start>=0){
+        try{auto point=docRange(document,start,start);result.page=std::max(0L,information(point.Get(),3));}
+        catch(const std::exception& error){require(!taskCancelled()&&std::string(error.what())!="TASK_CANCELLED","TASK_CANCELLED");}
+    }
+    result.location=(result.page?L"原文第 "+std::to_wstring(result.page)+L" 页":L"原文页码未知")+L" · "+region;
+    return result;
+}
+inline std::string sourcePositionJson(const SourcePosition& position) {
+    return ",\"SourceLocation\":"+quote(position.location.empty()?L"原文页码未知":position.location)+",\"Page\":"+(position.page?std::to_string(position.page):"null");
+}
 inline Span bounds(IDispatch* range) { return {integer(range, L"Start"), integer(range, L"End")}; }
 inline Span fieldBounds(IDispatch* field,ScannedField* snapshot=nullptr) {
     auto codeRange=get(field,L"Code"),resultRange=get(field,L"Result");const auto code=bounds(codeRange.Get()),value=bounds(resultRange.Get());
@@ -125,7 +82,7 @@ inline Span fieldBounds(IDispatch* field,ScannedField* snapshot=nullptr) {
     Span span{code.start-1,value.end+1};
     if(value.start==value.end&&kind==51){
         const auto instruction=snapshot?snapshot->code:text(codeRange.Get(),L"Text");
-        if(instruction.find(L" MACROBUTTON MTPlaceRef ")==0||instruction.find(L" MACROBUTTON MTEditEquationSection")==0)
+        if(nativeNumberWithoutSeparator(instruction))
             span.end=code.end+1; // 原生编号没有结果分隔符，避免多占相邻内容。
     }
     if(snapshot)snapshot->span=span;return span;
@@ -137,7 +94,7 @@ inline ComPtr<IDispatch> sliceRange(IDispatch* root,long start,long end) {
     auto range=get(root,L"Duplicate");invoke(range.Get(),L"SetRange",DISPATCH_METHOD,{start,end});return range;
 }
 // 正文继续使用原来的 Document.Range；额外区域才采用所属 Range 的坐标。
-struct ScanRangeContext { IDispatch* document{}; IDispatch* story{};bool captureSize{true}; };
+struct ScanRangeContext { IDispatch* document{}; IDispatch* story{};bool captureSize{true};ScanOptions options{}; };
 inline ComPtr<IDispatch> docRange(const ScanRangeContext& context,long start,long end) {
     return context.story?sliceRange(context.story,start,end):docRange(context.document,start,end);
 }
@@ -164,7 +121,7 @@ inline ComPtr<IDispatch> findLiteral(const ScanRangeContext& document, long star
     require(found.v.vt == VT_BOOL, "Word Find return type");
     if (found.v.boolVal == VARIANT_FALSE) return {};
     const auto actual = bounds(range.Get());
-    require(actual.start >= start && actual.end <= end && actual.end > actual.start && (experimentalFast||text(range.Get(), L"Text") == needle),
+    require(actual.start >= start && actual.end <= end && actual.end > actual.start && (document.options.fast||text(range.Get(), L"Text") == needle),
             "Literal Find remains inside requested range");
     return range;
 }
@@ -224,51 +181,6 @@ inline std::vector<Token> tokens(const ScanRangeContext& document, Span segment,
     return result;
 }
 
-inline bool whitespaceOnly(const std::wstring& value) {
-    return std::all_of(value.begin(), value.end(), [](wchar_t c) { return iswspace(c) || c == L'\a'; });
-}
-// Word 换行只是源码排版空白；TeX 的双反斜杠必须原样交给 MathType。
-inline std::wstring normalizedTex(std::wstring value) {
-    for (auto& c : value) if (c == L'\r' || c == L'\n' || c == L'\v') c = L' ';
-    return value;
-}
-inline bool structuredMultiline(const std::wstring& value) {
-    if (value.find(L"\\\\") != std::wstring::npos) return true;
-    for (const auto* name : {L"align",L"aligned",L"alignat",L"alignedat",L"split",L"gather",L"gathered",L"subarray",L"array",L"cases",L"matrix",L"pmatrix",L"bmatrix",L"vmatrix",L"Vmatrix",L"smallmatrix"})
-        if (value.find(std::wstring(L"\\begin{") + name + L"}") != std::wstring::npos ||
-            value.find(std::wstring(L"\\begin{") + name + L"*}") != std::wstring::npos) return true;
-    return false;
-}
-// 只检查基本语法与环境配对，支持度仍由 MathType 的导入结果判定。
-inline std::wstring lexicalReason(const std::wstring& inner) {
-    if(experimentalFast)return {};
-    if (whitespaceOnly(inner)) return L"EMPTY";
-    if (inner.find_first_of(L"\f\a") != std::wstring::npos ||
-        (inner.find_first_of(L"\r\n\v") != std::wstring::npos && !structuredMultiline(inner))) return L"UNSUPPORTED_LINE_BREAK";
-    long depth{};
-    std::vector<std::wstring> environments;
-    for (size_t index = 0; index < inner.size(); ++index) {
-        const auto character = inner[index];
-        if (character == L'\\' && index + 1 < inner.size()) {
-            const bool begin = inner.compare(index,7,L"\\begin{") == 0, end = inner.compare(index,5,L"\\end{") == 0;
-            if (begin || end) {
-                const auto first = index + (begin ? 7 : 5), last = inner.find(L'}',first);
-                if (last == std::wstring::npos) return L"UNBALANCED_ENVIRONMENTS";
-                const auto name = inner.substr(first,last-first);
-                if (begin) environments.push_back(name);
-                else { if (environments.empty() || environments.back()!=name) return L"UNBALANCED_ENVIRONMENTS"; environments.pop_back(); }
-            }
-            ++index; continue;
-        }
-        // MathType 会把注释直接排成公式内容，未转义的百分号必须保留原式。
-        if (character == L'%') return L"UNSUPPORTED_TEX_COMMENT";
-        if (character == L'{') ++depth;
-        if (character == L'}' && --depth < 0) return L"UNBALANCED_BRACES";
-    }
-    if (depth != 0) return L"UNBALANCED_BRACES";
-    return environments.empty() ? L"" : L"UNBALANCED_ENVIRONMENTS";
-}
-
 inline double equationPoints(IDispatch* range,const ScanRangeContext& document,Span inner) {
     auto size=invoke(get(range,L"Font").Get(),L"Size",DISPATCH_PROPERTYGET);
     double points=size.v.vt==VT_R4?size.v.fltVal:size.v.vt==VT_R8?size.v.dblVal:size.v.vt==VT_I4?size.v.lVal:0;
@@ -282,24 +194,11 @@ inline double equationPoints(IDispatch* range,const ScanRangeContext& document,S
     }
     return points;
 }
-// 只识别括号内的数字及章-序号；单位、说明和数学表达式不作为手动编号。
-inline bool manualEquationNumber(const std::wstring& value) {
-    const auto first=value.find_first_not_of(L" \t\r\n\v\f\u00a0\u3000"),last=value.find_last_not_of(L" \t\r\n\v\f\u00a0\u3000");
-    if(first==std::wstring::npos||last<=first+1)return false;
-    if(!((value[first]==L'('&&value[last]==L')')||(value[first]==L'（'&&value[last]==L'）')))return false;
-    bool digit=false;
-    for(auto i=first+1;i<last;++i){
-        const auto c=value[i];if(c>=L'0'&&c<=L'9'){digit=true;continue;}
-        if((c==L'-'||c==L'.'||c==L'－')&&digit){digit=false;continue;}return false;
-    }
-    return digit;
-}
-
 inline void addItem(const ScanRangeContext& document, Span span, Span inner, TokenKind kind, const std::wstring& reason,
                     long paragraph, ScanResult& result, const std::wstring& paragraphText, Span allowed) {
     auto range = docRange(document, span.start, span.end);
     ScanItem item;
-    item.span = span; item.paragraph = paragraph; item.reason = reason; item.ready = reason.empty();
+    item.span = span; item.position.sourceStart=span.start;item.paragraph = paragraph; item.reason = reason; item.ready = reason.empty();
     item.source = text(range.Get(), L"Text");
     if (inner.end >= inner.start && inner.start >= span.start && inner.end <= span.end)
         item.inner = text(docRange(document, inner.start, inner.end).Get(), L"Text");
@@ -330,7 +229,7 @@ inline void addItem(const ScanRangeContext& document, Span span, Span inner, Tok
         item.display=leadingOnly&&(whitespaceOnly(trailing)||manualNumber);
         if (kind == TokenKind::RepairedBracketOpen && !item.display) { item.ready = false; item.reason = L"UNSAFE_MISSING_DELIMITER"; }
     }
-    if (!selectedEquation(item.display)) return;
+    if (!selectedEquation(item.display,document.options.scope)) return;
     if(item.ready&&item.display&&!paragraphText.empty()){
         // 外侧空白仅在当前安全片段内扩展，不能吞掉空结果域或空白内容控件。
         if(manualNumber)item.span=manualSpan;
@@ -366,7 +265,7 @@ inline long scanSegment(const ScanRangeContext& document, Span segment, long par
         if (closes) {
             const Span inner{opening.span.end, token.span.start};
             addItem(document, {opening.span.start, token.span.end}, inner, opening.kind,
-                    lexicalReason(text(docRange(document, inner.start, inner.end).Get(), L"Text")), paragraph, result, paragraphText, allowed);
+                    lexicalReason(text(docRange(document, inner.start, inner.end).Get(), L"Text"),document.options.fast), paragraph, result, paragraphText, allowed);
         } else {
             // 混用定界符时消费冲突标记，保守拒绝，不生成互相覆盖的可转换范围。
             addItem(document, {opening.span.start, token.span.end}, {-1, -1}, opening.kind, L"MIXED_DELIMITERS", paragraph, result, paragraphText, allowed);
@@ -385,7 +284,7 @@ inline long scanSegment(const ScanRangeContext& document, Span segment, long par
             const auto all=tokens(document,{opening.span.start,closing.end},text(docRange(document,opening.span.start,closing.end).Get(),L"Text"));
             if(body.find_first_of(L"\r\n\v")!=std::wstring::npos && structuredMultiline(body) && all.size()==2 &&
                 tokensMatch(opening.kind, all.back().kind)) {
-                addItem(document,{opening.span.start,closing.end},inner,opening.kind,lexicalReason(body),paragraph,result,paragraphText,allowed);return closing.end;
+                addItem(document,{opening.span.start,closing.end},inner,opening.kind,lexicalReason(body,document.options.fast),paragraph,result,paragraphText,allowed);return closing.end;
             }
         }
         addItem(document, {opening.span.start, segment.end}, {-1, -1}, opening.kind, L"UNMATCHED_OPEN", paragraph, result, paragraphText, allowed);
@@ -407,8 +306,8 @@ inline bool addExistingDisplay(IDispatch* document,IDispatch* range,long paragra
     for(const auto& field:result.fieldSnapshots){
         if(field.span.end<=para.start||field.span.start>=para.end)continue;
         if(field.span.start<para.start||field.span.end>para.end)return false;
-        const bool number=field.kind==51&&field.code.find(L"MACROBUTTON MTPlaceRef")!=std::wstring::npos;
-        const bool counter=field.kind==12&&(field.code.find(L"SEQ MTEqn ")!=std::wstring::npos||field.code.find(L"SEQ MTChap ")!=std::wstring::npos||field.code.find(L"SEQ MTSec ")!=std::wstring::npos);
+        const bool number=nativeNumberField(field.kind,field.code);
+        const bool counter=nativeSequenceField(field.kind,field.code);
         if(field.kind!=58&&!number&&!counter)return false;
         excluded.push_back(field.span);
     }
@@ -416,13 +315,15 @@ inline bool addExistingDisplay(IDispatch* document,IDispatch* range,long paragra
     long cursor=para.start;
     for(const auto& span:excluded){if(span.start>cursor&&!whitespaceOnly(text(docRange(document,cursor,span.start).Get(),L"Text")))return false;cursor=std::max(cursor,span.end);}
     if(cursor<para.end&&!whitespaceOnly(text(docRange(document,cursor,para.end).Get(),L"Text")))return false;
-    ScanItem item;item.span=para;item.paragraph=paragraph;item.source=text(range,L"Text");item.display=true;item.existingDisplay=true;item.existingNativeOrdinal=candidateOrdinal;item.delimiter=L"EXISTING_DISPLAY";
+    ScanItem item;item.span=para;item.position.sourceStart=candidate->span.start;item.paragraph=paragraph;item.source=text(range,L"Text");item.display=true;item.existingDisplay=true;item.existingNativeOrdinal=candidateOrdinal;item.delimiter=L"EXISTING_DISPLAY";
     result.items.push_back(std::move(item));return true;
 }
 
-inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bool captureFields=false,bool includeExisting=false,bool includeOmml=false) {
-    if(checkingSavedDocument)std::puts("TIMING_STAGE RESCAN_BOUNDARIES");
+inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bool captureFields=false,bool includeExisting=false,bool includeOmml=false,const ScanOptions& options={}) {
+    if(options.saved)std::puts("TIMING_STAGE RESCAN_BOUNDARIES");
     ScanResult result;
+    const bool capturePoints=options.capturePoints&&!options.saved;
+    const bool scanOmml=includeOmml&&options.convertOmml;
     const auto tracking = invoke(document, L"TrackRevisions", DISPATCH_PROPERTYGET);
     require(tracking.v.vt == VT_BOOL, "Revision tracking property type");
     result.tracksChanges = tracking.v.boolVal != VARIANT_FALSE;
@@ -438,7 +339,8 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
         // ContentControl.Range 只含内容，首尾各一位的控件标记也必须排除。
         if(control){excluded.back().start=std::max(0L,excluded.back().start-1);excluded.back().end=std::min(contentEnd,excluded.back().end+1);}
         if(protect)protectedRanges.push_back(excluded.back());
-        if(includeOmml&&protect&&blockOmml)ommlExcluded.push_back(excluded.back());
+        if(scanOmml&&protect&&blockOmml)ommlExcluded.push_back(excluded.back());
+        return excluded.back();
     };
     auto tables=get(document,L"Tables");
     const long tableCount=integer(tables.Get(),L"Count");
@@ -459,12 +361,22 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
         }
         result.shapes.push_back(std::move(snapshot));
     }
+    // 只读扫描内复用原生公式对象和真实范围，候选构造不再访问一次 COM 集合。
+    struct OmmlRead {ComPtr<IDispatch> math,range;Span span;long ordinal;};
+    std::vector<OmmlRead> ommlReads;
     for (const auto& entry : {std::make_pair(L"OMaths", &result.nativeMath), std::make_pair(L"Revisions", &result.revisions),
                               std::make_pair(L"ContentControls", &result.controls)}) {
         auto collection = get(content.Get(), entry.first);
         *entry.second = integer(collection.Get(), L"Count");
-        for (long index = 1; index <= *entry.second; ++index) exclude(get(collectionItem(collection.Get(), index).Get(), L"Range").Get(),true,wcscmp(entry.first,L"OMaths")!=0,wcscmp(entry.first,L"ContentControls")==0);
+        const bool omml=wcscmp(entry.first,L"OMaths")==0;
+        if(scanOmml&&omml)ommlReads.reserve(static_cast<size_t>(*entry.second));
+        for (long index = 1; index <= *entry.second; ++index) {
+            auto object=collectionItem(collection.Get(),index);auto range=get(object.Get(),L"Range");
+            const auto span=exclude(range.Get(),true,!omml,wcscmp(entry.first,L"ContentControls")==0);
+            if(scanOmml&&omml)ommlReads.push_back({std::move(object),std::move(range),span,index});
+        }
     }
+    // 关闭转换仍需为保留公式建立 XML 基线；候选开关不能关闭范围边界或核验。
     result.bodyOmml=includeOmml&&result.nativeMath>0;
     auto fields = get(content.Get(), L"Fields");
     result.fields = integer(fields.Get(), L"Count");
@@ -473,7 +385,7 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
     for (long index = 1; index <= result.fields; ++index) {
         auto field = collectionItem(fields.Get(), index);
         excluded.push_back(fieldBounds(field.Get(),captureFields?&result.fieldSnapshots[static_cast<size_t>(index-1)]:nullptr));
-        if(includeOmml)ommlExcluded.push_back(excluded.back());
+        if(scanOmml)ommlExcluded.push_back(excluded.back());
     }
     for (const auto name : {L"Footnotes", L"Endnotes"}) {
         auto notes = get(document, name);
@@ -486,11 +398,11 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
     std::vector<Span> merged;
     for(const auto& span:excluded) {if(!merged.empty()&&span.start<=merged.back().end)merged.back().end=std::max(merged.back().end,span.end);else merged.push_back(span);}
     excluded=std::move(merged);
-    if(checkingSavedDocument)std::puts("TIMING_STAGE RESCAN_PARAGRAPHS");
+    if(options.saved)std::puts("TIMING_STAGE RESCAN_PARAGRAPHS");
     auto paragraphs = get(content.Get(), L"Paragraphs");
     result.paragraphs = integer(paragraphs.Get(), L"Count");
     std::vector<ComPtr<IDispatch>> savedParagraphs;
-    if(checkingSavedDocument){
+    if(options.saved){
         // 只读重扫按批顺序枚举段落，避免每段再经 Item(index) 查找；Word 坐标仍逐范围读取。
         const auto source=invoke(paragraphs.Get(),L"_NewEnum",DISPATCH_PROPERTYGET);ComPtr<IEnumVARIANT> sequence;
         require(source.v.vt==VT_UNKNOWN&&source.v.punkVal,"Word paragraph enumerator");check(source.v.punkVal->QueryInterface(IID_PPV_ARGS(&sequence)),"Word paragraph enumeration interface");
@@ -502,21 +414,21 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
         }
         require(savedParagraphs.size()==static_cast<size_t>(result.paragraphs),"Saved paragraph enumeration count");
     }
-    StageProgress paragraphProgress(checkingSavedDocument?"RESCAN_TEXT":"SCAN_TEXT",static_cast<size_t>(result.paragraphs));
+    StageProgress paragraphProgress(options.saved?"RESCAN_TEXT":"SCAN_TEXT",static_cast<size_t>(result.paragraphs),options.progress);
     // OMML 上下文复用本轮已经读取的段落文本，不为识别手动编号再次读取整段。
-    std::vector<std::wstring> ommlParagraphText(result.bodyOmml?static_cast<size_t>(result.paragraphs):0);
+    std::vector<std::wstring> ommlParagraphText(scanOmml&&result.bodyOmml?static_cast<size_t>(result.paragraphs):0);
     long consumed{};size_t excludedIndex{};
     for (long index = 1; index <= result.paragraphs; ++index) {
-        auto paragraph = checkingSavedDocument?savedParagraphs[static_cast<size_t>(index-1)]:collectionItem(paragraphs.Get(), index);
+        auto paragraph = options.saved?savedParagraphs[static_cast<size_t>(index-1)]:collectionItem(paragraphs.Get(), index);
         auto range = get(paragraph.Get(), L"Range");
         auto paragraphSpan = bounds(range.Get());
         result.paragraphStarts.push_back(paragraphSpan.start);
-        if(includeExisting&&result.existingMathType>0&&selectedEquation(true)&&addExistingDisplay(document,range.Get(),index,result,protectedRanges)){paragraphProgress.advance();continue;}
+        if(includeExisting&&result.existingMathType>0&&selectedEquation(true,options.scope)&&addExistingDisplay(document,range.Get(),index,result,protectedRanges)){paragraphProgress.advance();continue;}
         paragraphSpan.start=std::max(paragraphSpan.start,consumed);
         while(excludedIndex<excluded.size()&&excluded[excludedIndex].end<=paragraphSpan.start)++excludedIndex;
         if(paragraphSpan.start>=paragraphSpan.end || (excludedIndex<excluded.size()&&excluded[excludedIndex].start<=paragraphSpan.start&&excluded[excludedIndex].end>=paragraphSpan.end)) {paragraphProgress.advance();continue;}
         const auto paragraphText=text(range.Get(),L"Text");
-        if(result.bodyOmml)ommlParagraphText[static_cast<size_t>(index-1)]=paragraphText;
+        if(scanOmml&&result.bodyOmml)ommlParagraphText[static_cast<size_t>(index-1)]=paragraphText;
         if (!hasTexMarkers(paragraphText)) {paragraphProgress.advance();continue;}
         // Word 单元格末尾的文本可能同时含 \r\a，一个真实字符范围可以返回两个标记。
         while (paragraphSpan.end > paragraphSpan.start) {
@@ -528,21 +440,21 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
         for (size_t blockIndex=excludedIndex;blockIndex<excluded.size();++blockIndex) {
             const auto& block=excluded[blockIndex];if(block.start>paragraphSpan.end)break;
             if (block.end < cursor || block.start > paragraphSpan.end) continue;
-            if (block.start > cursor) consumed=std::max(consumed,scanSegment(ScanRangeContext{document}, {cursor, std::min(block.start, paragraphSpan.end)}, index, result,block.start,paragraphContext?paragraphText:L""));
+            if (block.start > cursor) consumed=std::max(consumed,scanSegment(ScanRangeContext{document,nullptr,capturePoints,options}, {cursor, std::min(block.start, paragraphSpan.end)}, index, result,block.start,paragraphContext?paragraphText:L""));
             cursor = std::max(cursor, std::min(block.end, paragraphSpan.end));
         }
         if (cursor < paragraphSpan.end) {
             long boundary=contentEnd;
             for(size_t i=excludedIndex;i<excluded.size();++i)if(excluded[i].start>=cursor){boundary=excluded[i].start;break;}
-            consumed=std::max(consumed,scanSegment(ScanRangeContext{document}, {cursor, paragraphSpan.end}, index, result,boundary,paragraphContext?paragraphText:L""));
+            consumed=std::max(consumed,scanSegment(ScanRangeContext{document,nullptr,capturePoints,options}, {cursor, paragraphSpan.end}, index, result,boundary,paragraphContext?paragraphText:L""));
         }
         paragraphProgress.advance();
     }
     // 仅开启 OMML 时把正文原生公式并入同一清单；表格等区域仍由实验分支处理。
-    if(result.bodyOmml){auto maths=get(content.Get(),L"OMaths");
-        for(long i=1;i<=result.nativeMath;++i){taskPulse();auto math=collectionItem(maths.Get(),i);auto range=get(math.Get(),L"Range");const auto span=bounds(range.Get());
+    if(scanOmml&&result.bodyOmml){
+        for(const auto& read:ommlReads){taskPulse();const auto& math=read.math;const auto& range=read.range;const auto span=read.span;
             if(std::any_of(ommlExcluded.begin(),ommlExcluded.end(),[&](Span block){return block.start<span.end&&block.end>span.start;}))continue;
-            ScanItem item;item.span=span;item.ommlOrdinal=i;item.delimiter=L"OMML";item.display=integer(math.Get(),L"Type")==0;item.ready=true;
+            ScanItem item;item.span=span;item.position.sourceStart=span.start;item.ommlOrdinal=read.ordinal;item.delimiter=L"OMML";item.display=integer(math.Get(),L"Type")==0;item.ready=true;
             // 段落位置来自已记录的 Word 范围；文本匹配只判断上下文，不推算 Word 字符坐标。
             const auto paragraphIndex=static_cast<size_t>(std::upper_bound(result.paragraphStarts.begin(),result.paragraphStarts.end(),span.start)-result.paragraphStarts.begin()-1);
             item.paragraph=static_cast<long>(paragraphIndex+1);
@@ -559,15 +471,15 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
                     // OMML 的段外空白同样不能跨过已记录的域和控件边界。
                     for(const auto block:ommlExcluded){if(block.end<=span.start)item.span.start=std::max(item.span.start,block.end);if(block.start>=span.end)item.span.end=std::min(item.span.end,block.start);}
                 }}
-            if(!selectedEquation(item.display))continue;
-            item.points=equationPoints(range.Get(),ScanRangeContext{document},span);
+            if(!selectedEquation(item.display,options.scope))continue;
+            if(capturePoints)item.points=equationPoints(range.Get(),ScanRangeContext{document,nullptr,true,options},span);
             item.source=item.span.start==span.start&&item.span.end==span.end?std::move(nativeText):text(docRange(document,item.span.start,item.span.end).Get(),L"Text");result.items.push_back(std::move(item));
         }
     }
     std::sort(result.items.begin(), result.items.end(), [](const ScanItem& a, const ScanItem& b) { return a.span.start < b.span.start; });
-    if(!experimentalFast){long previousEnd = -1;
-    if(checkingSavedDocument)std::puts("TIMING_STAGE RESCAN_RANGES");
-    StageProgress rangeProgress(checkingSavedDocument?"RESCAN_RANGES":"SCAN_RANGES",result.items.size());
+    if(!options.fast){long previousEnd = -1;
+    if(options.saved)std::puts("TIMING_STAGE RESCAN_RANGES");
+    StageProgress rangeProgress(options.saved?"RESCAN_RANGES":"SCAN_RANGES",result.items.size(),options.progress);
     for (const auto& item : result.items) {
         require(item.span.start >= previousEnd && item.span.end > item.span.start, "Non-overlapping scan items");
         require(text(docRange(document, item.span.start, item.span.end).Get(), L"Text") == item.source, "All reported ranges rechecked");
@@ -577,247 +489,4 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
     }
     return result;
 }
-inline ScanResult scanDocument(IDispatch* document) { return scanDocumentText(document,true,false,false,true); }
-
-inline std::string utf8(const std::wstring& value) {
-    if (value.empty()) return {};
-    require(value.size() <= INT_MAX, "UTF-8 input bounds");
-    const int count = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value.data(), static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
-    require(count > 0, "UTF-8 length");
-    std::string output(static_cast<size_t>(count), '\0');
-    require(WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value.data(), static_cast<int>(value.size()), output.data(), count, nullptr, nullptr) == count, "UTF-8 encoding");
-    return output;
-}
-inline std::string quote(const std::wstring& value) {
-    std::string output = "\"";
-    for (const unsigned char c : utf8(value)) {
-        if (c == '"' || c == '\\') { output += '\\'; output += static_cast<char>(c); }
-        else if (c < 32) {
-            char escaped[7]{}; sprintf_s(escaped, "\\u%04X", static_cast<unsigned int>(c)); output += escaped;
-        } else output += static_cast<char>(c);
-    }
-    return output + '"';
-}
-inline void writeReport(const std::wstring& path, const std::wstring& input, const ScanResult& result) {
-    const auto ready = std::count_if(result.items.begin(), result.items.end(), [](const ScanItem& item) { return item.ready; });
-    std::string json = "{\n  \"Input\": " + quote(input) + ",\n  \"Scope\": \"MAIN_STORY_BODY_ONLY\",\n";
-    json += "  \"Status\": \"" + std::string(result.protectedDocument ? "SKIPPED_PROTECTED_DOCUMENT" : "SCANNED") + "\",\n";
-    json += "  \"SchemaVersion\": 1, \"ReadOnly\": true, \"Positions\": \"WORD_MAIN_STORY_SNAPSHOT\",\n";
-    if (result.reverse) json += "  \"Direction\":\"REVERSE\", \"MathTypeTypeSource\":\"READ_ONLY_EQUATION_NATIVE\",\n";
-    json += "  \"Validation\": \"BOUNDARIES_AND_BASIC_SYNTAX_ONLY\", \"MustRescanBeforeConvert\": true,\n";
-    // 整篇保护时没有扫描，计数为未知，不能以 0 冒充检测结果。
-    auto count = [&](size_t value) { return result.protectedDocument ? std::string("null") : std::to_string(value); };
-    json += "  \"Ready\": " + count(static_cast<size_t>(ready)) + ", \"Rejected\": " + count(result.items.size() - static_cast<size_t>(ready)) + ",\n";
-    json += "  \"ExistingMathType\": " + count(result.existingMathType) + ", \"InlineShapes\": " + count(result.inlineShapes) + ",\n";
-    const auto ommlTargets=std::count_if(result.items.begin(),result.items.end(),[](const ScanItem& item){return item.ommlOrdinal!=0;});
-    json += "  \"Excluded\": {\"OMML\":" + count(result.nativeMath-ommlTargets) + ",\"Fields\":" + count(result.fields) +
-            ",\"Revisions\":" + count(result.revisions) + ",\"ContentControls\":" + count(result.controls) +
-            ",\"NoteReferences\":" + count(result.noteReferences) + "},\n  \"Items\": [\n";
-    for (size_t index = 0; index < result.items.size(); ++index) {
-        const auto& item = result.items[index];
-        json += "    {\"Id\":" + std::to_string(index + 1) + ",\"Start\":" + std::to_string(item.span.start) + ",\"End\":" + std::to_string(item.span.end) +
-            ",\"Paragraph\":" + std::to_string(item.paragraph) + ",\"Region\":\"" + (item.row ? std::string("TABLE") : std::string("BODY")) +
-            "\",\"TableStart\":" + std::to_string(item.tableStart) + ",\"Row\":" + std::to_string(item.row) + ",\"Column\":" + std::to_string(item.column) +
-            ",\"Delimiter\":" + quote(item.delimiter) + ",\"Display\":" + (item.display ? "true" : "false") +
-            ",\"Status\":\"" + (item.ready ? "READY" : "REJECTED") + "\",\"Reason\":" + quote(item.reason) +
-            ",\"Source\":" + quote(item.source) + ",\"Inner\":" + quote(item.inner) + "}" + (index + 1 == result.items.size() ? "\n" : ",\n");
-    }
-    json += "  ]\n}\n";
-    // CREATE_NEW 防止覆盖任何已存在的清单；关闭失败或短写入不宣布通过。
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
-    require(file != INVALID_HANDLE_VALUE, "Create new scan report");
-    taskTrackFile(path, file, true);
-    DWORD written{};
-    const bool saved = json.size() <= MAXDWORD && WriteFile(file, json.data(), static_cast<DWORD>(json.size()), &written, nullptr) && written == json.size();
-    const bool closed = CloseHandle(file) != 0;
-    if (!saved || !closed) { DeleteFileW(path.c_str()); throw std::runtime_error("Write complete scan report"); }
-}
-
-inline void requireDocxZip(const std::wstring& path) {
-    FILE* file{};
-    const auto opened=_wfopen_s(&file,path.c_str(),L"rb");
-    if(opened!=0||!file){unsigned long systemError{};_get_doserrno(&systemError);throw std::runtime_error("Open DOCX input (errno="+std::to_string(opened)+" Win32="+std::to_string(systemError)+")");}
-    unsigned char prefix[4]{};
-    const bool zip = fread(prefix, 1, 4, file) == 4 && prefix[0] == 'P' && prefix[1] == 'K' && prefix[2] == 3 && prefix[3] == 4;
-    const bool closed = fclose(file) == 0;
-    // 加密 DOCX 通常是 CFB 容器，提前拒绝，避免 Word 弹密码或格式转换对话框。
-    require(zip && closed, "Unencrypted DOCX ZIP required");
-}
-
-inline std::wstring absolutePath(const wchar_t* path) {
-    std::vector<wchar_t> buffer(32768);
-    const DWORD length = GetFullPathNameW(path, static_cast<DWORD>(buffer.size()), buffer.data(), nullptr);
-    require(length > 0 && length < buffer.size(), "Resolve full input/output path");
-    return std::wstring(buffer.data(), length);
-}
-
-// GUI 与命令行共用同一只读扫描；调用方所在工作进程必须先初始化 STA。
-inline ScanResult scanReadOnlyFile(const std::wstring& input, const std::wstring& report,
-                                  ScanResult (*scanner)(IDispatch*) = scanDocument) {
-    require(input.size() > 5 && _wcsicmp(input.c_str() + input.size() - 5, L".docx") == 0, "DOCX input required");
-    require(GetFileAttributesW(report.c_str()) == INVALID_FILE_ATTRIBUTES, "Report already exists");
-    const auto copy = report + L".scan-" + std::to_wstring(GetCurrentProcessId()) + L".docx";
-    HANDLE source = CreateFileW(input.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    require(source != INVALID_HANDLE_VALUE, "Lock source during read-only scan");
-    bool owned = false;
-    try {
-        // 在只读共享锁内检查输入，避免检查后被替换成加密文件而触发 Word 对话框。
-        requireDocxZip(input);
-        taskCopy(input, copy); owned = true;setDocxLinkUpdates(copy);
-        WordSession word;
-        auto documents = get(word.application.Get(), L"Documents");
-        word.document = asObject(invoke(documents.Get(), L"Add", DISPATCH_METHOD)); word.verifyOwnership();
-        invoke(word.application.Get(), L"Visible", DISPATCH_PROPERTYPUT, {false});
-        invoke(word.application.Get(), L"DisplayAlerts", DISPATCH_PROPERTYPUT, {0L});
-        invoke(word.application.Get(), L"AutomationSecurity", DISPATCH_PROPERTYPUT, {3L});
-        invoke(word.document.Get(), L"Close", DISPATCH_METHOD, {0L}); word.document.Reset();
-        taskTrackWordOwner(copy);
-        word.document = asObject(invoke(documents.Get(), L"Open", DISPATCH_METHOD, {copy.c_str(), false, true, false}));
-        const auto readOnly = invoke(word.document.Get(), L"ReadOnly", DISPATCH_PROPERTYGET);
-        require(readOnly.v.vt == VT_BOOL && readOnly.v.boolVal != VARIANT_FALSE, "Scan document opened read-only");
-        const auto before = text(get(word.document.Get(), L"Content").Get(), L"Text");
-        auto result = scanner(word.document.Get());
-        require(text(get(word.document.Get(), L"Content").Get(), L"Text") == before, "Scanning leaves Word text unchanged");
-        word.shutdown();
-        require(DeleteFileW(copy.c_str()) != 0, "Remove owned scan copy"); owned = false;
-        require(CloseHandle(source) != 0, "Release scan source lock"); source = INVALID_HANDLE_VALUE;
-        const auto staged=report+L".work-"+std::to_wstring(GetCurrentProcessId());taskReservePrivatePath(staged);
-        writeReport(staged, input, result);taskMove(staged,report);
-        taskCommit();
-        return result;
-    } catch (...) {
-        if (owned && !DeleteFileW(copy.c_str())) std::puts("OWNED_SCAN_COPY_CLEANUP_FAILED");
-        if (source != INVALID_HANDLE_VALUE) CloseHandle(source);
-        throw;
-    }
-}
-
-// 工作进程只发送 UTF-8 文本；十六进制字段避免源式中的控制符破坏行协议。
-inline std::string wireHex(const std::string& bytes) {
-    if (bytes.empty()) return "-";
-    constexpr char digits[] = "0123456789ABCDEF";
-    std::string result;
-    for (const unsigned char value : bytes) { result += digits[value >> 4]; result += digits[value & 15]; }
-    return result;
-}
-
-// GUI 只接收统计，公式原文和定位始终留在转换进程中。
-inline void emitGuiScan(const ScanResult& result) {
-    const auto ready=std::count_if(result.items.begin(),result.items.end(),[](const ScanItem& item){return item.ready;});
-    const auto inlines=std::count_if(result.items.begin(),result.items.end(),[](const ScanItem& item){return item.ready&&!item.display;});
-    const auto rejected=std::count_if(result.items.begin(),result.items.end(),[](const ScanItem& item){return !item.ready&&!item.existingDisplay&&!item.existingReference;});
-    std::printf("UI_SCAN_COUNTS %ld %td %td %td\n",result.existingMathType,ready,inlines,rejected);
-}
-
-struct MathAccent {wchar_t mark,symbol;const wchar_t* tex;};
-inline const MathAccent* mathAccent(wchar_t mark) {
-    // 组合码用于识别原文，symbol 采用 MathType 原生导入能识别的顶饰码。
-    static const MathAccent accents[]={
-        {0x0300,L'`',L"\\grave"},{0x0301,0x00b4,L"\\acute"},{0x0302,L'^',L"\\hat"},
-        {0x0303,L'~',L"\\tilde"},{0x0304,L'-',L"\\bar"},{0x0306,0x2323,L"\\breve"},
-        {0x0307,0x0307,L"\\dot"},{0x0308,0x0308,L"\\ddot"},{0x030a,0x2218,L"\\overset{\\circ}"},
-        {0x030c,0x02c7,L"\\check"},{0x20db,0x20db,L"\\dddot"},{0x20dc,0x20dc,L"\\ddddot"},
-        {0x20d6,0x2190,L"\\overleftarrow"},{0x20d7,0x2192,L"\\vec"},{0x20e1,0x2194,L"\\overleftrightarrow"}
-    };
-    for(const auto& accent:accents)if(accent.mark==mark)return &accent;
-    return nullptr;
-}
-inline std::wstring decomposedMathCharacter(wchar_t character) {
-    if(character<128||(character>=0xd800&&character<=0xdfff))return std::wstring(1,character);
-    wchar_t buffer[8]{};const int count=FoldStringW(MAP_COMPOSITE,&character,1,buffer,8);
-    require(count>0,"Decompose Unicode math character");
-    // 只展开已支持的顶饰；其他文字、兼容字符及数学字体保持原样。
-    if(count>1&&std::all_of(buffer+1,buffer+count,[](wchar_t c){return mathAccent(c)!=nullptr;}))return std::wstring(buffer,count);
-    return std::wstring(1,character);
-}
-inline std::wstring compatibleTex(std::wstring value) {
-    if (value.find(L'\\') == std::wstring::npos&&std::all_of(value.begin(),value.end(),[](wchar_t c){return c<128;})) return value;
-    struct Alignment { size_t begin{}, length{}, columns{1}, maximum{1}; int environment{}, braces{}; bool centered{}; };
-    struct Replacement { size_t start{}, length{}; std::wstring text; };
-    std::vector<Alignment> aligned;
-    std::vector<Replacement> replacements;
-    int environment{}, braces{};
-    // 按完整控制序列匹配，不能把 \bmfoo 或转义的 \\bm 当作 \bm。
-    const std::pair<const wchar_t*,const wchar_t*> aliases[]={
-        {L"bm",L"\\boldsymbol"},{L"textnormal",L"\\text"},{L"textup",L"\\text"},{L"textmd",L"\\text"},
-        {L"mathup",L"\\mathrm"},{L"lvert",L"\\vert"},{L"rvert",L"\\vert"},
-        {L"mleft",L"\\left"},{L"mright",L"\\right"},{L"dotsc",L"\\ldots"},{L"dotsm",L"\\cdots"},{L"dotso",L"\\ldots"},
-        {L"coloneqq",L":="},{L"eqqcolon",L"=:"},{L"widetilde",L"\\tilde"},{L"mathring",L"\\overset{\\circ}"}
-    };
-    for (size_t i = 0; i < value.size(); ++i) {
-        auto topLevel = [&] { return !aligned.empty() && environment == aligned.back().environment && braces == aligned.back().braces; };
-        if (value[i] == L'\\' && i + 1 < value.size()) {
-            if (value[i + 1] == L'\\') {
-                if (topLevel()) { auto& a = aligned.back(); a.maximum = std::max(a.maximum, a.columns); a.columns = 1; }
-                ++i; continue;
-            }
-            const bool begin = value.compare(i, 7, L"\\begin{") == 0, end = value.compare(i, 5, L"\\end{") == 0;
-            if (begin || end) {
-                const auto first = i + (begin ? 7 : 5), last = value.find(L'}', first);
-                if(last==std::wstring::npos)break;
-                const auto name = value.substr(first, last - first);
-                const bool paired=name==L"aligned"||name==L"align*"||name==L"split"||name==L"alignedat"||name==L"alignat*";
-                const bool centered=name==L"gathered"||name==L"gather*";
-                if(name==L"subarray")replacements.push_back({i,last+1-i,begin?L"\\begin{array}":L"\\end{array}"});
-                if (begin) {
-                    ++environment;
-                    if (paired||centered) {
-                        size_t after = last + 1; while (after < value.size() && iswspace(value[after])) ++after;
-                        const bool option = after + 2 < value.size() && value[after] == L'[' && value[after + 2] == L']' &&
-                            (value[after + 1] == L't' || value[after + 1] == L'b' || value[after + 1] == L'c');
-                        size_t finish=option?after+3:last+1;
-                        // alignedat 的组数不是公式内容，array 按实际顶层列数生成列格式。
-                        if(name==L"alignedat"||name==L"alignat*"){
-                            after=finish;while(after<value.size()&&iswspace(value[after]))++after;
-                            if(after>=value.size()||value[after]!=L'{') {i=last;continue;}
-                            const auto close=value.find(L'}',after+1);
-                            if(close==std::wstring::npos||close==after+1||
-                               !std::all_of(value.begin()+after+1,value.begin()+close,[](wchar_t c){return c>=L'0'&&c<=L'9';})||
-                               value.find_first_of(L"123456789",after+1)>=close){i=last;continue;}
-                            finish=close+1;
-                        }
-                        aligned.push_back({i, finish-i, 1, 1, environment, braces,centered});
-                        i=finish-1;continue;
-                    }
-                } else {
-                    if ((paired||centered)&&!aligned.empty()&&environment==aligned.back().environment) {
-                        const auto a = aligned.back(); aligned.pop_back();
-                        std::wstring columns; for (size_t c = 0; c < std::max(a.centered?size_t{1}:size_t{2}, std::max(a.columns, a.maximum)); ++c) columns += a.centered?L'c':c % 2 ? L'l' : L'r';
-                        replacements.push_back({a.begin, a.length, L"\\begin{array}{" + columns + L"}"});
-                        replacements.push_back({i, last + 1 - i, L"\\end{array}"});
-                    }
-                    --environment;
-                }
-                i = last; continue;
-            }
-            size_t finish=i+1;while(finish<value.size()&&((value[finish]>=L'a'&&value[finish]<=L'z')||(value[finish]>=L'A'&&value[finish]<=L'Z')))++finish;
-            if(finish==i+1){++i;continue;}
-            const auto command=value.substr(i+1,finish-i-1);
-            for(const auto& alias:aliases)if(command==alias.first){replacements.push_back({i,finish-i,alias.second});break;}
-            // 文字参数保持原样，里面形似数学命令的文本不能再次改写。
-            if(command==L"text"||command==L"mbox"||command==L"operatorname"||command==L"textnormal"||command==L"textup"||command==L"textmd"){
-                size_t argument=finish;while(argument<value.size()&&iswspace(value[argument]))++argument;
-                if(command==L"operatorname"&&argument<value.size()&&value[argument]==L'*'){++argument;while(argument<value.size()&&iswspace(value[argument]))++argument;}
-                if(argument<value.size()&&value[argument]==L'{'){
-                    int depth=1;for(size_t j=argument+1;j<value.size();++j){if(value[j]==L'\\'&&j+1<value.size()){++j;continue;}if(value[j]==L'{')++depth;else if(value[j]==L'}'&&--depth==0){finish=j+1;break;}}
-                }
-            }
-            i=finish-1;continue;
-        }
-        if(iswalnum(value[i])) {
-            auto atom=decomposedMathCharacter(value[i]);
-            const auto base=atom.front();std::wstring marks=atom.substr(1);size_t finish=i+1;
-            while(finish<value.size()&&mathAccent(value[finish]))marks+=value[finish++];
-            if(!marks.empty()) {
-                atom.assign(1,base);for(const auto mark:marks)atom=std::wstring(mathAccent(mark)->tex)+L"{"+atom+L"}";
-                replacements.push_back({i,finish-i,std::move(atom)});i=finish-1;continue;
-            }
-        }
-        if (value[i] == L'&' && topLevel()) ++aligned.back().columns;
-        if (value[i] == L'{') ++braces;
-        if (value[i] == L'}') --braces;
-    }
-    std::sort(replacements.begin(), replacements.end(), [](const Replacement& a, const Replacement& b) { return a.start > b.start; });
-    for (const auto& replacement : replacements) value.replace(replacement.start, replacement.length, replacement.text);
-    return value;
-}
+inline ScanResult scanDocument(IDispatch* document,const ScanOptions& options={}) { return scanDocumentText(document,true,false,false,true,options); }

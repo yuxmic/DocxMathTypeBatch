@@ -1,6 +1,8 @@
 // MathType 编号协议：整个编号属于 MTPlaceRef，计数与章/节值均使用厂商序列。
 #pragma once
 #include "layout_options.h"
+#include "docx_scan.h"
+#include "numbering_rules.h"
 inline Span nativeFieldSpan(IDispatch* field) {
     auto code=get(field,L"Code");return {integer(code.Get(),L"Start")-1,integer(code.Get(),L"End")+1};
 }
@@ -38,13 +40,13 @@ inline bool updateNativeNumber(IDispatch* field) {
     auto children=get(get(field,L"Code").Get(),L"Fields");bool visible{};
     for(long i=1;i<=integer(children.Get(),L"Count");++i){auto child=collectionItem(children.Get(),i);const auto updated=invoke(child.Get(),L"Update",DISPATCH_METHOD);
         require(updated.v.vt==VT_BOOL&&updated.v.boolVal!=VARIANT_FALSE,"Word updated the new native equation sequence without error");
-        if(text(get(child.Get(),L"Code").Get(),L"Text").find(L"SEQ MTEqn \\c")!=std::wstring::npos)visible=!text(get(child.Get(),L"Result").Get(),L"Text").empty();}
+        if(nativeCurrentCounter(text(get(child.Get(),L"Code").Get(),L"Text")))visible=!text(get(child.Get(),L"Result").Get(),L"Text").empty();}
     return visible;
 }
 inline void normalizeNativeNumberCounter(IDispatch* field) {
     auto children=get(get(field,L"Code").Get(),L"Fields");const long count=integer(children.Get(),L"Count");bool found{};
     for(long i=1;i<=count;++i){auto code=get(collectionItem(children.Get(),i).Get(),L"Code");const auto value=text(code.Get(),L"Text");
-        if(value.find(L"SEQ MTEqn ")!=std::wstring::npos&&value.find(L"\\c")==std::wstring::npos){
+        if(nativeIncrementCounter(value)){
             const std::wstring next=L"SEQ MTEqn \\h \\* MERGEFORMAT";
             if(value!=next)invoke(code.Get(),L"Text",DISPATCH_PROPERTYPUT,{next.c_str()});found=true;
         }}

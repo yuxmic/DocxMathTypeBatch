@@ -2,6 +2,7 @@
 import json
 import sys
 from pathlib import Path
+from zipfile import ZipFile, ZIP_DEFLATED
 from docx import Document
 from docx.oxml.ns import qn
 from docx.shared import Pt
@@ -9,6 +10,96 @@ from native_number_text import native_visible_numbers
 from test_native_display import effective
 
 mode, folder = sys.argv[1], Path(sys.argv[2])
+if mode == 'omml-switch-fixture':
+    # 复用包含正文、表格、文本框、页眉页脚及注释的公开样本。
+    from test_experimental import fixture, TEX, NS
+    from lxml import etree
+
+    fixture(folder)
+    with ZipFile(folder / 'input.docx') as archive:
+        parts = {name: archive.read(name) for name in archive.namelist()}
+    for name in parts:
+        if name.startswith('word/') and name.endswith('.xml'):
+            root = etree.fromstring(parts[name])
+            for node in root.xpath('//w:t', namespaces=NS):
+                if node.text:
+                    node.text = TEX.sub('', node.text)
+            if name == 'word/document.xml':
+                # OMML 内部的定界符形文本仍是原生公式，不能被 LaTeX 扫描器越界处理。
+                root.xpath('//m:oMath//m:t', namespaces=NS)[0].text = '$native_only$'
+            parts[name] = etree.tostring(root, xml_declaration=True, encoding='UTF-8', standalone=True)
+    with ZipFile(folder / 'omml-only-input.docx', 'w', ZIP_DEFLATED) as archive:
+        for name, data in parts.items():
+            archive.writestr(name, data)
+    print('OMML_SWITCH_FIXTURE_PASSED')
+    sys.exit()
+
+if mode == 'omml-switch-check':
+    from lxml import etree
+    from test_experimental import document_parts, inventory, TEX, NS, M
+
+    case = sys.argv[3]
+    only = case == 'off-no-targets'
+    enabled = case == 'default-on'
+    reverse = case == 'off-reverse'
+    original = folder / ('omml-only-input.docx' if only else 'input.docx')
+    target = folder / (case + '.docx')
+    report = json.loads(target.with_suffix('.json').read_text(encoding='utf-8-sig'))
+    before, after = document_parts(original), document_parts(target)
+    inputs, outputs = inventory(original), inventory(target)
+    latex_count = sum(len(TEX.findall(value['Text'])) for value in inputs.values())
+    omml_count = sum(value['OMML'] for value in inputs.values())
+    expected = latex_count + (omml_count if enabled else 0)
+    assert report['Status'] == 'COMPLETE' and report['ConvertOmml'] is enabled, report
+    assert report['Succeeded'] == report['Targets'] == expected, report
+    assert not report['FailedPreserved'] and not report['RejectedPreserved'] and not report['NotAttempted']
+    assert not report['Issues'] and not report['Experimental']['Issues'], report
+    assert report['Experimental']['RejectedPreserved'] == report['Experimental']['FailedPreserved'] == 0
+    if not enabled:
+        assert all(item.get('Kind') != 'OMML' for item in report['Items'])
+        assert all(item['Kind'] != 'OMML' for item in report['Experimental']['Items'])
+
+    def native_equations(root):
+        # 忽略 Word 的运行拆分和默认格式补齐，仍逐层比较数学结构、内容与行外位置。
+        def structure(node):
+            if not isinstance(node.tag, str) or not node.tag.startswith('{' + M + '}'):
+                return []
+            local = etree.QName(node).localname
+            if local.endswith('Pr'):
+                return []
+            if local == 't':
+                return [node.text or '']
+            children = []
+            for child in node:
+                for item in structure(child):
+                    if isinstance(item, str) and children and isinstance(children[-1], str):
+                        children[-1] += item
+                    else:
+                        children.append(item)
+            return children if local == 'r' else [(local, tuple(sorted(node.attrib.items())), tuple(children))]
+
+        result = []
+        for equation in root.xpath('//m:oMath', namespaces=NS):
+            result.append((bool(equation.xpath('ancestor::m:oMathPara', namespaces=NS)),
+                           structure(equation)))
+        return result
+
+    assert set(before) == set(after), (set(before), set(after))
+    for name in before:
+        expected_native = [] if enabled else native_equations(before[name])
+        assert native_equations(after[name]) == expected_native, (case, name)
+        expected_objects = 0 if reverse else len(TEX.findall(inputs[name]['Text'])) + (inputs[name]['OMML'] if enabled else 0)
+        assert outputs[name]['MathType'] == expected_objects, (case, name, outputs[name])
+    assert sum(value['OMML'] for value in outputs.values()) == (0 if enabled else omml_count)
+    if only:
+        log = target.with_suffix('.log').read_text(encoding='utf-8')
+        assert not report['Items'] and not report['Experimental']['Items']
+        assert report['Experimental']['Skipped'] == 'NO_TARGETS', report
+        assert 'SHARED_MATHTYPE_PID=' not in log and 'DEFAULT_PREFERENCES_LENGTH' not in log, log
+    print(json.dumps({'Status': 'PASSED', 'Case': case, 'ConvertOmml': enabled,
+                      'Succeeded': expected, 'NativeEquationsPreserved': not enabled}, ensure_ascii=False))
+    sys.exit()
+
 if mode == 'fixture':
     doc = Document()
     doc.core_properties.author = "Synthetic test fixture"
@@ -30,7 +121,7 @@ if mode == 'fixture':
 
 source, target = Document(folder / 'advanced-input.docx'), Document(folder / (mode + '.docx'))
 report = json.loads((folder / (mode + '.json')).read_text(encoding='utf-8-sig'))
-assert report['Status'] == 'COMPLETE' and report['Succeeded'] == 4
+assert report['Status'] == 'COMPLETE' and report['Succeeded'] == 4 and report['ConvertOmml'] is True
 assert len(source.paragraphs) == len(target.paragraphs) == 5
 assert target.tables[0].cell(0, 0).text == source.tables[0].cell(0, 0).text
 

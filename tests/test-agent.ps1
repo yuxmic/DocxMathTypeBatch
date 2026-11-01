@@ -35,7 +35,8 @@ function Start-AgentProcess([string]$Name,[string]$Program,[string[]]$Arguments)
     Start-Process -FilePath $Program -ArgumentList @($Arguments|ForEach-Object{ConvertTo-ConverterArgument $_}) -WorkingDirectory $run -WindowStyle Hidden -RedirectStandardOutput (Join-Path $run ($Name+'.jsonl')) -RedirectStandardError (Join-Path $run ($Name+'.errors')) -PassThru
 }
 function Invoke-AgentScript([string]$Name,[string]$Shell,[string]$Script,[string[]]$Arguments,[int]$ExpectedExit=0){
-    $process=Start-AgentProcess $Name $Shell (@('-NoProfile','-File',(Join-Path $skill ('scripts/'+$Script)))+$Arguments)
+    $scriptPath=if([IO.Path]::IsPathRooted($Script)){$Script}else{Join-Path $skill ('scripts/'+$Script)}
+    $process=Start-AgentProcess $Name $Shell (@('-NoProfile','-File',$scriptPath)+$Arguments)
     try{
         Assert-Agent ($process.WaitForExit(180000)) ('脚本测试超时：'+$Name)
         Assert-Agent ($process.ExitCode -eq $ExpectedExit) ($Name+' 退出码错误；查看本轮 jsonl/errors。')
@@ -60,13 +61,20 @@ function Open-AgentGui([string]$Path){
 }
 
 try{
+    # 纯摘要检查使用生产投影函数，不启动 Office，也不回显完整原式。
+    $longSource=('x'*158)+[char]::ConvertFromUtf32(0x1D465)+('y'*20)
+    $problem=ConvertTo-ConverterProblem ([pscustomobject]@{Id=3;Region='BODY';Status='REJECTED_PRESERVED';Reason='UNSUPPORTED_NON_ASCII_TEX';Source=$longSource;SourceLocation='原文第 2 页 · 正文';Page=2}) '' ''
+    Assert-Agent ($problem.SourceExcerpt.Length -le 160 -and $problem.SourceExcerpt.EndsWith('…') -and -not [char]::IsHighSurrogate($problem.SourceExcerpt[$problem.SourceExcerpt.Length-2])) '原式短片段截断拆开代理对或超出上限'
+    Assert-Agent ($problem.Reason -eq 'UNSUPPORTED_NON_ASCII_TEX' -and $null -eq $problem.Stage -and $problem.Page -eq 2 -and -not $problem.Contains('Source')) 'AI摘要丢失机器原因/原文页码或回显完整Source'
+    $evidence.Cases+=@{Name='compact-problem-projection';Status='PASSED'}
+
     $wordBefore=@(Get-Process WINWORD -ErrorAction SilentlyContinue|Select-Object -ExpandProperty Id)
     foreach($entry in @(@('describe',@('--describe','--json'),0),@('help',@('--help'),0),@('unknown',@('--unknown-agent-command'),2),@('bad-describe',@('--describe'),2))){
         $process=Start-AgentProcess $entry[0] $exe $entry[1]
         try{Assert-Agent ($process.WaitForExit(5000) -and $process.ExitCode -eq $entry[2]) '轻量入口失败或弹窗阻塞'}finally{$process.Dispose()}
     }
     $description=Get-Content -LiteralPath (Join-Path $run 'describe.jsonl') -Raw|ConvertFrom-Json
-    Assert-Agent ($description.Version -eq '0.1.3' -and $description.CliContractVersion -eq 1 -and $description.BodyOmmlDefault) '程序版本或接口能力不符'
+    Assert-Agent ($description.Version -eq '0.1.3' -and $description.CliContractVersion -eq 1 -and $description.BodyOmmlDefault -and $description.OptionalOmmlConversion) '程序版本或接口能力不符'
     $wordAfter=@(Get-Process WINWORD -ErrorAction SilentlyContinue|Select-Object -ExpandProperty Id)
     Assert-Agent (-not @($wordAfter|Where-Object{$_ -notin $wordBefore}).Count) '能力查询启动了 Word'
     $evidence.Cases+=@{Name='native-query-help-and-errors';Status='PASSED';WordNotStarted=$true}
@@ -88,7 +96,7 @@ public static class AgentArgumentCheck {
     foreach($shell in @($shell5,$shell7)){
         $tag=if($shell -eq $shell5){'ps51'}else{'ps7'}
         $result=Invoke-AgentScript ($tag+'-bundled') $shell 'connect.ps1' @()
-        Assert-Agent ($result.ExecutablePath -eq (Join-Path $skill 'bin/DocxMathTypeBatch.exe')) 'Skill 未直接使用包内程序'
+        Assert-Agent ($result.SkillVersion -eq '0.2.1' -and $result.ExecutablePath -eq (Join-Path $skill 'bin/DocxMathTypeBatch.exe')) 'Skill 版本不符或未直接使用包内程序'
     }
     $portableFolder=Join-Path $run '独立程序 中文 & 空格';[void][IO.Directory]::CreateDirectory($portableFolder)
     $portable=Join-Path $portableFolder '转换器 已重命名.exe';Copy-Item -LiteralPath $exe -Destination $portable
@@ -101,9 +109,19 @@ public static class AgentArgumentCheck {
         $result=Invoke-AgentScript ($tag+'-ignores-registration') $shell 'connect.ps1' @()
         Assert-Agent ($result.ExecutablePath -eq (Join-Path $skill 'bin/DocxMathTypeBatch.exe')) '旧绑定影响了包内程序选择'
     }
-    $result=Invoke-AgentScript 'missing-file' $shell5 'connect.ps1' @('-ExePath',(Join-Path $run 'missing.exe')) 1
+    # 外部路径注入只留在本轮测试助手，公开 connect/convert 始终使用包内程序。
+    $internalQuery=Join-Path $run 'internal-query.ps1'
+    @'
+# 仅测试内部身份/协议边界，不作为 Skill 公开入口。
+param([string]$CommonPath,[string]$ExePath)
+$ErrorActionPreference='Stop'
+. $CommonPath
+try{$connection=Get-ConverterConnection $ExePath;Write-ConverterJson ([ordered]@{Status='CONNECTED';ExecutablePath=$connection.Path});exit 0}catch{Write-ConverterFailure $_;exit 1}
+'@|Set-Content -LiteralPath $internalQuery -Encoding utf8BOM
+    $queryCommon=Join-Path $skill 'scripts/common.ps1'
+    $result=Invoke-AgentScript 'missing-file' $shell5 $internalQuery @($queryCommon,(Join-Path $run 'missing.exe')) 1
     Assert-Agent ($result.ErrorCode -eq 'EXECUTABLE_NOT_FOUND' -and (Get-AgentRegistration) -eq $portable) '失败查询改写了旧绑定'
-    $result=Invoke-AgentScript 'wrong-program' $shell7 'connect.ps1' @('-ExePath',(Join-Path $env:WINDIR 'System32/whoami.exe')) 1
+    $result=Invoke-AgentScript 'wrong-program' $shell7 $internalQuery @($queryCommon,(Join-Path $env:WINDIR 'System32/whoami.exe')) 1
     Assert-Agent ($result.ErrorCode -eq 'UNSUPPORTED_EXECUTABLE' -and (Get-AgentRegistration) -eq $portable) '未拒绝其他产品'
     # 合成查询程序只模拟协议，不访问 Office；验证不兼容和有界查询超时。
     $fakeSource=Join-Path $run 'query-fixture.cs';$fakeExe=Join-Path $run 'query-fixture.exe'
@@ -115,10 +133,10 @@ class QueryFixture { static void Main() {if(Environment.GetEnvironmentVariable("
 '@|Set-Content -LiteralPath $fakeSource -Encoding utf8
     & (Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319/csc.exe') /nologo /target:exe ('/out:'+$fakeExe) $fakeSource
     Assert-Agent ($LASTEXITCODE -eq 0) '查询测试程序编译失败'
-    $result=Invoke-AgentScript 'incompatible-contract' $shell7 'connect.ps1' @('-ExePath',$fakeExe) 1
+    $result=Invoke-AgentScript 'incompatible-contract' $shell7 $internalQuery @($queryCommon,$fakeExe) 1
     Assert-Agent ($result.ErrorCode -eq 'INCOMPATIBLE_CONTRACT') '不兼容接口未被拒绝'
     $previousQuery=$env:DOCX_MATH_QUERY_TEST
-    try{$env:DOCX_MATH_QUERY_TEST='timeout';$result=Invoke-AgentScript 'query-timeout' $shell5 'connect.ps1' @('-ExePath',$fakeExe) 1}finally{$env:DOCX_MATH_QUERY_TEST=$previousQuery}
+    try{$env:DOCX_MATH_QUERY_TEST='timeout';$result=Invoke-AgentScript 'query-timeout' $shell5 $internalQuery @($queryCommon,$fakeExe) 1}finally{$env:DOCX_MATH_QUERY_TEST=$previousQuery}
     Assert-Agent ($result.ErrorCode -eq 'QUERY_TIMEOUT') '能力查询未有界结束'
     $movedSkill=Join-Path $run '移动后的完整 Skill'
     foreach($path in @($skill,$movedSkill)){Assert-Agent ([IO.Path]::GetFullPath($path).StartsWith($run+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)) '测试移动越界'}
@@ -142,11 +160,13 @@ class QueryFixture { static void Main() {if(Environment.GetEnvironmentVariable("
     $hash=(Get-FileHash -LiteralPath $inputFile).Hash;$forward=Join-Path $run '自动转换.docx';$partial=Join-Path $run '部分完成.docx'
     $result=Invoke-AgentScript 'forward-ps51' $shell5 'convert.ps1' @('-InputPath',$inputFile,'-OutputPath',$forward,'-TaskDirectory',(Join-Path $run 'forward-task'),'-Tables','-RightNumbers','-FontSize','13.5','-NumberStart','7','-Scope','ALL')
     Assert-Agent ($result.Status -eq 'COMPLETE' -and $result.Succeeded -eq 10 -and $result.NumbersAdded -eq 2) 'PowerShell 5.1 转换结果不符'
+    Assert-Agent ($result.VerificationMode -eq 'STANDARD_VERIFIED' -and $result.PreservedItems.Count -eq 0) '成功摘要逐项回显公式或核验模式不符'
     $result=Invoke-AgentScript 'reverse-ps7' $shell7 'convert.ps1' @('-InputPath',$forward,'-OutputPath',(Join-Path $run '反向转换.docx'),'-TaskDirectory',(Join-Path $run 'reverse-task'),'-Direction','ToLatex','-Tables','-DisplayDelimiter','Dollar','-Scope','All')
     Assert-Agent ($result.Status -eq 'COMPLETE' -and $result.Succeeded -eq 10) '反向脚本结果不符'
     $result=Invoke-AgentScript 'partial-ps51' $shell5 'convert.ps1' @('-InputPath',(Join-Path $run 'review-preserved-input.docx'),'-OutputPath',$partial,'-TaskDirectory',(Join-Path $run 'partial-task'),'-Tables','-RightNumbers')
     Assert-Agent ($result.Status -eq 'PARTIAL' -and $result.FailedPreserved -eq 1 -and $result.RejectedPreserved -eq 1 -and [IO.File]::Exists($partial)) '脚本未正确交付部分完成'
     Assert-Agent (-not @($result.PreservedItems|Where-Object{$_.psobject.Properties.Name -contains 'Source'}).Count) '默认摘要暴露了完整源码'
+    Assert-Agent ($result.PreservedItems.Count -eq 2 -and -not @($result.PreservedItems|Where-Object{$_.Status -eq 'SUCCEEDED' -or -not $_.Reason -or -not $_.SourceLocation -or $null -eq $_.Page -or $_.SourceExcerpt.Length -gt 160}).Count) '部分完成摘要缺少可定位的机器问题或混入成功公式'
     $outputHash=(Get-FileHash -LiteralPath $forward).Hash
     $result=Invoke-AgentScript 'refuse-overwrite' $shell7 'convert.ps1' @('-InputPath',$inputFile,'-OutputPath',$forward) 1
     Assert-Agent ($result.ErrorCode -eq 'OUTPUT_EXISTS_OR_INVALID' -and (Get-FileHash -LiteralPath $forward).Hash -eq $outputHash) '覆盖保护无效'
@@ -186,8 +206,7 @@ class QueryFixture { static void Main() {if(Environment.GetEnvironmentVariable("
     $key=[Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($keyPath)
     try{foreach($name in $saved.Keys){$value=$saved[$name];if($value.Present){$key.SetValue($name,$value.Value,$value.Kind)}else{$key.DeleteValue($name,$false)}}}finally{$key.Dispose()}
     $evidence.LocalSettingsRestored=$true
-    $evidence.SourceSHA256=[ordered]@{}
-    foreach($name in @('src/app_version.h','src/agent_interface.h','src/gui.cpp','src/convert_docx.cpp','assets/app.rc','tests/test-agent.ps1')){$evidence.SourceSHA256[$name]=(Get-FileHash -LiteralPath (Join-Path $ProjectRoot $name)).Hash}
+    $evidence.SourceSHA256=Get-TestSourceHashes
     foreach($file in Get-ChildItem -LiteralPath (Join-Path $ProjectRoot 'skills/docx-latex-to-mathtype') -File -Recurse){$relative=[IO.Path]::GetRelativePath($ProjectRoot,$file.FullName).Replace('\','/');$evidence.SourceSHA256[$relative]=(Get-FileHash -LiteralPath $file.FullName).Hash}
     $evidence|ConvertTo-Json -Depth 7|Set-Content -LiteralPath (Join-Path $run 'agent-results.json') -Encoding utf8
 }

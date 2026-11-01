@@ -10,10 +10,18 @@ DocxMathTypeBatch 是一款 Windows 桌面工具，适合在 Word 中使用 LaTe
 
 - **[下载 Windows x64 ZIP](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.3/DocxMathTypeBatch-v0.1.3-win-x64.zip)**：包含程序、简要使用说明和 MIT 许可证，解压后运行。
 - [下载单文件 EXE](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.3/DocxMathTypeBatch.exe)
-- **[下载完整 Skill v0.2](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.3/docx-latex-to-mathtype-skill-v0.2.zip)**：供 Agent 自动调用，内含同版 EXE，无需另外下载转换器。
+- **[已发布的完整 Skill v0.2](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.3/docx-latex-to-mathtype-skill-v0.2.zip)**：内含 EXE。当前源码及配套打包版本已更新为 Skill v0.2.1，程序版本仍为 v0.1.3；新版包由维护者另行提供。
 - [版本说明与校验文件](https://github.com/yuxmic/DocxMathTypeBatch/releases/tag/v0.1.3)
 
 运行前请安装下方列出的 Word 和 MathType。程序尚未进行代码签名，首次运行可能出现 Windows 安全提示。
+
+## 当前源码更新（尚未发布）
+
+- **问题日志**：中文摘要只展开问题和版式提醒，提供原文页码、原式片段、原因及建议，可切换查看原始日志。
+- **OMML 转换开关**：高级设置默认开启，可按需关闭；正文和已启用的实验区域使用同一选择。
+- **版式提醒**：提示支持范围内可能超宽、固定行距下可能显示不全的公式；快速开关旁的问号提供悬停说明。
+- **转换优化**：缓存 OMML 转换资源，复用正文及实验区域已核验的快照，减少重复读取，保留常规模式的恢复和保存核验。
+- **Skill v0.2.1**：内含转换器 EXE，通过无界面后台入口调用；AI 摘要只返回计数、问题短片段和独立提醒，区分标准核验与快速未经核验，调用接口仍为版本 1。
 
 ## v0.1.3 更新
 
@@ -23,7 +31,7 @@ DocxMathTypeBatch 是一款 Windows 桌面工具，适合在 Word 中使用 LaTe
 - **手动编号清理**：正文中独立 LaTeX 或 Word 原生公式后的括号数字编号及多余空白自动清除，公式改用行外居中布局；开启右编号时按当前设置生成 MathType 原生编号。
 - **界面与诊断**：快速开关仅响应滑块点击，采用平滑过渡；实验区只保留四项位置选择，后台日志分别记录 Word 退出、COM 释放与副本清理耗时。
 
-配套 Skill 更新为 v0.2，内含同版转换器 EXE，无需额外下载或登记路径，支持明确指定快速模式，调用接口仍为版本 1。
+此正式版本配套 Skill v0.2，内含同版转换器 EXE，无需额外下载或登记路径，支持明确指定快速模式，调用接口为版本 1。
 
 ## v0.1.2 更新
 
@@ -37,12 +45,12 @@ DocxMathTypeBatch 是一款 Windows 桌面工具，适合在 Word 中使用 LaTe
 ## 主要功能
 
 - **批量转换**：拖入多个文档，或添加文件夹中的 DOCX，按队列依次处理。
-- **正文原生公式转换**：默认将 Word 原生公式（OMML）与 LaTeX 一起转换，共用格式和编号设置。
+- **正文原生公式转换**：默认将 Word 原生公式（OMML）与 LaTeX 一起转换，共用格式和编号设置；可在高级设置关闭 OMML 转换。
 - **选择正文范围**：所有正文、仅行内或仅行外。
 - **调整正文公式格式**：字号和段落行距默认跟随原文，也可分别指定。
 - **添加行外编号**：支持章号、节号、起始序号和编号格式，可补充或更新已有 MathType 原生编号。
 - **基本反向导出**：将正文中的 MathType 公式导出为 LaTeX 文本。
-- **查看处理结果**：逐文档查看转换详情；无法转换的公式保留原式，并记录原因。支持安全停止当前批次。
+- **查看处理结果**：日志优先显示问题公式的原文页码、原式片段、中文原因及处理建议，可切换查看原始日志。无法转换的公式保留原式。支持安全停止当前批次。
 
 ## 运行环境
 
@@ -68,10 +76,10 @@ DocxMathTypeBatch 是一款 Windows 桌面工具，适合在 Word 中使用 LaTe
 
 新版 [docx-latex-to-mathtype Skill](skills/docx-latex-to-mathtype/SKILL.md) 包含 `bin/DocxMathTypeBatch.exe`，Agent 用户只需安装一个完整 Skill 包：
 
-1. 下载上方完整 Skill v0.2 ZIP，将其中的 `docx-latex-to-mathtype` 文件夹放到所用 Agent 的 Skill 目录，并重新加载 Skill。
+1. 安装维护者提供的完整 `docx-latex-to-mathtype-skill-v0.2.1.zip`，将其中的 `docx-latex-to-mathtype` 文件夹放到所用 Agent 的 Skill 目录，并重新加载 Skill。上方发布页的 v0.2 为旧包。
 2. 确认本机已有桌面 Word 和 MathType，向 Agent 提出要求，例如：“将这份 DOCX 的公式转成 MathType，正文行外公式添加右编号，结果另存为新文件。”
 
-Skill 通过相对路径调用包内程序，整个目录移动后无需重新连接。更新时替换完整 Skill 包，避免脚本和 EXE 版本混用。旧版 v0.1 Skill 仍采用独立 EXE 的方式。
+Skill 通过相对路径调用包内程序的 `--describe --json`、`--worker-convert` / `--worker-reverse` 入口，无界面启动；不搜索注册表、PATH 或外部 EXE，整个目录移动后无需重新连接。更新时替换完整 Skill 包。成功公式只回计数，问题项带原文位置、机器原因及最多 160 字符的片段，完整报告和日志按需读取。
 
 普通界面操作无需安装 Skill。自动调用需要 Agent 能在装有 Word 和 MathType 的 Windows 本机执行脚本；原 v0.1 不支持连接协议。安装与使用见[使用说明](docs/使用说明.md#使用-agent-自动调用)。
 
@@ -85,7 +93,7 @@ Skill 通过相对路径调用包内程序，整个目录移动后无需重新�
 
 ## 额外位置的公式转换（实验性）
 
-正文中的 LaTeX 和 Word 原生公式（OMML）默认共同转换，参与字号、行距、行外布局和右编号；不需要额外开启 OMML。
+正文中的 LaTeX 和 Word 原生公式（OMML）默认共同转换，参与字号、行距、行外布局和右编号。高级设置中的“转换 Word 原生公式（OMML）”默认开启；关闭后，正文及已启用额外位置中的 OMML 保留，只转换 LaTeX。反向导出始终保留 OMML，此开关在反向模式下禁用。
 
 “高级设置”右侧提供默认关闭的实验性功能：两个基本方向均可按需开启表格、文本框、页眉页脚及脚注尾注中的公式转换。
 
@@ -109,7 +117,7 @@ Skill 通过相对路径调用包内程序，整个目录移动后无需重新�
 | --- | --- |
 | 正文中带定界符的 LaTeX | 按所选范围转换 |
 | 正向转换时已有的 MathType 对象 | 保留公式内容，可统一独立行外对象的布局并补充或更新编号 |
-| 正文中的 Word 自带公式（OMML） | 默认正向转换，并参与正文格式和编号；反向保持 |
+| 正文中的 Word 自带公式（OMML） | 默认正向转换，可在高级设置关闭；反向保持 |
 | 表格、文本框、页眉页脚、脚注尾注 | 默认保持；可单独开启实验性转换 |
 
 公式代码以 **ASCII LaTeX** 为基础，并在导入副本中将 `Ŷ`、`Ȳ`、`Ŷ` 等可识别的 Unicode 顶饰写法转换为命令。适配后仍含中文等不支持字符的公式会保留原式；中文正文可正常保留。程序不自动拆分或缩放过长公式，也不将缺少定界符的裸 LaTeX 作为转换目标。兼容写法与示例见[公式书写与兼容性](docs/MathType兼容LaTeX书写规范.md)。

@@ -2,7 +2,7 @@
 # GUI 包与包含 EXE 的 Skill 包分别打包；不收集本机配置、样本或日志。
 param(
     [ValidatePattern('^v[0-9]+\.[0-9]+(?:\.[0-9]+)?$')][string]$Version='v0.1.3',
-    [ValidatePattern('^v[0-9]+\.[0-9]+(?:\.[0-9]+)?$')][string]$SkillVersion='v0.2',
+    [ValidatePattern('^v[0-9]+\.[0-9]+(?:\.[0-9]+)?$')][string]$SkillVersion='v0.2.1',
     [ValidateSet('All','Exe','Skill')][string]$Target='All'
 )
 $ErrorActionPreference='Stop'

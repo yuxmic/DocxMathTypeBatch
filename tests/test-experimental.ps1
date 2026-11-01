@@ -370,8 +370,7 @@ try{
     $evidence.Cases+=@{Name='omml-spacing';Succeeded=5;NativeContentVerified=$true}
     $evidence.Status='PASSED'
 }finally{
-    $evidence.SourceSHA256=[ordered]@{}
-    foreach($name in @('src/convert_docx.cpp','src/docx_scan.h','src/experimental_conversion.cpp','src/experimental_conversion.h','src/equation_objects.h','src/gui.cpp','tests/helpers/test_experimental.py','tests/test-experimental.ps1')){$evidence.SourceSHA256[$name]=(Get-FileHash -LiteralPath (Join-Path $ProjectRoot $name)).Hash}
+    $evidence.SourceSHA256=Get-TestSourceHashes
     $evidence|ConvertTo-Json -Depth 6|Set-Content -LiteralPath (Join-Path $run 'experimental-results.json') -Encoding utf8
     $evidence|ConvertTo-Json -Depth 6|Set-Content -LiteralPath (Join-Path $TestOutputRoot 'experimental-results.json') -Encoding utf8
 }

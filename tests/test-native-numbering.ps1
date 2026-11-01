@@ -38,7 +38,7 @@ try{
     }
     $evidence.Status='PASSED'
 }finally{
-    $evidence.SourceSHA256=@{};foreach($file in @('gui.cpp','convert_docx.cpp','docx_scan.h','layout_options.h','native_numbering.h','native_api_probe.cpp','test_native_numbering.h','test-native-numbering.ps1','test_native_numbering.py')){$evidence.SourceSHA256[$file]=(Get-FileHash -LiteralPath (Get-TestSourcePath $file)).Hash}
+    $evidence.SourceSHA256=Get-TestSourceHashes
     $evidence|ConvertTo-Json -Depth 12|Set-Content -LiteralPath (Join-Path $run 'native-numbering-results.json') -Encoding utf8
     $evidence|ConvertTo-Json -Depth 12|Set-Content -LiteralPath (Join-Path $TestOutputRoot 'native-numbering-results.json') -Encoding utf8
 }
