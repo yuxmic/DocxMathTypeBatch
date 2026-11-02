@@ -14,6 +14,7 @@ $license=Join-Path $PSScriptRoot 'LICENSE'
 $build=Get-Content -LiteralPath (Join-Path $PSScriptRoot 'build/bin/gui-build-info.json') -Raw|ConvertFrom-Json
 $exeHash=(Get-FileHash -LiteralPath $exe).Hash
 if($build.ExecutableSHA256 -ne $exeHash){throw '请先构建当前 GUI 成品。'}
+if($build.EmbeddedGuiManifest -ne $true){throw 'GUI 成品未验证嵌入清单，请重新构建后打包。'}
 $product=[Diagnostics.FileVersionInfo]::GetVersionInfo($exe)
 if($product.ProductName -ne 'DocxMathTypeBatch' -or $product.ProductVersion -ne $Version.Substring(1)){throw '程序资源版本与发布版本不一致，请核对 app_version.h 后重新构建。'}
 # 发布二进制和说明也不得带入当前机器的路径或身份。

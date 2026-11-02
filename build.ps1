@@ -19,7 +19,7 @@ $previousInclude,$previousLib,$previousPath=$env:INCLUDE,$env:LIB,$env:PATH
 try{
     $env:INCLUDE=@((Join-Path $tools 'include'))+@('ucrt','shared','um','winrt'|ForEach-Object {Join-Path $sdk ('Include/'+$sdkVersion+'/'+$_)}) -join ';'
     $env:LIB=@((Join-Path $tools 'lib/x64'))+@('ucrt','um'|ForEach-Object {Join-Path $sdk ('Lib/'+$sdkVersion+'/'+$_+'/x64')}) -join ';'
-    $env:PATH=(Join-Path $tools 'bin/Hostx64/x64')+';'+$previousPath
+    $env:PATH=(Join-Path $tools 'bin/Hostx64/x64')+';'+(Join-Path $sdk ('bin/'+$sdkVersion+'/x64'))+';'+$previousPath
     $compiler=Join-Path $tools 'bin/Hostx64/x64/cl.exe'
     $resource=Join-Path $objects 'app.res'
     if($Target -in @('All','Gui')){
@@ -38,17 +38,27 @@ try{
         $extra=@();$links=@();$sources=@($program.Source|ForEach-Object {Join-Path $projectRoot $_})
         if($program.Target -eq 'Gui'){
             $extra=@('/DDOCX_MATH_GUI');$sources+=$resource
-            $links=@('/SUBSYSTEM:WINDOWS','comctl32.lib','comdlg32.lib','shell32.lib','gdi32.lib','gdiplus.lib','d2d1.lib','dwrite.lib','advapi32.lib','uxtheme.lib','uuid.lib')
+            $links=@('/SUBSYSTEM:WINDOWS','/MANIFEST:EMBED','comctl32.lib','comdlg32.lib','shell32.lib','gdi32.lib','gdiplus.lib','d2d1.lib','dwrite.lib','advapi32.lib','uxtheme.lib','uuid.lib')
         }
         & $compiler /nologo /EHsc /std:c++17 /utf-8 /MT /W4 /WX /O1 /DUNICODE /D_UNICODE /I (Join-Path $projectRoot 'src') /I (Join-Path $projectRoot 'tests/native') @extra ('/Fe'+$exe) ('/Fo'+$objects+'\') @sources /link ole32.lib oleaut32.lib user32.lib advapi32.lib xmllite.lib crypt32.lib @links
         if($LASTEXITCODE -ne 0){throw ('编译失败：'+$program.Name)}
+        if($program.Target -eq 'Gui'){
+            # 单文件分发必须自带控件依赖清单，不能依赖开发目录中的旁挂文件。
+            $manifest=Join-Path $objects 'gui.manifest'
+            & (Join-Path $sdk ('bin/'+$sdkVersion+'/x64/mt.exe')) /nologo ('-inputresource:'+$exe+';#1') ('-out:'+$manifest)
+            if($LASTEXITCODE -ne 0){throw 'GUI 成品缺少嵌入清单。'}
+            [xml]$manifestXml=Get-Content -LiteralPath $manifest -Raw
+            if(-not $manifestXml.SelectSingleNode("//*[local-name()='assemblyIdentity' and @name='Microsoft.Windows.Common-Controls' and @version='6.0.0.0']")){throw 'GUI 清单缺少 Common-Controls 6 依赖。'}
+        }
         $imports=& (Join-Path $tools 'bin/Hostx64/x64/dumpbin.exe') /nologo /dependents $exe
         if($LASTEXITCODE -ne 0){throw 'PE 依赖读取失败。'}
         $dlls=@([regex]::Matches(($imports -join "`n"),'(?im)^\s+([a-z0-9_.-]+\.dll)\s*$')|ForEach-Object {$_.Groups[1].Value})
         if(-not $dlls -or ($dlls|Where-Object {$_ -match '^(mscoree|coreclr|clr|vcruntime.*|msvcp.*|concrt.*|ucrtbase|api-ms-win-crt.*)\.dll$'})){throw '成品包含额外运行库依赖。'}
         $peBytes=[IO.File]::ReadAllBytes($exe);$pe=[BitConverter]::ToInt32($peBytes,0x3c);$optional=$pe+24;$clr=$optional+112+14*8
         if([BitConverter]::ToUInt16($peBytes,$pe+4) -ne 0x8664 -or [BitConverter]::ToUInt16($peBytes,$optional) -ne 0x20b -or [BitConverter]::ToUInt32($peBytes,$clr) -ne 0 -or [BitConverter]::ToUInt32($peBytes,$clr+4) -ne 0){throw '成品必须为原生 x64 PE。'}
-        [ordered]@{Executable=('build/bin/'+$program.Name+'.exe');ExecutableSHA256=(Get-FileHash -LiteralPath $exe).Hash;ExeBytes=$peBytes.Length;Machine='x64';ImportedDlls=$dlls;ClrDirectory=0}|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $bin $program.Info) -Encoding utf8
+        $buildInfo=[ordered]@{Executable=('build/bin/'+$program.Name+'.exe');ExecutableSHA256=(Get-FileHash -LiteralPath $exe).Hash;ExeBytes=$peBytes.Length;Machine='x64';ImportedDlls=$dlls;ClrDirectory=0}
+        if($program.Target -eq 'Gui'){$buildInfo.EmbeddedGuiManifest=$true}
+        $buildInfo|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $bin $program.Info) -Encoding utf8
         if($program.Target -eq 'Gui'){
             # Skill 的运行程序是构建产物，放在忽略目录中；源码清单不提交二进制。
             $skillBin=Join-Path $projectRoot 'skills/docx-latex-to-mathtype/bin'

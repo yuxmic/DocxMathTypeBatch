@@ -103,4 +103,5 @@ tests/test-timeouts.ps1
 tests/test-ui-experience.ps1
 tests/test-foreground.ps1
 tests/test-ui-style.ps1
+tests/test-portable-startup.ps1
 upload-files.txt

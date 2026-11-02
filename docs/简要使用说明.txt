@@ -1,5 +1,7 @@
 DocxMathTypeBatch v0.1.4
 
+运行条件：Windows 10（1703 及以上版本）或 Windows 11，均为 x64；已安装并正确注册的 64 位桌面 Word 和完整 MathType。
+
 功能：
 默认识别docx正文中含latex定界符的文本公式及Word原生公式（OMML），共同按指定范围、字号、间距、右编号转换，默认输出到原文件同目录；
 转换成功会生成新的转换后的docx文件，原文件不改动；

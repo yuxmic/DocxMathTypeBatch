@@ -19,7 +19,7 @@ if($Suite -eq 'Pure'){Write-Output 'TEST_SUITE_PASSED: Pure';return}
 $groups=[ordered]@{
     Core=@('lightweight','advanced','native-display','native-numbering','experimental','experimental-fast','layout-warnings','agent')
     Safety=@('cancel','faults','timeouts','installation','link-updates')
-    UI=@('gui','diagnostics','batch','ui-style','ui-experience','foreground')
+    UI=@('portable-startup','gui','diagnostics','batch','ui-style','ui-experience','foreground')
 }
 $selected=if($Suite -eq 'All'){@('Core','Safety','UI')}else{@($Suite)}
 foreach($group in $selected){
