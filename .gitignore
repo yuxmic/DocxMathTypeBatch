@@ -3,6 +3,11 @@
 !*/
 !/.gitattributes
 !/.gitignore
+!/.github/ISSUE_TEMPLATE/bug_report.md
+!/.github/ISSUE_TEMPLATE/feature_request.md
+!/.github/PULL_REQUEST_TEMPLATE.md
+!/CHANGELOG.md
+!/CONTRIBUTING.md
 !/LICENSE
 !/README.md
 !/assets/app.rc
@@ -16,6 +21,12 @@
 !/更新GitHub源码.cmd
 !/docs/MathType兼容LaTeX书写规范.md
 !/docs/使用说明.md
+!/docs/实测报告.md
+!/docs/benchmarks/2026-11-03.json
+!/docs/images/ui-main.png
+!/docs/images/ui-advanced.png
+!/docs/images/conversion-before.png
+!/docs/images/conversion-after.png
 !/docs/实操验收清单.md
 !/docs/简要使用说明.txt
 !/docs/轻量化转换大纲.md

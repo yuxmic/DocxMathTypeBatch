@@ -142,4 +142,40 @@ for source in ('latex', 'omml'):
     assert len(document._element.xpath('//m:oMath')) == (20 if source == 'omml' else 0)
     assert sum(p.text.startswith(r'\[\frac{') for p in document.paragraphs) == (20 if source == 'latex' else 0)
     document.save(root / f'performance-{source}-20-80.docx')
+# 公开效果示例仅含合成内容，供 README 前后对照与正反向实测复现。
+document = Document()
+document.core_properties.author = "Synthetic benchmark"
+document.core_properties.last_modified_by = ""
+normal = document.styles['Normal']
+normal.font.name = '宋体'
+normal.font.size = Pt(11)
+normal.paragraph_format.space_after = Pt(7)
+normal.paragraph_format.line_spacing = 1.15
+section = document.sections[0]
+section.top_margin = section.bottom_margin = Pt(42)
+title = document.add_paragraph('DOCX 公式转换示例')
+title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+title.runs[0].font.size = Pt(18)
+document.add_paragraph('合成样本 · 行内 / 行外 / 多行结构 / Word 原生公式')
+document.add_paragraph(r'行内公式：变量 $x_i$ 与能量关系 \(E=mc^2\) 嵌在正文中。')
+for label, source in (
+    ('分式', r'\[f(x)=\frac{x^2+1}{x+2}\]'),
+    ('求和与积分', r'\[S=\sum_{k=1}^{n}k^2,\quad I=\int_0^1 x^2\,dx\]'),
+    ('分段函数', r'\[f(x)=\begin{cases}x^2,&x\geq0\\-x,&x<0\end{cases}\]'),
+    ('矩阵', r'\[A=\begin{pmatrix}1&2\\3&4\end{pmatrix}\]'),
+    ('多行对齐', r'\[\begin{aligned}a+b&=c\\d+e&=f\end{aligned}\]'),
+):
+    document.add_paragraph(label)
+    document.add_paragraph(source)
+document.add_paragraph('Word 原生公式（OMML）')
+paragraph = document.add_paragraph()
+wrapper = OxmlElement('m:oMathPara')
+wrapper.append(parse_xml(
+    '<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'
+    '<m:f><m:num><m:r><m:t>x+1</m:t></m:r></m:num>'
+    '<m:den><m:r><m:t>2</m:t></m:r></m:den></m:f></m:oMath>'))
+paragraph._p.append(wrapper)
+assert len(document._element.xpath('//m:oMath')) == 1
+assert sum(p.text.count(r'\[') for p in document.paragraphs) == 5
+document.save(root / 'showcase.docx')
 print(root)

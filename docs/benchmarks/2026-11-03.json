@@ -1,0 +1,611 @@
+{
+  "schemaVersion": 1,
+  "measuredDate": "2026-11-03",
+  "timezone": "Asia/Shanghai",
+  "applicationVersion": "0.1.4",
+  "sourceCommit": "6501c0f4a63cb0c19e55f1e81761bf72ec24fcbd",
+  "executableSHA256": "CBA5D558A0DB93EDFCC8605941E52901F055F73F22B3C30637A77178DD977FB8",
+  "environment": {
+    "Processor": "11th Gen Intel(R) Core(TM) i7-11800H @ 2.30GHz",
+    "LogicalProcessors": 16,
+    "MemoryGiB": 16.0,
+    "OS": "Microsoft Windows 11 家庭版 中文版",
+    "OSBuild": "26300",
+    "Word": "16.0.14334.20974",
+    "MathTypeFileVersion": "2019.03.14.480",
+    "MathTypeProductVersion": "7.4.2.480"
+  },
+  "measurement": {
+    "repetitionsPerPublishedCase": 1,
+    "scope": "supervised process start through exit",
+    "excludes": [
+      "independent package audit",
+      "PDF rendering",
+      "visual inspection"
+    ],
+    "fontAndSpacing": "follow source",
+    "extraRegions": false
+  },
+  "cases": [
+    {
+      "id": "latex-20-standard",
+      "sample": "performance-latex-20-80.docx",
+      "inputSHA256": "3C95C6AF7526D0462C99C84EBB4196BB5B73C5E1F3E931F26999496B6FFFC46A",
+      "mode": "standard",
+      "elapsedSeconds": 11.673,
+      "status": "COMPLETE",
+      "targets": 20,
+      "succeeded": 20,
+      "numbersAdded": 0,
+      "failedPreserved": 0,
+      "wordReopenVerified": true,
+      "originalFileBytesUnchanged": true,
+      "independentPackageAudit": true,
+      "layoutWarnings": 0,
+      "stageMarks": [
+        {
+          "name": "PREPARING",
+          "elapsedSeconds": 0.042
+        },
+        {
+          "name": "SOURCE_SNAPSHOT",
+          "elapsedSeconds": 0.075
+        },
+        {
+          "name": "COPY_AND_LINKS",
+          "elapsedSeconds": 0.075
+        },
+        {
+          "name": "OPENING",
+          "elapsedSeconds": 0.109
+        },
+        {
+          "name": "SCANNING",
+          "elapsedSeconds": 2.183
+        },
+        {
+          "name": "SOURCE_LOCATIONS",
+          "elapsedSeconds": 3.278
+        },
+        {
+          "name": "INITIALIZING",
+          "elapsedSeconds": 3.345
+        },
+        {
+          "name": "CONVERTING",
+          "elapsedSeconds": 3.652
+        },
+        {
+          "name": "NUMBERING",
+          "elapsedSeconds": 7.298
+        },
+        {
+          "name": "VERIFYING",
+          "elapsedSeconds": 7.298
+        },
+        {
+          "name": "BIND_OBJECTS",
+          "elapsedSeconds": 7.322
+        },
+        {
+          "name": "SAVING",
+          "elapsedSeconds": 7.398
+        },
+        {
+          "name": "REOPENING",
+          "elapsedSeconds": 8.2
+        },
+        {
+          "name": "RESCANNING",
+          "elapsedSeconds": 8.5
+        },
+        {
+          "name": "SAVED_STRUCTURE",
+          "elapsedSeconds": 8.5
+        },
+        {
+          "name": "SAVED_SCAN",
+          "elapsedSeconds": 8.5
+        },
+        {
+          "name": "RESCAN_BOUNDARIES",
+          "elapsedSeconds": 8.5
+        },
+        {
+          "name": "RESCAN_PARAGRAPHS",
+          "elapsedSeconds": 8.65
+        },
+        {
+          "name": "RESCAN_RANGES",
+          "elapsedSeconds": 8.773
+        },
+        {
+          "name": "SAVED_NATIVE",
+          "elapsedSeconds": 8.773
+        },
+        {
+          "name": "SAVED_POSITIONS",
+          "elapsedSeconds": 8.9
+        },
+        {
+          "name": "SAVED_ITEMS",
+          "elapsedSeconds": 8.9
+        },
+        {
+          "name": "CLOSING",
+          "elapsedSeconds": 9.17
+        },
+        {
+          "name": "PACKAGE_VERIFY",
+          "elapsedSeconds": 9.208
+        },
+        {
+          "name": "PACKAGE_COMPARE",
+          "elapsedSeconds": 9.229
+        },
+        {
+          "name": "SOURCE_COMPARE",
+          "elapsedSeconds": 9.324
+        },
+        {
+          "name": "PUBLISHING",
+          "elapsedSeconds": 9.324
+        }
+      ]
+    },
+    {
+      "id": "omml-20-standard",
+      "sample": "performance-omml-20-80.docx",
+      "inputSHA256": "C38066DC91136B003BB03EF155BA9FBA84E26D2D17414127E74790D3643D492C",
+      "mode": "standard",
+      "elapsedSeconds": 13.417,
+      "status": "COMPLETE",
+      "targets": 20,
+      "succeeded": 20,
+      "numbersAdded": 0,
+      "failedPreserved": 0,
+      "wordReopenVerified": true,
+      "originalFileBytesUnchanged": true,
+      "independentPackageAudit": true,
+      "layoutWarnings": 0,
+      "stageMarks": [
+        {
+          "name": "PREPARING",
+          "elapsedSeconds": 0.044
+        },
+        {
+          "name": "SOURCE_SNAPSHOT",
+          "elapsedSeconds": 0.085
+        },
+        {
+          "name": "COPY_AND_LINKS",
+          "elapsedSeconds": 0.085
+        },
+        {
+          "name": "OPENING",
+          "elapsedSeconds": 0.101
+        },
+        {
+          "name": "SCANNING",
+          "elapsedSeconds": 2.064
+        },
+        {
+          "name": "SOURCE_LOCATIONS",
+          "elapsedSeconds": 2.37
+        },
+        {
+          "name": "INITIALIZING",
+          "elapsedSeconds": 2.664
+        },
+        {
+          "name": "CONVERTING",
+          "elapsedSeconds": 3.147
+        },
+        {
+          "name": "NUMBERING",
+          "elapsedSeconds": 9.51
+        },
+        {
+          "name": "VERIFYING",
+          "elapsedSeconds": 9.51
+        },
+        {
+          "name": "BIND_OBJECTS",
+          "elapsedSeconds": 9.537
+        },
+        {
+          "name": "SAVING",
+          "elapsedSeconds": 9.587
+        },
+        {
+          "name": "REOPENING",
+          "elapsedSeconds": 10.322
+        },
+        {
+          "name": "RESCANNING",
+          "elapsedSeconds": 10.569
+        },
+        {
+          "name": "SAVED_STRUCTURE",
+          "elapsedSeconds": 10.57
+        },
+        {
+          "name": "SAVED_SCAN",
+          "elapsedSeconds": 10.606
+        },
+        {
+          "name": "RESCAN_BOUNDARIES",
+          "elapsedSeconds": 10.606
+        },
+        {
+          "name": "RESCAN_PARAGRAPHS",
+          "elapsedSeconds": 10.829
+        },
+        {
+          "name": "RESCAN_RANGES",
+          "elapsedSeconds": 10.939
+        },
+        {
+          "name": "SAVED_NATIVE",
+          "elapsedSeconds": 10.939
+        },
+        {
+          "name": "SAVED_POSITIONS",
+          "elapsedSeconds": 11.136
+        },
+        {
+          "name": "SAVED_ITEMS",
+          "elapsedSeconds": 11.136
+        },
+        {
+          "name": "CLOSING",
+          "elapsedSeconds": 11.421
+        },
+        {
+          "name": "PACKAGE_VERIFY",
+          "elapsedSeconds": 11.456
+        },
+        {
+          "name": "PACKAGE_COMPARE",
+          "elapsedSeconds": 11.489
+        },
+        {
+          "name": "SOURCE_COMPARE",
+          "elapsedSeconds": 11.581
+        },
+        {
+          "name": "PUBLISHING",
+          "elapsedSeconds": 11.581
+        }
+      ]
+    },
+    {
+      "id": "latex-100-standard",
+      "sample": "performance-100-400.docx",
+      "inputSHA256": "0382C9B1458F0BDA00BC7469750509363713506B38D7C38DF215BCDAEABECD20",
+      "mode": "standard",
+      "elapsedSeconds": 45.466,
+      "status": "COMPLETE",
+      "targets": 100,
+      "succeeded": 100,
+      "numbersAdded": 0,
+      "failedPreserved": 0,
+      "wordReopenVerified": true,
+      "originalFileBytesUnchanged": true,
+      "independentPackageAudit": true,
+      "layoutWarnings": 0,
+      "stageMarks": [
+        {
+          "name": "PREPARING",
+          "elapsedSeconds": 0.049
+        },
+        {
+          "name": "SOURCE_SNAPSHOT",
+          "elapsedSeconds": 0.071
+        },
+        {
+          "name": "COPY_AND_LINKS",
+          "elapsedSeconds": 0.071
+        },
+        {
+          "name": "OPENING",
+          "elapsedSeconds": 0.132
+        },
+        {
+          "name": "SCANNING",
+          "elapsedSeconds": 2.1
+        },
+        {
+          "name": "SOURCE_LOCATIONS",
+          "elapsedSeconds": 9.107
+        },
+        {
+          "name": "INITIALIZING",
+          "elapsedSeconds": 9.681
+        },
+        {
+          "name": "CONVERTING",
+          "elapsedSeconds": 10.167
+        },
+        {
+          "name": "NUMBERING",
+          "elapsedSeconds": 34.021
+        },
+        {
+          "name": "VERIFYING",
+          "elapsedSeconds": 34.021
+        },
+        {
+          "name": "BIND_OBJECTS",
+          "elapsedSeconds": 34.306
+        },
+        {
+          "name": "SAVING",
+          "elapsedSeconds": 34.805
+        },
+        {
+          "name": "REOPENING",
+          "elapsedSeconds": 39.395
+        },
+        {
+          "name": "RESCANNING",
+          "elapsedSeconds": 40.656
+        },
+        {
+          "name": "SAVED_STRUCTURE",
+          "elapsedSeconds": 40.656
+        },
+        {
+          "name": "SAVED_SCAN",
+          "elapsedSeconds": 40.678
+        },
+        {
+          "name": "RESCAN_BOUNDARIES",
+          "elapsedSeconds": 40.679
+        },
+        {
+          "name": "RESCAN_PARAGRAPHS",
+          "elapsedSeconds": 41.497
+        },
+        {
+          "name": "RESCAN_RANGES",
+          "elapsedSeconds": 42.165
+        },
+        {
+          "name": "SAVED_NATIVE",
+          "elapsedSeconds": 42.243
+        },
+        {
+          "name": "SAVED_POSITIONS",
+          "elapsedSeconds": 42.567
+        },
+        {
+          "name": "SAVED_ITEMS",
+          "elapsedSeconds": 42.567
+        },
+        {
+          "name": "CLOSING",
+          "elapsedSeconds": 44.695
+        },
+        {
+          "name": "PACKAGE_VERIFY",
+          "elapsedSeconds": 44.746
+        },
+        {
+          "name": "PACKAGE_COMPARE",
+          "elapsedSeconds": 44.811
+        },
+        {
+          "name": "SOURCE_COMPARE",
+          "elapsedSeconds": 44.909
+        },
+        {
+          "name": "PUBLISHING",
+          "elapsedSeconds": 44.909
+        }
+      ]
+    },
+    {
+      "id": "latex-100-fast",
+      "sample": "performance-100-400.docx",
+      "inputSHA256": "0382C9B1458F0BDA00BC7469750509363713506B38D7C38DF215BCDAEABECD20",
+      "mode": "fast-unverified",
+      "elapsedSeconds": 21.881,
+      "status": "COMPLETE",
+      "targets": 100,
+      "succeeded": 100,
+      "numbersAdded": 0,
+      "failedPreserved": 0,
+      "wordReopenVerified": false,
+      "originalFileBytesUnchanged": null,
+      "independentPackageAudit": true,
+      "layoutWarnings": 0,
+      "stageMarks": [
+        {
+          "name": "PREPARING",
+          "elapsedSeconds": 0.051
+        },
+        {
+          "name": "COPY_AND_LINKS",
+          "elapsedSeconds": 0.051
+        },
+        {
+          "name": "OPENING",
+          "elapsedSeconds": 0.096
+        },
+        {
+          "name": "SCANNING",
+          "elapsedSeconds": 2.257
+        },
+        {
+          "name": "SOURCE_LOCATIONS",
+          "elapsedSeconds": 7.129
+        },
+        {
+          "name": "INITIALIZING",
+          "elapsedSeconds": 7.511
+        },
+        {
+          "name": "CONVERTING",
+          "elapsedSeconds": 7.703
+        },
+        {
+          "name": "NUMBERING",
+          "elapsedSeconds": 18.409
+        },
+        {
+          "name": "SAVING",
+          "elapsedSeconds": 18.409
+        },
+        {
+          "name": "PUBLISHING",
+          "elapsedSeconds": 21.845
+        }
+      ]
+    },
+    {
+      "id": "showcase-standard-numbered",
+      "sample": "showcase.docx",
+      "inputSHA256": "8CC43F023EF5060D0664ABF4855C807BE7F1EA171FD7029315F45DE5DE1D076E",
+      "mode": "standard",
+      "elapsedSeconds": 10.535,
+      "status": "COMPLETE",
+      "targets": 8,
+      "succeeded": 8,
+      "numbersAdded": 6,
+      "failedPreserved": 0,
+      "wordReopenVerified": true,
+      "originalFileBytesUnchanged": true,
+      "independentPackageAudit": true,
+      "layoutWarnings": 0,
+      "stageMarks": [
+        {
+          "name": "PREPARING",
+          "elapsedSeconds": 0.043
+        },
+        {
+          "name": "SOURCE_SNAPSHOT",
+          "elapsedSeconds": 0.076
+        },
+        {
+          "name": "COPY_AND_LINKS",
+          "elapsedSeconds": 0.077
+        },
+        {
+          "name": "OPENING",
+          "elapsedSeconds": 0.127
+        },
+        {
+          "name": "SCANNING",
+          "elapsedSeconds": 4.282
+        },
+        {
+          "name": "SOURCE_LOCATIONS",
+          "elapsedSeconds": 4.611
+        },
+        {
+          "name": "INITIALIZING",
+          "elapsedSeconds": 4.63
+        },
+        {
+          "name": "CONVERTING",
+          "elapsedSeconds": 4.93
+        },
+        {
+          "name": "NUMBERING",
+          "elapsedSeconds": 6.368
+        },
+        {
+          "name": "VERIFYING",
+          "elapsedSeconds": 7.053
+        },
+        {
+          "name": "BIND_OBJECTS",
+          "elapsedSeconds": 7.083
+        },
+        {
+          "name": "SAVING",
+          "elapsedSeconds": 7.106
+        },
+        {
+          "name": "REOPENING",
+          "elapsedSeconds": 7.649
+        },
+        {
+          "name": "RESCANNING",
+          "elapsedSeconds": 7.817
+        },
+        {
+          "name": "SAVED_STRUCTURE",
+          "elapsedSeconds": 7.817
+        },
+        {
+          "name": "SAVED_SCAN",
+          "elapsedSeconds": 7.818
+        },
+        {
+          "name": "RESCAN_BOUNDARIES",
+          "elapsedSeconds": 7.818
+        },
+        {
+          "name": "RESCAN_PARAGRAPHS",
+          "elapsedSeconds": 7.95
+        },
+        {
+          "name": "RESCAN_RANGES",
+          "elapsedSeconds": 7.95
+        },
+        {
+          "name": "SAVED_NATIVE",
+          "elapsedSeconds": 7.983
+        },
+        {
+          "name": "SAVED_POSITIONS",
+          "elapsedSeconds": 8.047
+        },
+        {
+          "name": "SAVED_ITEMS",
+          "elapsedSeconds": 8.047
+        },
+        {
+          "name": "CLOSING",
+          "elapsedSeconds": 8.125
+        },
+        {
+          "name": "PACKAGE_VERIFY",
+          "elapsedSeconds": 8.15
+        },
+        {
+          "name": "PACKAGE_COMPARE",
+          "elapsedSeconds": 8.15
+        },
+        {
+          "name": "SOURCE_COMPARE",
+          "elapsedSeconds": 8.337
+        },
+        {
+          "name": "PUBLISHING",
+          "elapsedSeconds": 8.337
+        }
+      ]
+    }
+  ],
+  "reverseCheck": {
+    "sample": "showcase.docx converted output",
+    "targets": 8,
+    "succeeded": 8,
+    "status": "COMPLETE",
+    "wordReopenVerified": true,
+    "originalFileBytesUnchanged": true,
+    "mathTypeObjectsRemaining": 0,
+    "mathematicalEquivalenceVerified": false
+  },
+  "excludedAttempt": {
+    "case": "latex-100-standard",
+    "exitCode": 125,
+    "reason": "MATHTYPE_SERVICE_DISCONNECTED",
+    "completedItemsBeforeInterruption": 8,
+    "context": "User reported simultaneous MathType use; requested rerun after stopping.",
+    "rerunIncludedAs": "latex-100-standard"
+  }
+}

@@ -24,6 +24,20 @@ try{
     if($LASTEXITCODE -ne 0){throw '临时 Git 初始化失败。'}
     $candidates=@(& git "--git-dir=$gitDirectory" "--work-tree=$ProjectRoot" -c core.quotePath=false ls-files --others --exclude-standard)
     if($LASTEXITCODE -ne 0 -or (Compare-Object -ReferenceObject @($names) -DifferenceObject $candidates)){throw 'Git 放行规则与公开清单不一致。'}
+    # 明确放行的展示图和 GitHub 模板可上传，未登记的图片与隐藏目录仍须拒绝。
+    New-Item -ItemType Directory -Path (Join-Path $sandbox 'docs/images'),(Join-Path $sandbox '.github/ISSUE_TEMPLATE') -Force|Out-Null
+    Copy-Item -LiteralPath (Join-Path $ProjectRoot 'assets/app_icon.png') -Destination (Join-Path $sandbox 'docs/images/ui-main.png')
+    'public issue template'|Set-Content -LiteralPath (Join-Path $sandbox '.github/ISSUE_TEMPLATE/bug_report.md') -Encoding utf8
+    'public fixture'|Set-Content -LiteralPath (Join-Path $sandbox 'example.txt') -Encoding utf8
+    @('example.txt','docs/images/ui-main.png','.github/ISSUE_TEMPLATE/bug_report.md')|Set-Content -LiteralPath (Join-Path $sandbox 'upload-files.txt') -Encoding utf8
+    & (Join-Path $ProjectRoot 'check-upload.ps1') -ProjectDirectory $sandbox
+    foreach($unlisted in @('docs/images/private.png','.github/private.md')){
+        Copy-Item -LiteralPath (Join-Path $sandbox 'docs/images/ui-main.png') -Destination (Join-Path $sandbox $unlisted)
+        $unlisted|Set-Content -LiteralPath (Join-Path $sandbox 'upload-files.txt') -Encoding utf8
+        $rejected=$false
+        try{& (Join-Path $ProjectRoot 'check-upload.ps1') -ProjectDirectory $sandbox|Out-Null}catch{$rejected=$true}
+        if(-not $rejected){throw '上传检查意外放行未登记的图片或隐藏路径。'}
+    }
     'example.txt'|Set-Content -LiteralPath (Join-Path $sandbox 'upload-files.txt') -Encoding utf8
     $example=Join-Path $sandbox 'example.txt'
     'public fixture'|Set-Content -LiteralPath $example -Encoding utf8

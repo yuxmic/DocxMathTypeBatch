@@ -7,13 +7,14 @@ $manifest=Join-Path $root 'upload-files.txt'
 $names=@(Get-Content -LiteralPath $manifest -Encoding utf8 | Where-Object {$_ -and -not $_.StartsWith('#')})
 if($names.Count -ne @($names|Sort-Object -Unique).Count){throw '公开清单包含重复路径。'}
 $issues=[Collections.Generic.List[string]]::new()
-$binaryNames=@('assets/app_icon.png','assets/app_icon.ico')
+$binaryNames=@('assets/app_icon.png','assets/app_icon.ico','docs/images/ui-main.png','docs/images/ui-advanced.png','docs/images/conversion-before.png','docs/images/conversion-after.png')
+$githubNames=@('.github/ISSUE_TEMPLATE/bug_report.md','.github/ISSUE_TEMPLATE/feature_request.md','.github/PULL_REQUEST_TEMPLATE.md')
 $privateValues=@($env:USERPROFILE,$env:USERNAME,[IO.Path]::GetFullPath($PrivacyDirectory))|Where-Object {$_ -and $_.Length -ge 4}
 $privateFolder=Join-Path $PrivacyDirectory '.local/samples'
 if(Test-Path -LiteralPath $privateFolder){$privateValues+=@(Get-ChildItem -LiteralPath $privateFolder -File|ForEach-Object {$_.Name})}
 $hashes=[ordered]@{}
 foreach($name in $names){
-    if($name -match '(^/|\\|(^|/)\.\.(/|$)|^\.|^(build|dist|临时文件夹)/|^tests/output/)' -and $name -notin @('.gitignore','.gitattributes')){throw '公开清单包含禁止路径。'}
+    if($name -match '(^/|\\|(^|/)\.\.(/|$)|^\.|^(build|dist|临时文件夹)/|^tests/output/)' -and $name -notin (@('.gitignore','.gitattributes')+$githubNames)){throw '公开清单包含禁止路径。'}
     $path=[IO.Path]::GetFullPath((Join-Path $root $name))
     if(-not $path.StartsWith($root+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase)){throw '公开文件路径越界。'}
     $entry=Get-Item -LiteralPath $path
