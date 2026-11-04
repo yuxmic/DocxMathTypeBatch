@@ -1,172 +1,107 @@
-# DocxMathTypeBatch
+# DocxMathTypeBatch · MathType 批量转换器
 
-[![正式版本 v0.1.4](https://img.shields.io/badge/release-v0.1.4-2563eb)](https://github.com/yuxmic/DocxMathTypeBatch/releases/tag/v0.1.4)
-[![Windows x64](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-0078D4)](#运行环境)
+[![中文图形界面](https://img.shields.io/badge/GUI-中文界面-2563eb)](#三步开始)
+[![正式版本 v0.1.4](https://img.shields.io/badge/release-v0.1.4-2563eb)](https://github.com/yuxmic/DocxMathTypeBatch/releases/latest)
+[![Windows x64](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-0078D4)](#运行环境与支持范围)
 [![MIT License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
 
-**将 Word 文档中的 LaTeX 和 Word 原生公式批量转换为可编辑的 MathType 对象。**
+**中文图形界面（GUI），解压即用。将 Word 文档中的 LaTeX 和原生公式批量转成可双击编辑的 MathType。**
 
-面向需要整理论文、报告中公式的 Windows 用户，支持文档队列、行外右编号、格式调整及 MathType → LaTeX 基本反向导出。程序调用本机 Word 和 MathType，结果另存为新的 `.docx`，保留原文档。
+整理论文、毕业设计或技术报告时，拖入 DOCX，点击“开始转换”即可。默认设置轻松上手，也能按需调整字号、行距和公式编号，或交给 AI Agent Skill 自动处理。
 
-[下载程序](#下载) · [五步入门](#五步入门) · [实测速度与效果](#实测速度与效果) · [使用说明](docs/使用说明.md) · [公式兼容性](docs/MathType兼容LaTeX书写规范.md) · [更新记录](CHANGELOG.md)
+**[立即下载 Windows 中文界面版（ZIP）](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.4/DocxMathTypeBatch-v0.1.4-win-x64.zip)** · [下载 AI Agent Skill](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.4/docx-latex-to-mathtype-skill-v0.2.1.zip) · [使用说明](docs/使用说明.md)
 
-![DocxMathTypeBatch 主界面：文档队列、转换设置与输出位置](docs/images/ui-main.png)
+运行前需安装 **64 位桌面 Word 和完整 MathType**，使用 Windows 10 / 11 x64。本工具免费开源，提供现成 EXE，无需编程或配置开发环境。
 
-## 下载
+![DocxMathTypeBatch 中文图形界面（GUI），支持拖入多个 Word 文档、调整转换选项并一键开始](docs/images/ui-main.png)
 
-| 下载内容 | 适用场景 |
+## 为什么用它
+
+| 你关心的 | 程序提供的 |
 | --- | --- |
-| **[Windows x64 ZIP · v0.1.4](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.4/DocxMathTypeBatch-v0.1.4-win-x64.zip)** | 普通用户：包含程序、简要说明和 MIT 许可证，解压后运行 |
-| [单文件 EXE · v0.1.4](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.4/DocxMathTypeBatch.exe) | 直接获取程序 |
-| **[完整 Skill · v0.2.1](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.4/docx-latex-to-mathtype-skill-v0.2.1.zip)** | Agent 用户：内含 v0.1.4 EXE，无需另行下载转换器 |
-| [发布说明与校验文件](https://github.com/yuxmic/DocxMathTypeBatch/releases/tag/v0.1.4) | 查看版本附件和校验信息 |
+| **小白也能上手** | 中文 UI，拖入文档即可按默认设置转换，问题提供中文原因和处理建议 |
+| **开箱即用** | ZIP 解压后双击 EXE，无需安装 Python、PowerShell、.NET 或额外 VC++ 运行库 |
+| **批量省时** | 多文档队列、添加文件夹，一次处理多份 DOCX。本机合成样本实测，100 个简单 LaTeX 公式常规转换约 45 秒 |
+| **选项丰富** | 转换范围、Word 原生公式开关、行内/行外字号、行距、章/节/起始序号和右编号格式均可设置 |
+| **支持 AI Skill** | 提供内含转换器的完整 Skill，用自然语言要求本机 Agent 完成批量转换 |
+| **结果方便继续用** | 生成可编辑 MathType 对象，另存新文档保留原件，支持基本的 MathType → LaTeX 反向导出 |
 
-v0.1.4 增加问题摘要、OMML 转换开关和版式提醒，并优化常规转换读取；2026-11-02 已修复脱离开发目录后无法启动的问题。完整变化见[更新记录](CHANGELOG.md)。程序尚未进行代码签名，首次运行可能出现 Windows 安全提示。
+## 三步开始
 
-## 五步入门
+1. **下载并打开**。解压上方 ZIP，双击 `DocxMathTypeBatch.exe`，进入中文界面。也可[单独下载 EXE](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.4/DocxMathTypeBatch.exe)。
+2. **拖入 Word 文档**。先保存并关闭文档，再拖入一个或多个 `.docx`，也可点击“添加文件夹”。
+3. **点击“开始转换”**。默认设置即可使用，完成后双击列表中的文档打开结果，新公式可在 Word 中双击编辑。
 
-1. 安装下方要求的 Word 和 MathType，下载 Windows ZIP，解压后运行 `DocxMathTypeBatch.exe`。
-2. 保存并关闭待转换文档，将一个或多个 `.docx` 拖入程序，也可添加文件夹中的文档。
-3. 选择转换方向和正文范围，按需设置字号、行距与右编号。默认转换所有正文，字号和行距跟随原文，不添加编号，快速转换关闭。
-4. 选择输出位置，点击“开始转换”。结果另存为新文件，重名时自动添加序号。
-5. 在列表中查看完成状态，通过“日志”定位问题。打开结果后，可双击新生成的 MathType 对象继续编辑。
+默认转换所有正文，字号和行距跟随原文，右编号和快速转换关闭。需要统一格式时再调整选项。输出重名时自动添加序号。
 
-反向转换时切换到 **MathType → LaTeX**，可选择行外输出为 `\[...\]` 或 `$$...$$`。转换期间请勿同时操作 MathType，以免中断转换服务。详细操作见[使用说明](docs/使用说明.md)。
+首次运行可能出现 Windows 未签名程序提示。转换期间请避免同时操作 MathType，以免中断转换服务。详细步骤见[使用说明](docs/使用说明.md)。
 
-## 主要功能
+## 转换效果
 
-| 功能 | 说明 |
+LaTeX 文本和 Word 原生公式转换后，可继续在 MathType 中编辑。需要公式编号时，可生成 MathType 原生右编号。
+
+| 转换前 | 转换后 |
 | --- | --- |
-| 批量处理 | 多文件队列、拖放、添加文件夹，依次转换 |
-| LaTeX 与原生公式转换 | 正文 LaTeX 和 Word 原生公式（OMML）默认共同转为 MathType；可关闭 OMML 转换 |
-| 正文范围选择 | 所有正文、仅行内或仅行外 |
-| 公式格式 | 行内、行外字号和段落行距可分别设置，默认跟随原文 |
-| 行外右编号 | 支持章号、节号、起始序号和编号格式，可补充或更新已有 MathType 原生编号 |
-| 基本反向导出 | 将 MathType 公式导出为 LaTeX 文本，保留 OMML |
-| 问题定位 | 中文问题摘要、原文页码、原式片段、原因与建议，可切换原始日志 |
-| 任务控制 | 安全停止整批，保留已交付结果；后台使用独立 Word 实例 |
-| 额外位置 | 可单独开启表格、文本框、页眉页脚、脚注尾注的实验性转换 |
+| ![转换前，Word 中的 LaTeX 文本和原生公式](docs/images/conversion-before.png) | ![转换后，可编辑的 MathType 公式和行外右编号](docs/images/conversion-after.png) |
+
+上图来自同一份合成文档的实际 Word 渲染，包含行内式、分式、求和、积分、分段函数、矩阵和多行公式。
+
+## 实测速度
+
+**100 个简单 LaTeX 公式，常规模式约 45 秒，快速模式约 22 秒。**
+
+| 合成样本 | 常规模式 | 快速模式 |
+| --- | --- | --- |
+| 20 个 LaTeX 分式 / 80 段 | 约 12 秒 | — |
+| 20 个 Word 原生分式 / 80 段 | 约 13 秒 | — |
+| 100 个简单 LaTeX 公式 / 400 段 | 约 45 秒 | 约 22 秒 |
+
+数据来自 2026-11-03 本机单轮实测，包含 Word 启动、转换、保存和退出清理。常规模式保留逐式及保存后核验，快速模式省略这些核验，输出需自行检查。实际耗时随公式复杂度、文档和机器环境变化。完整环境、精确计时和核验记录见[实测报告](docs/实测报告.md)。
+
+## 按需调整公式格式
+
+可选择全部正文、仅行内或仅行外公式，分别设置行内/行外字号和段落行距。行外右编号支持章号、节号、起始序号和格式预览，也可补充或更新已有 MathType 原生编号。章、节值由用户指定。
+
+高级设置提供 Word 原生公式（OMML）转换开关，以及表格、文本框、页眉页脚、脚注尾注的实验性转换。额外位置只替换公式，设置方法与适用范围见[使用说明](docs/使用说明.md)。
 
 <details>
 <summary>查看高级设置界面</summary>
 
-![高级设置：正文行距、编号格式、OMML 转换开关和实验性位置](docs/images/ui-advanced.png)
+![高级设置界面，提供行距、右编号格式、Word 原生公式转换开关和实验性位置选项](docs/images/ui-advanced.png)
 
-章、节值由用户指定，不自动识别标题。高级设置只在当前程序会话中保留，重启恢复默认。
+设置在当前程序会话中保留，重启后恢复默认。
 
 </details>
 
-## 实测速度与效果
+## AI Agent Skill
 
-2026-11-03 在 Windows 本机使用真实 Word、MathType 完成以下**单机、单轮**测试。计时从转换进程启动至退出，包含 Word 启动、转换、保存及清理；常规模式还包含保存后重开核验，不含后续独立包审计。字号和行距跟随原文，性能样本不添加编号。
+安装完整 Skill 后，可直接向本机 Agent 提出要求。
 
-| 合成样本 | 模式 | 总耗时 | 本轮结果 |
-| --- | --- | ---: | --- |
-| 20 个 LaTeX 分式／80 段 | 常规 | 11.673 秒 | 20/20 完成，标准核验通过 |
-| 20 个 OMML 分式／80 段 | 常规 | 13.417 秒 | 20/20 完成，标准核验通过 |
-| 100 个 LaTeX 公式／400 段 | 常规 | 45.466 秒 | 100/100 完成，标准核验通过 |
-| 同一份 100 式／400 段样本 | 快速 | 21.881 秒 | 100/100 报告完成，输出未经核验 |
-| 8 式混合效果样本 | 常规，添加右编号 | 10.535 秒 | 8/8 完成，新增 6 个右编号 |
+> 将这份 DOCX 的公式转成 MathType，正文行外公式添加右编号，结果另存为新文件。
 
-下图展示本轮合成效果样本转换前后的实际 Word 渲染：
+1. [下载完整 Skill v0.2.1](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.4/docx-latex-to-mathtype-skill-v0.2.1.zip)，将其中的 `docx-latex-to-mathtype` 文件夹放入所用 Agent 的 Skill 目录并重新加载。
+2. 向 Agent 提供文档和转换要求。本机需安装 Word、MathType，并支持运行 Windows PowerShell 5.1 或 PowerShell 7 脚本。
 
-| 转换前 | 转换后 |
+完整包内含 v0.1.4 转换器 EXE，可随整个文件夹移动。日常图形界面使用直接下载 Windows 程序包。安装与调用详情见[Agent 使用说明](docs/使用说明.md#使用-agent-自动调用)和[Skill 调用参数](skills/docx-latex-to-mathtype/references/cli.md)。
+
+## 运行环境与支持范围
+
+| 项目 | 要求或说明 |
 | --- | --- |
-| ![转换前：合成文档中的 LaTeX 与 Word 原生公式](docs/images/conversion-before.png) | ![转换后：MathType 公式与行外右编号](docs/images/conversion-after.png) |
+| Windows | Windows 10（1703 及以上）或 Windows 11，x64 |
+| Word / MathType | 已正确安装并注册的 64 位桌面 Microsoft Word、完整 MathType，包含适配 64 位 Word 的组件 |
+| LaTeX 输入 | 正文中使用 `$...$`、`$$...$$`、`\(...\)` 或 `\[...\]` 的公式 |
+| Word 原生公式 | 默认与 LaTeX 一起转换，可在高级设置关闭 |
+| 反向导出 | 支持 MathType → LaTeX，可选择行外定界符，保留 Word 原生公式 |
 
-完整环境、样本、设置及核验范围见[实测报告](docs/实测报告.md)。这些数据记录上述样本的表现；文档长度、公式结构、Office/MathType 版本及机器负载会影响实际时间。快速模式的完成计数不代表公式内容或版式已经核验。
+LaTeX 以 ASCII 公式为基础，支持常见命令与多行结构的兼容适配。公式独占段落时按行外处理，夹在正文中时按行内处理。中文正文保留，适配后仍含不支持字符的公式保留原式。完整写法见[公式书写与兼容性](docs/MathType兼容LaTeX书写规范.md)。
 
-## 运行环境
+遇到“部分完成”时，可在“日志”中查看问题公式的原文页码、片段、原因及建议。高公式显示不全时可调整行距，过长公式需自行调整。修订、限制编辑及实验性位置的处理说明见[使用说明](docs/使用说明.md)。
 
-| 项目 | 要求 |
-| --- | --- |
-| 操作系统 | Windows 10（1703 及以上版本）或 Windows 11，x64 |
-| Word | 已安装并正确注册的 64 位桌面版 Microsoft Word |
-| MathType | 完整桌面版，包含适配 64 位 Word 的组件 |
-| 程序运行 | 无需 Python、PowerShell、.NET 或另装本工具的 VC++ 运行库 |
-| 可选 Agent 调用 | Windows 本机脚本执行能力，Windows PowerShell 5.1 或 PowerShell 7 |
+## 文档与反馈
 
-## 公式格式与支持范围
+[使用说明](docs/使用说明.md) · [公式兼容性](docs/MathType兼容LaTeX书写规范.md) · [实测报告](docs/实测报告.md) · [更新记录](CHANGELOG.md) · [开发说明](docs/轻量化转换大纲.md) · [参与贡献](CONTRIBUTING.md)
 
-支持 `$...$`、`$$...$$`、`\(...\)` 和 `\[...\]`，例如：
+欢迎通过 [Issues](https://github.com/yuxmic/DocxMathTypeBatch/issues) 反馈问题。请提供程序、Windows、Word、MathType 版本和复现步骤，示例、截图及日志提交前请去除私人信息。
 
-```latex
-正文中的 $a+b=c$ 作为行内公式处理。
-
-\[\frac{x+1}{y+2}\]
-```
-
-公式独占段落时按行外处理，夹在普通文字中时按行内处理，与定界符种类无关。支持 `cases`、`array`、矩阵等完整多行结构；`aligned` 会在导入副本中改写为 MathType 兼容形式。
-
-| 文档内容 | 当前处理方式 |
-| --- | --- |
-| 正文中带定界符的 LaTeX | 按所选范围转换 |
-| 正文中的 Word 原生公式（OMML） | 默认正向转换，可在高级设置关闭；反向保持 |
-| 正向时已有的 MathType 对象 | 保留公式内容，可统一独立行外对象的布局并补充或更新编号 |
-| 表格、文本框、页眉页脚、脚注尾注 | 默认保持；可分别开启实验性转换 |
-| 独立公式后的括号数字手动编号 | 符合安全清理条件时移除旧编号；开启右编号后生成 MathType 原生编号 |
-
-公式导入以 **ASCII LaTeX** 为基础，可在副本中自动适配 `\bm`、`\mathup` 等常见命令及 `Ŷ`、`Ȳ`、`Ŷ` 等可识别的 Unicode 顶饰。适配后仍含中文等不支持字符的公式会保留原式；中文正文正常保留。程序不自动拆分或缩放过长公式，也不将缺少定界符的裸 LaTeX 作为转换目标。具体兼容写法见[公式书写与兼容性](docs/MathType兼容LaTeX书写规范.md)。
-
-实验性位置支持两个基本方向，行内/行外筛选同样生效；只替换公式，不应用正文的字号、行距或右编号设置。表格、文本框开关也约束已启用的其他区域，例如页眉中的表格需同时开启“页眉页脚”和“表格”。关闭 OMML 转换时，正文和已启用额外位置的 OMML 都保留；反向导出始终保留 OMML。
-
-## 常规模式与快速模式
-
-| 项目 | 常规模式（默认） | 快速模式 |
-| --- | --- | --- |
-| 适用情况 | 日常转换，需要核对保存结果 | 紧急取得输出，之后自行检查 |
-| 内容与资产核验 | 保留逐式复查、保存重开和包资产核验 | 省略这些检查，只保存一次 |
-| 失败恢复 | 保留已核验的局部恢复与副本重建流程 | 尽量撤回后继续，不核验恢复结果 |
-| 版式提醒 | 检查支持范围内的超宽公式和固定行距风险 | 不进行版式检查 |
-| 原件与输出 | 原件不覆盖，输出重名避让 | 同样保留 |
-| 结果含义 | 完成所选范围转换及标准核验 | 调用和保存完成，可能漏转、错位或内容错误 |
-
-首页“快速转换”默认关闭，同时约束正文及已开启的额外位置。两种模式均支持任务取消，并拒绝开启修订或限制编辑的文件。标准核验检查转换内容与文档完整性，不代表已经证明数学等价。
-
-## Agent 自动调用
-
-安装一个完整 [docx-latex-to-mathtype Skill](skills/docx-latex-to-mathtype/SKILL.md) 包，即可在本机通过 Agent 无界面转换：
-
-1. 下载上方完整 Skill v0.2.1 ZIP，将 `docx-latex-to-mathtype` 文件夹放入所用 Agent 的 Skill 目录，并重新加载。
-2. 确认本机已安装 Word 和 MathType，向 Agent 提出要求，例如：“将这份 DOCX 的公式转成 MathType，正文行外公式添加右编号，结果另存为新文件。”
-
-完整发布包已包含 `bin/DocxMathTypeBatch.exe`，无需额外下载或登记路径。Skill 按相对路径调用包内程序的 `--describe --json`、`--worker-convert` / `--worker-reverse` 入口，不搜索注册表、PATH 或外部 EXE；整个目录移动后无需重新连接，更新时替换完整 Skill 包。
-
-成功公式只返回计数；问题项包含原文位置、机器原因及最多 160 字符的片段，版式提醒单独返回，完整报告和日志按需读取。结果区分标准核验与快速未经核验。普通界面无需安装 Skill；原 v0.1 不支持连接协议。详见[Agent 使用说明](docs/使用说明.md#使用-agent-自动调用)和[调用参数](skills/docx-latex-to-mathtype/references/cli.md)。
-
-## 常见问题
-
-**为什么开始按钮不可用？**
-
-先确认桌面 Word、完整 MathType 已正确安装并注册。添加文档后打开该行“日志”，可查看具体的未开始原因。
-
-**“部分完成”还能使用结果吗？**
-
-常规模式保留已经核验的转换结果，无法转换的公式或区域保留原内容。请通过“转换详情”查找原文位置、原因及建议。快速模式的结果未经核验，需自行检查。
-
-**为什么高公式显示不全，或长公式超出版心？**
-
-默认保留原文行距，过小的固定行距可能裁切高公式；可在高级设置调整行距。程序不自动拆分、缩放长公式。常规模式的版式提醒覆盖正文单栏、等宽栏可用宽度及公式所在段落的固定行距，不检查非等宽栏、容器宽高或编号碰撞。
-
-**能否继续编辑、调整编号？**
-
-新公式是 MathType 对象，可双击编辑。行外使用 MathType 原生显示样式，编号可继续在 Word 的 MathType 标签页进行格式化和更新。章、节值由用户手动指定。
-
-**转换时能否切换软件或锁屏？**
-
-后台使用独立的隐藏 Word 实例，并尝试将任务 Word 争取的前台交还最近使用的窗口。转换期间允许熄屏和锁屏，阻止空闲自动睡眠；手动睡眠会暂停处理，唤醒后继续。请避免同时编辑 MathType 公式。
-
-## 文档与贡献
-
-- [使用说明](docs/使用说明.md)：操作步骤、设置、状态和任务停止。
-- [公式书写与兼容性](docs/MathType兼容LaTeX书写规范.md)：支持写法及公式示例。
-- [实测报告](docs/实测报告.md)：速度、效果和本轮核验范围。
-- [更新记录](CHANGELOG.md)：v0.1.4、v0.1.3、v0.1.2 的变化。
-- [开发说明](docs/轻量化转换大纲.md)：原生 C++ 构建、模块职责、测试和打包。
-- [参与贡献](CONTRIBUTING.md)：复现样本、提交约定及相关检查。
-
-请通过 [Issues](https://github.com/yuxmic/DocxMathTypeBatch/issues) 反馈问题或提出建议。提供程序、Windows、Word、MathType 版本、复现步骤及相关设置；公式或文档示例应尽量小，日志和截图需先去除私人内容与个人路径。
-
-## 许可
-
-本项目采用 [MIT 许可证](LICENSE)，允许使用、修改、分发和商用，须保留版权及许可声明。Microsoft Word 和 MathType 的使用遵循各自许可条款。
+本工具采用 [MIT 许可证](LICENSE)，允许使用、修改、分发和商用，须保留版权及许可声明。Microsoft Word 和 MathType 的使用遵循各自许可条款。
