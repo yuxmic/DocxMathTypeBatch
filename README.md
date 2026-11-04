@@ -13,7 +13,7 @@
 
 运行前需安装 **64 位桌面 Word 和完整 MathType**，使用 Windows 10 / 11 x64。本工具免费开源，提供现成 EXE，无需编程或配置开发环境。
 
-![](C:/Users/yutao/AppData/Roaming/marktext/images/2026-11-04-11-38-19-image.png)
+![DocxMathTypeBatch 中文主界面](docs/images/ui-main.png)
 
 ## 为什么用它
 
@@ -67,7 +67,7 @@ LaTeX 文本和 Word 原生公式转换后，可继续在 MathType 中编辑。�
 <details>
 <summary>查看高级设置界面</summary>
 
-![](C:/Users/yutao/AppData/Roaming/marktext/images/2026-11-04-11-38-57-image.png)
+![DocxMathTypeBatch 高级设置界面](docs/images/ui-advanced.png)
 
 设置在当前程序会话中保留，重启后恢复默认。
 
