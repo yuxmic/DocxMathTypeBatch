@@ -12,7 +12,7 @@
 
 namespace {
 struct Region {std::wstring key,label;ComPtr<IDispatch> range;bool main{};std::vector<Span> tables;ComPtr<IDispatch> owner;};
-struct Target {ScanItem item;std::wstring kind;};
+struct Target {ScanItem item;std::wstring kind;NativeAsset asset;};
 struct Snapshot {std::wstring key,body;std::vector<std::wstring> layout,maths,fields;std::vector<std::vector<unsigned char>> native;};
 struct Binding {std::wstring key;ComPtr<IDispatch> owner;Span span;std::vector<unsigned char> native;std::wstring output;size_t itemIndex{};};
 struct HeaderSlot {long section,kind;bool header;};
@@ -56,18 +56,21 @@ Region* addRegion(std::vector<Region>& regions,const std::wstring& key,const std
     regions.push_back({key,label,get(range,L"Duplicate"),main});
     return &regions.back();
 }
-void textboxes(std::vector<Region>& regions,IDispatch* shapes,const std::wstring& owner,const std::wstring& label) {
+void textboxes(std::vector<Region>& regions,IDispatch* shapes,const std::wstring& owner,const std::wstring& label,bool reportProgress=false) {
     // 只读遍历期间集合不变，数量在进入循环时读取一次。
     const long count=integer(shapes,L"Count");
+    StageProgress progress("EXP_TEXTBOXES",static_cast<size_t>(count),reportProgress);
     for(long i=1;i<=count;++i){taskPulse();auto shape=collectionItem(shapes,i);const long type=integer(shape.Get(),L"Type");
-        if(type==6){textboxes(regions,get(shape.Get(),L"GroupItems").Get(),owner+L":group:"+std::to_wstring(i),label+L"组合 "+std::to_wstring(i)+L" ");continue;}
-        if(type!=1&&type!=17)continue;auto frame=get(shape.Get(),L"TextFrame");if(!integer(frame.Get(),L"HasText"))continue;
+        if(type==6){textboxes(regions,get(shape.Get(),L"GroupItems").Get(),owner+L":group:"+std::to_wstring(i),label+L"组合 "+std::to_wstring(i)+L" ",reportProgress);progress.advance();continue;}
+        if(type!=1&&type!=17){progress.advance();continue;}auto frame=get(shape.Get(),L"TextFrame");if(!integer(frame.Get(),L"HasText")){progress.advance();continue;}
         // Word 保存时会重新分配 Shape.ID；使用所属区域内的对象路径并核对完整内容。
         auto range=get(frame.Get(),L"ContainingRange");if(auto region=addRegion(regions,owner+L":box:"+std::to_wstring(i),label+L"文本框 "+std::to_wstring(i),range.Get()))region->owner=shape;
+        progress.advance();
     }
 }
 // WordOpenXML 会导出虚拟空槽位；从尚未打开的 DOCX 读取实际引用，按节和类型定位。
-std::vector<HeaderSlot> storedHeaders(const std::wstring& path) {
+std::vector<HeaderSlot> storedHeaders(const std::wstring& path,bool reportProgress=false) {
+    if(reportProgress)std::puts("UI_PHASE EXP_HEADER_REFERENCES");
     ComPtr<IOpcFactory> factory;check(CoCreateInstance(__uuidof(OpcFactory),nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&factory)),"Header reference package factory");
     ComPtr<IStream> input;check(factory->CreateStreamOnFile(path.c_str(),OPC_STREAM_IO_READ,nullptr,0,&input),"Read stored header references");
     ComPtr<IOpcPackage> package;check(factory->ReadPackageFromStream(input.Get(),OPC_VALIDATE_ON_LOAD,&package),"Read header reference package");
@@ -78,33 +81,38 @@ std::vector<HeaderSlot> storedHeaders(const std::wstring& path) {
     check(dom->load(source.v,&loaded),"Read stored section properties");require(loaded!=VARIANT_FALSE,"Valid stored section XML");
     ComPtr<IXMLDOMNodeList> properties;check(dom->selectNodes(Value(L"/*[local-name()='document']/*[local-name()='body']//*[local-name()='sectPr' and not(ancestor::*[local-name()='sectPrChange']) and not(ancestor::*[local-name()='txbxContent'])]").v.bstrVal,&properties),"Stored section references");
     long count{};check(properties->get_length(&count),"Stored section count");std::vector<HeaderSlot> result;
+    StageProgress progress("EXP_HEADER_REFERENCES",static_cast<size_t>(count),reportProgress);
     for(long section=0;section<count;++section){ComPtr<IXMLDOMNode> property;check(properties->get_item(section,&property),"Stored section");ComPtr<IXMLDOMNodeList> references;
         check(property->selectNodes(Value(L"*[local-name()='headerReference' or local-name()='footerReference']").v.bstrVal,&references),"Stored header and footer references");long referenceCount{};check(references->get_length(&referenceCount),"Stored header reference count");
         for(long i=0;i<referenceCount;++i){ComPtr<IXMLDOMNode> reference,type;check(references->get_item(i,&reference),"Stored header reference");Value name,value;name.v.vt=value.v.vt=VT_BSTR;
             check(reference->get_baseName(&name.v.bstrVal),"Stored header kind");check(reference->selectSingleNode(Value(L"@*[local-name()='type']").v.bstrVal,&type),"Stored header type");require(type!=nullptr,"Stored header reference has type");check(type->get_text(&value.v.bstrVal),"Stored header variant");
             result.push_back({section+1,!wcscmp(value.v.bstrVal,L"default")?1:!wcscmp(value.v.bstrVal,L"first")?2:3,!wcscmp(name.v.bstrVal,L"headerReference")});
         }
+        progress.advance();
     }
     return result;
 }
-std::vector<Region> collectRegions(IDispatch* document,const ExperimentalOptions& options,const std::vector<HeaderSlot>& headers) {
+std::vector<Region> collectRegions(IDispatch* document,const ExperimentalOptions& options,const std::vector<HeaderSlot>& headers,bool reportProgress=false) {
+    if(reportProgress)std::puts("UI_PHASE EXP_ENUMERATING");
     std::vector<Region> regions;addRegion(regions,L"body",L"正文",get(document,L"Content").Get(),true);
     // 正文只作保留核验；每个顶层表格单独处理，嵌套表格由其所属顶层表格覆盖。
-    if(options.tables){auto tables=get(document,L"Tables");const long count=integer(tables.Get(),L"Count");for(long i=1;i<=count;++i){auto range=get(collectionItem(tables.Get(),i).Get(),L"Range");
+    if(options.tables){auto tables=get(document,L"Tables");const long count=integer(tables.Get(),L"Count");StageProgress progress("EXP_TABLES",static_cast<size_t>(count),reportProgress);for(long i=1;i<=count;++i){auto range=get(collectionItem(tables.Get(),i).Get(),L"Range");
         bool nested=false;for(const auto& prior:regions)if(prior.key.rfind(L"body:table:",0)==0){const auto a=bounds(prior.range.Get()),b=bounds(range.Get());if(a.start<=b.start&&a.end>=b.end){nested=true;break;}}
-        if(!nested)addRegion(regions,L"body:table:"+std::to_wstring(i),L"正文表格 "+std::to_wstring(i),range.Get());}}
-    if(options.textboxes)textboxes(regions,get(document,L"Shapes").Get(),L"body",L"正文");
+        if(!nested)addRegion(regions,L"body:table:"+std::to_wstring(i),L"正文表格 "+std::to_wstring(i),range.Get());progress.advance();}}
+    if(options.textboxes)textboxes(regions,get(document,L"Shapes").Get(),L"body",L"正文",reportProgress);
     if(options.headers){
         auto sections=get(document,L"Sections");
+        StageProgress progress("EXP_HEADERS",headers.size(),reportProgress);
         for(const auto& slot:headers){auto item=collectionItem(sections.Get(),slot.section);const wchar_t* name=slot.header?L"Headers":L"Footers";
-            auto header=collectionItem(get(item.Get(),name).Get(),slot.kind);if(slot.section>1&&boolean(header.Get(),L"LinkToPrevious"))continue;
+            auto header=collectionItem(get(item.Get(),name).Get(),slot.kind);if(slot.section>1&&boolean(header.Get(),L"LinkToPrevious")){progress.advance();continue;}
             const auto key=std::wstring(name)+L":"+std::to_wstring(slot.section)+L":"+std::to_wstring(slot.kind);
             const auto label=L"第 "+std::to_wstring(slot.section)+L" 节"+(slot.header?L"页眉":L"页脚")+(slot.kind==1?L"（主页）":slot.kind==2?L"（首页）":L"（偶数页）");
-            addRegion(regions,key,label,get(header.Get(),L"Range").Get());if(options.textboxes)textboxes(regions,get(header.Get(),L"Shapes").Get(),key,label);
+            addRegion(regions,key,label,get(header.Get(),L"Range").Get());if(options.textboxes)textboxes(regions,get(header.Get(),L"Shapes").Get(),key,label,reportProgress);progress.advance();
         }
     }
     if(options.notes)for(const auto* name:{L"Footnotes",L"Endnotes"}){auto notes=get(document,name);const long count=integer(notes.Get(),L"Count");
-        for(long i=1;i<=count;++i){auto note=collectionItem(notes.Get(),i);if(auto region=addRegion(regions,std::wstring(name)+L":"+std::to_wstring(i),std::wstring(!wcscmp(name,L"Footnotes")?L"脚注 ":L"尾注 ")+std::to_wstring(i),get(note.Get(),L"Range").Get()))region->owner=note;}
+        StageProgress progress("EXP_NOTES",static_cast<size_t>(count),reportProgress);
+        for(long i=1;i<=count;++i){auto note=collectionItem(notes.Get(),i);if(auto region=addRegion(regions,std::wstring(name)+L":"+std::to_wstring(i),std::wstring(!wcscmp(name,L"Footnotes")?L"脚注 ":L"尾注 ")+std::to_wstring(i),get(note.Get(),L"Range").Get()))region->owner=note;progress.advance();}
     }
     return regions;
 }
@@ -115,57 +123,71 @@ bool locationSelected(const Region& region,IDispatch* range,const ExperimentalOp
 bool intersects(Span span,const std::vector<Span>& excluded) {
     return std::any_of(excluded.begin(),excluded.end(),[&](Span block){return block.start<span.end&&block.end>span.start;});
 }
-std::vector<Target> scanRegion(IDispatch* document,const Region& region,const ExperimentalOptions& options,bool reverse,const ScanOptions& scanOptions) {
+std::vector<Target> scanRegion(IDispatch* document,const Region& region,const ExperimentalOptions& options,bool reverse,const ScanOptions& scanOptions,bool cacheNative=false) {
+    if(scanOptions.progress)std::puts("UI_PHASE EXP_SCANNING");
     const auto root=region.range.Get();const auto limits=bounds(root);std::vector<Span> protectedRanges,excluded;std::vector<Target> targets;
-    for(const auto* name:{L"Revisions",L"ContentControls"}){auto collection=get(root,name);const long count=integer(collection.Get(),L"Count");for(long i=1;i<=count;++i){auto span=bounds(get(collectionItem(collection.Get(),i).Get(),L"Range").Get());
-        if(!wcscmp(name,L"ContentControls")){span.start=std::max(limits.start,span.start-1);span.end=std::min(limits.end,span.end+1);}protectedRanges.push_back(span);}}
-    auto fields=get(root,L"Fields");const long fieldCount=integer(fields.Get(),L"Count");for(long i=1;i<=fieldCount;++i){auto field=collectionItem(fields.Get(),i);if(integer(field.Get(),L"Type")!=58)protectedRanges.push_back(fieldBounds(field.Get()));}
+    for(const auto* name:{L"Revisions",L"ContentControls"}){auto collection=get(root,name);const long count=integer(collection.Get(),L"Count");StageProgress progress("EXP_BOUNDARIES",static_cast<size_t>(count),scanOptions.progress);for(long i=1;i<=count;++i){auto span=bounds(get(collectionItem(collection.Get(),i).Get(),L"Range").Get());
+        if(!wcscmp(name,L"ContentControls")){span.start=std::max(limits.start,span.start-1);span.end=std::min(limits.end,span.end+1);}protectedRanges.push_back(span);progress.advance();}}
+    auto fields=get(root,L"Fields");const long fieldCount=integer(fields.Get(),L"Count");StageProgress fieldProgress("EXP_FIELDS",static_cast<size_t>(fieldCount),scanOptions.progress);for(long i=1;i<=fieldCount;++i){auto field=collectionItem(fields.Get(),i);if(integer(field.Get(),L"Type")!=58)protectedRanges.push_back(fieldBounds(field.Get()));fieldProgress.advance();}
     excluded=protectedRanges;
-    auto maths=get(root,L"OMaths");const long mathCount=integer(maths.Get(),L"Count");for(long i=1;i<=mathCount;++i){auto math=collectionItem(maths.Get(),i);auto range=get(math.Get(),L"Range");const auto span=bounds(range.Get());excluded.push_back(span);
-        if(reverse||!scanOptions.convertOmml||!locationSelected(region,range.Get(),options)||intersects(span,protectedRanges))continue;
+    auto maths=get(root,L"OMaths");const long mathCount=integer(maths.Get(),L"Count");StageProgress mathProgress("EXP_OMML",static_cast<size_t>(mathCount),scanOptions.progress);for(long i=1;i<=mathCount;++i){auto math=collectionItem(maths.Get(),i);auto range=get(math.Get(),L"Range");const auto span=bounds(range.Get());excluded.push_back(span);
+        if(reverse||!scanOptions.convertOmml||!locationSelected(region,range.Get(),options)||intersects(span,protectedRanges)){mathProgress.advance();continue;}
         ScanItem item;item.span=span;item.position.sourceStart=span.start;item.source=text(range.Get(),L"Text");item.display=integer(math.Get(),L"Type")==0;item.ready=true;
         if(selectedEquation(item.display,scanOptions.scope))targets.push_back({std::move(item),L"OMML"});
+        mathProgress.advance();
     }
-    auto shapes=get(root,L"InlineShapes");const long shapeCount=integer(shapes.Get(),L"Count");for(long i=1;i<=shapeCount;++i){auto shape=collectionItem(shapes.Get(),i);auto range=get(shape.Get(),L"Range");const auto span=bounds(range.Get());excluded.push_back(span);
-        if(!reverse||!locationSelected(region,range.Get(),options)||intersects(span,protectedRanges))continue;
-        const auto type=integer(shape.Get(),L"Type");if(type!=1&&type!=2)continue;const auto cls=text(get(shape.Get(),L"OLEFormat").Get(),L"ClassType");if(cls.find(L"Equation.DSMT")!=0)continue;
-        ScanItem item;item.span=span;item.position.sourceStart=span.start;item.source=text(range.Get(),L"Text");item.ready=type==1&&cls==L"Equation.DSMT4";
-        if(item.ready){try{item.display=!inspectStyle(nativePayload(rangeNativeAsset(range.Get()).equation)).inlineEquation;}
+    auto shapes=get(root,L"InlineShapes");const long shapeCount=integer(shapes.Get(),L"Count");StageProgress shapeProgress("EXP_OBJECTS",static_cast<size_t>(shapeCount),scanOptions.progress);for(const auto& shape:enumerateCollection(shapes.Get(),shapeCount)){auto range=get(shape.Get(),L"Range");const auto span=bounds(range.Get());excluded.push_back(span);
+        if(!reverse||!locationSelected(region,range.Get(),options)||intersects(span,protectedRanges)){shapeProgress.advance();continue;}
+        const auto type=integer(shape.Get(),L"Type");if(type!=1&&type!=2){shapeProgress.advance();continue;}const auto cls=text(get(shape.Get(),L"OLEFormat").Get(),L"ClassType");if(cls.find(L"Equation.DSMT")!=0){shapeProgress.advance();continue;}
+        ScanItem item;item.span=span;item.position.sourceStart=span.start;item.source=text(range.Get(),L"Text");item.ready=type==1&&cls==L"Equation.DSMT4";NativeAsset asset;
+        if(item.ready){try{asset=rangeNativeAsset(range.Get());item.display=!inspectStyle(nativePayload(asset.equation)).inlineEquation;}
             catch(const std::exception&){item.ready=false;item.reason=L"UNREADABLE_MATHTYPE_NATIVE";}}
         else item.reason=L"UNSUPPORTED_MATHTYPE_CLASS";
-        if(!item.ready||selectedEquation(item.display,scanOptions.scope))targets.push_back({std::move(item),L"MATH_TYPE"});
+        if(!item.ready||selectedEquation(item.display,scanOptions.scope)){
+            targets.push_back({std::move(item),L"MATH_TYPE"});
+            // 只为快速转换保留当前扫描的资产，原位置扫描和标准模式仍即时读取。
+            if(cacheNative&&targets.back().item.ready)targets.back().asset=std::move(asset);
+        }
+        shapeProgress.advance();
     }
     if(reverse)return targets;
     // 注释引用和单元格末尾作为边界，LaTeX 识别复用正文词法器。
     if(region.main)for(const auto* name:{L"Footnotes",L"Endnotes"}){auto notes=get(document,name);const long count=integer(notes.Get(),L"Count");for(long i=1;i<=count;++i)excluded.push_back(bounds(get(collectionItem(notes.Get(),i).Get(),L"Reference").Get()));}
     auto paragraphs=get(root,L"Paragraphs");const long paragraphCount=integer(paragraphs.Get(),L"Count");
+    StageProgress paragraphBoundsProgress("EXP_PARAGRAPH_BOUNDS",static_cast<size_t>(paragraphCount),scanOptions.progress);
     for(long i=1;i<=paragraphCount;++i){auto range=get(collectionItem(paragraphs.Get(),i).Get(),L"Range");auto span=bounds(range.Get());
         if(!locationSelected(region,range.Get(),options))excluded.push_back(span);
         if(inTable(region,span.start)&&locationSelected(region,range.Get(),options)){auto cells=get(range.Get(),L"Cells");
             // Word 的行末段落仍报告在表格内，但不属于任何单元格。
-            if(!integer(cells.Get(),L"Count")){excluded.push_back(span);continue;}
+            if(!integer(cells.Get(),L"Count")){excluded.push_back(span);paragraphBoundsProgress.advance();continue;}
             auto cell=get(collectionItem(cells.Get(),1).Get(),L"Range");const long end=integer(cell.Get(),L"End");excluded.push_back({end-1,end});}
+        paragraphBoundsProgress.advance();
     }
     std::sort(excluded.begin(),excluded.end(),[](Span a,Span b){return a.start<b.start;});std::vector<Span> blocks;
     for(auto span:excluded){span.start=std::max(span.start,limits.start);span.end=std::min(span.end,limits.end);if(span.end<=span.start)continue;if(!blocks.empty()&&span.start<=blocks.back().end)blocks.back().end=std::max(blocks.back().end,span.end);else blocks.push_back(span);}
     ScanResult scan;long consumed=limits.start;ScanRangeContext context{document,root,false,scanOptions};
+    StageProgress paragraphProgress("EXP_TEXT",static_cast<size_t>(paragraphCount),scanOptions.progress);
     for(long i=1;i<=paragraphCount;++i){taskPulse();auto range=get(collectionItem(paragraphs.Get(),i).Get(),L"Range");auto span=bounds(range.Get());span.start=std::max({span.start,limits.start,consumed});span.end=std::min(span.end,limits.end);
-        if(span.end<=span.start||!locationSelected(region,range.Get(),options))continue;const auto paragraphText=text(range.Get(),L"Text");if(!hasTexMarkers(paragraphText))continue;
+        if(span.end<=span.start||!locationSelected(region,range.Get(),options)){paragraphProgress.advance();continue;}const auto paragraphText=text(range.Get(),L"Text");if(!hasTexMarkers(paragraphText)){paragraphProgress.advance();continue;}
         while(span.end>span.start){const auto last=text(sliceRange(root,span.end-1,span.end).Get(),L"Text");if(last.empty()||!std::all_of(last.begin(),last.end(),[](wchar_t c){return c==L'\r'||c==L'\a';}))break;--span.end;}
         long cursor=span.start,boundary=limits.end;
         for(const auto block:blocks){if(block.end<=cursor)continue;if(block.start>span.end){boundary=block.start;break;}if(block.start>cursor)consumed=std::max(consumed,scanSegment(context,{cursor,std::min(block.start,span.end)},i,scan,block.start,paragraphText));cursor=std::max(cursor,block.end);}
         if(cursor<span.end)consumed=std::max(consumed,scanSegment(context,{cursor,span.end},i,scan,boundary,paragraphText));
+        paragraphProgress.advance();
     }
+    StageProgress candidateProgress("EXP_CANDIDATES",scan.items.size(),scanOptions.progress);
     for(auto& item:scan.items){
         // 实验替换只包含定界符与公式本身，保留段首段尾的空白和制表符。
         if(item.ready){const auto markers=tokens(context,item.span,item.source);require(markers.size()>=2,"Experimental formula delimiters");item.span={markers.front().span.start,markers.back().span.end};item.source=text(sliceRange(root,item.span.start,item.span.end).Get(),L"Text");}
         targets.push_back({std::move(item),L"LATEX"});
+        candidateProgress.advance();
     }
     return targets;
 }
-void readRegionTables(Region& region) {
+void readRegionTables(Region& region,bool reportProgress=false) {
     auto tables=get(region.range.Get(),L"Tables");const long count=integer(tables.Get(),L"Count");
-    for(long i=1;i<=count;++i)region.tables.push_back(bounds(get(collectionItem(tables.Get(),i).Get(),L"Range").Get()));
+    StageProgress progress("EXP_REGION_TABLES",static_cast<size_t>(count),reportProgress);
+    for(long i=1;i<=count;++i){region.tables.push_back(bounds(get(collectionItem(tables.Get(),i).Get(),L"Range").Get()));progress.advance();}
 }
 SourcePosition regionSourcePosition(IDispatch* document,const Region& region,bool paginated) {
     SourcePosition result;result.location=L"原文页码未知 · "+region.label;
@@ -224,39 +246,44 @@ std::vector<std::vector<unsigned char>> confirmedBodyNative(IDispatch* document)
     auto shapes=get(get(document,L"Content").Get(),L"InlineShapes");
     return assets.size()==static_cast<size_t>(integer(shapes.Get(),L"Count"))?assets:std::vector<std::vector<unsigned char>>();
 }
-std::vector<std::vector<unsigned char>> regionNativeFromShapes(IDispatch* root) {
+std::vector<std::vector<unsigned char>> regionNativeFromShapes(IDispatch* root,bool reportProgress=false) {
     std::vector<std::vector<unsigned char>> native;auto shapes=get(root,L"InlineShapes");
     const long count=integer(shapes.Get(),L"Count");
-    for(long i=1;i<=count;++i){auto shape=collectionItem(shapes.Get(),i);if(integer(shape.Get(),L"Type")!=1)continue;if(text(get(shape.Get(),L"OLEFormat").Get(),L"ClassType").find(L"Equation.DSMT")!=0)continue;native.push_back(nativePayload(rangeNativeAsset(get(shape.Get(),L"Range").Get()).equation));}
+    StageProgress progress("EXP_NATIVE_SNAPSHOT",static_cast<size_t>(count),reportProgress);
+    for(const auto& shape:enumerateCollection(shapes.Get(),count)){if(integer(shape.Get(),L"Type")!=1){progress.advance();continue;}if(text(get(shape.Get(),L"OLEFormat").Get(),L"ClassType").find(L"Equation.DSMT")!=0){progress.advance();continue;}native.push_back(nativePayload(rangeNativeAsset(get(shape.Get(),L"Range").Get()).equation));progress.advance();}
     return native;
 }
-Snapshot snapshotWithState(const Region& region,const DocumentState& state,std::vector<std::vector<unsigned char>> native) {
+Snapshot snapshotWithState(const Region& region,const DocumentState& state,std::vector<std::vector<unsigned char>> native,bool reportProgress=false) {
     Snapshot result;result.key=region.key;result.body=text(region.range.Get(),L"Text");result.layout=state.layout;result.maths=state.maths;
     // 批量读取为空时逐范围兜底；正常任务不会重复导出正文样式包。
-    if(native.empty())native=regionNativeFromShapes(region.range.Get());
+    if(native.empty())native=regionNativeFromShapes(region.range.Get(),reportProgress);
     result.native=std::move(native);
-    auto fields=get(region.range.Get(),L"Fields");const long count=integer(fields.Get(),L"Count");for(long i=1;i<=count;++i){auto field=collectionItem(fields.Get(),i);if(integer(field.Get(),L"Type")==58)continue;result.fields.push_back(text(get(field.Get(),L"Code").Get(),L"Text")+L"\x1f"+text(get(field.Get(),L"Result").Get(),L"Text"));}
+    auto fields=get(region.range.Get(),L"Fields");const long count=integer(fields.Get(),L"Count");StageProgress progress("EXP_FIELDS_SNAPSHOT",static_cast<size_t>(count),reportProgress);for(long i=1;i<=count;++i){auto field=collectionItem(fields.Get(),i);if(integer(field.Get(),L"Type")==58){progress.advance();continue;}result.fields.push_back(text(get(field.Get(),L"Code").Get(),L"Text")+L"\x1f"+text(get(field.Get(),L"Result").Get(),L"Text"));progress.advance();}
     return result;
 }
-Snapshot snapshot(const Region& region,std::vector<std::vector<unsigned char>> native,ConversionTimings& timings) {return snapshotWithState(region,documentState(region.range.Get(),timings),std::move(native));}
+Snapshot snapshot(const Region& region,std::vector<std::vector<unsigned char>> native,ConversionTimings& timings,bool reportProgress=false) {if(reportProgress)std::puts("UI_PHASE EXP_LAYOUT_SNAPSHOT");return snapshotWithState(region,documentState(region.range.Get(),timings),std::move(native),reportProgress);}
 }
 ExperimentalSourceLocations captureExperimentalSourceLocations(IDispatch* document,const std::wstring& path,
     const ExperimentalOptions& options,bool reverse,const ScanOptions& scanOptions,bool paginated) {
     ExperimentalSourceLocations result;if(!options.enabled())return result;
     try{
-        const auto headers=options.headers?storedHeaders(path):std::vector<HeaderSlot>();auto regions=collectRegions(document,options,headers);
+        const auto headers=options.headers?storedHeaders(path,scanOptions.progress):std::vector<HeaderSlot>();auto regions=collectRegions(document,options,headers,scanOptions.progress);
+        StageProgress regionProgress("EXP_SOURCE_REGIONS",regions.size()-1,scanOptions.progress);
         for(auto& region:regions){taskPulse();require(!taskCancelled(),"TASK_CANCELLED");if(region.main)continue;
             ExperimentalSourceRegion original;original.key=region.key;original.position=regionSourcePosition(document,region,paginated);
             try{
-                readRegionTables(region);auto targets=scanRegion(document,region,options,reverse,scanOptions);
+                readRegionTables(region,scanOptions.progress);auto targets=scanRegion(document,region,options,reverse,scanOptions);
                 std::sort(targets.begin(),targets.end(),[](const Target& a,const Target& b){return a.item.span.start>b.item.span.start;});
                 const long start=integer(region.range.Get(),L"Start");
+                StageProgress itemProgress("EXP_SOURCE_ITEMS",targets.size(),scanOptions.progress);
                 for(const auto& target:targets){taskPulse();require(!taskCancelled(),"TASK_CANCELLED");auto position=original.position;
                     if(region.key.rfind(L"body:table:",0)==0)position=originalSourcePosition(document,target.item.position.sourceStart,region.label,paginated);
                     position.sourceStart=target.item.position.sourceStart;original.items.push_back({position.sourceStart-start,target.kind,std::move(position)});
+                    itemProgress.advance();
                 }
             }catch(const std::exception& error){require(!taskCancelled()&&std::string(error.what())!="TASK_CANCELLED","TASK_CANCELLED");original.items.clear();}
             result.push_back(std::move(original));
+            regionProgress.advance();
         }
     }catch(const std::exception& error){require(!taskCancelled()&&std::string(error.what())!="TASK_CANCELLED","TASK_CANCELLED");}
     return result;
@@ -292,19 +319,20 @@ std::string ExperimentalResult::json(bool fast) const {
 
 bool experimentalTargetsPresent(IDispatch* document,const std::wstring& path,const ExperimentalOptions& options,bool reverse,const ScanOptions& scanOptions) {
     // Exists 会漏掉已保存但当前未显示的首页/偶数页页眉；预检必须与正式转换使用同一清单。
-    const auto headers=options.headers?storedHeaders(path):std::vector<HeaderSlot>();
-    const auto regions=collectRegions(document,options,headers);
-    for(const auto& region:regions){if(region.main)continue;try{if(regionHasCandidate(region,reverse,scanOptions))return true;}catch(const std::exception&){return true;}}
+    const auto headers=options.headers?storedHeaders(path,scanOptions.progress):std::vector<HeaderSlot>();
+    const auto regions=collectRegions(document,options,headers,scanOptions.progress);
+    StageProgress progress("EXP_PRESENCE",regions.size()-1,scanOptions.progress);
+    for(const auto& region:regions){if(region.main)continue;try{if(regionHasCandidate(region,reverse,scanOptions)){progress.advance();return true;}}catch(const std::exception&){progress.advance();return true;}progress.advance();}
     return false;
 }
 
 static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const std::wstring& path,const ExperimentalOptions& options,bool reverse,bool dollar,size_t firstId,bool selfTest,const std::set<std::wstring>& skipped,std::unique_ptr<ConversionCheckpoint>& checkpoint,const PackageState& bodyPackage,const ScanOptions& scanOptions,ConversionTimings& timings,const ExperimentalSourceLocations& sourceLocations) {
     const bool fast=scanOptions.fast;
     ExperimentalResult result;result.options=options;result.enabled=true;
-    const auto headers=options.headers?storedHeaders(path):std::vector<HeaderSlot>();
+    const auto headers=options.headers?storedHeaders(path,scanOptions.progress):std::vector<HeaderSlot>();
     auto documents=get(word.application.Get(),L"Documents");
-    if(!fast){word.document=asObject(invoke(documents.Get(),L"Open",DISPATCH_METHOD,{path.c_str(),false,false,false,Value(),Value(),false,Value(),Value(),Value(),Value(),false}));word.verifyOwnership();}
-    std::vector<Region> regions;try{regions=collectRegions(word.document.Get(),options,headers);}
+    if(!fast){if(scanOptions.progress)std::puts("UI_PHASE EXP_OPENING");word.document=asObject(invoke(documents.Get(),L"Open",DISPATCH_METHOD,{path.c_str(),false,false,false,Value(),Value(),false,Value(),Value(),Value(),Value(),false}));word.verifyOwnership();}
+    std::vector<Region> regions;try{regions=collectRegions(word.document.Get(),options,headers,scanOptions.progress);}
     catch(const std::exception& error){throw RegionError(L"*",L"实验区",L"ENUMERATING",error);}
     ComPtr<IXSLTemplate> stylesheet;std::string defaults;bool connected=false;std::vector<Binding> bindings;
     std::map<std::wstring,std::vector<ExperimentalItem>> plans;
@@ -325,6 +353,7 @@ static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const s
     auto prepare=[&](){
         if(prepared)return;
         if(fast){prepared=true;return;}
+        if(scanOptions.progress)std::puts("UI_PHASE EXP_LAYOUT_SNAPSHOT");
         try{
             auto body=regions.front().range.Get();const long end=integer(body,L"End");long cursor=integer(body,L"Start");std::wstring before;
             bodyLayout=layoutSnapshot(body,timings);bodyOriginalText=text(body,L"Text");
@@ -338,6 +367,8 @@ static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const s
         prepared=true;
     };
     std::puts("TIMING_STAGE EXPERIMENTAL_SCAN_CONVERT");
+    const auto regionCount=static_cast<size_t>(std::count_if(regions.begin(),regions.end(),[&](const Region& region){return !region.main&&!skipped.count(region.key);}));
+    StageProgress regionProgress("EXP_REGIONS",regionCount,scanOptions.progress);
     for(auto& region:regions){
         if(region.main||skipped.count(region.key))continue;
         activeRegion.clear();activeItem=nullptr;
@@ -345,26 +376,29 @@ static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const s
         DocumentState committedState;bool stateReady=false;
         try{
         // 同一脚注故事里的前一区域会移动后续坐标，扫描前再读取本区域的表格边界。
-        readRegionTables(region);
+        readRegionTables(region,scanOptions.progress);
         std::printf("EXPERIMENTAL_REGION %s\n",utf8(region.key).c_str());require(!regionFault(region.key,L"SCAN"),"Injected experimental region scan failure");
-        targets=scanRegion(word.document.Get(),region,options,reverse,scanOptions);std::sort(targets.begin(),targets.end(),[](const Target& a,const Target& b){return a.item.span.start>b.item.span.start;});
+        targets=scanRegion(word.document.Get(),region,options,reverse,scanOptions,fast);std::sort(targets.begin(),targets.end(),[](const Target& a,const Target& b){return a.item.span.start>b.item.span.start;});
         attachSourceLocations(region,targets,sourceLocations);
         for(const auto& target:targets)plans[region.key].push_back({0,region.label,target.kind,target.item.source,target.item.ready?L"NOT_ATTEMPTED":L"REJECTED_PRESERVED",target.item.ready?L"REGION_SKIPPED":target.item.reason,target.item.position});
         long last=integer(region.range.Get(),L"End");for(const auto& target:targets){require(target.item.span.end<=last,"Non-overlapping experimental targets");last=target.item.span.start;}
-        for(const auto& target:targets){taskPulse();require(!taskCancelled(),"TASK_CANCELLED");const auto& item=target.item;
+        StageProgress formulaProgress("EXP_FORMULAS",targets.size(),scanOptions.progress);
+        for(auto& target:targets){taskPulse();require(!taskCancelled(),"TASK_CANCELLED");const auto& item=target.item;
             activeRegion=region.key;activeItem=&item;
             stage=L"CONVERTING";const auto label=inTable(region,item.span.start)&&region.key.rfind(L"body:table:",0)!=0?region.label+L"·表格":region.label;
             ExperimentalItem report{firstId++,label,target.kind,item.source,item.ready?L"NOT_ATTEMPTED":L"REJECTED_PRESERVED",item.reason,item.position};
-            if(!item.ready){std::printf("UI_EXPERIMENTAL_REJECTED %zu %s %s %s %s\n",report.id,wireHex(utf8(label)).c_str(),wireHex(utf8(item.source)).c_str(),wireHex(utf8(item.reason)).c_str(),wireHex(utf8(item.position.location)).c_str());++result.rejected;result.items.push_back(std::move(report));continue;}
+            if(!item.ready){std::printf("UI_EXPERIMENTAL_REJECTED %zu %s %s %s %s\n",report.id,wireHex(utf8(label)).c_str(),wireHex(utf8(item.source)).c_str(),wireHex(utf8(item.reason)).c_str(),wireHex(utf8(item.position.location)).c_str());++result.rejected;result.items.push_back(std::move(report));formulaProgress.advance();continue;}
             if(!prepared)prepare();
             if(!converting){std::puts("UI_EXPERIMENTAL_PHASE CONVERTING");converting=true;}
             std::printf("UI_EXPERIMENTAL_ITEM %zu %s %s %s\n",report.id,wireHex(utf8(region.label)).c_str(),diagnosticExcerpt(item.source).c_str(),wireHex(utf8(item.position.location)).c_str());
+            if(scanOptions.progress)std::printf("UI_STAGE_PROGRESS EXP_FORMULAS %zu %zu\n",formulaProgress.completed,formulaProgress.total);
+            if(scanOptions.progress)std::puts("UI_PHASE FORMULA_SOURCE");
             auto root=region.range.Get();auto range=sliceRange(root,item.span.start,item.span.end);if(!fast)require(text(range.Get(),L"Text")==item.source,"Experimental source rechecked");
             const auto beforeText=fast?std::wstring():text(root,L"Text");std::wstring sourcePackage,beforeXml;
             if(target.kind==L"OMML"||!fast){
                 ScopedConversionTiming timing(timings,ConversionMetric::SourceXml);
-                if(target.kind==L"OMML")sourcePackage=text(range.Get(),L"WordOpenXML");
-                if(!fast)beforeXml=target.kind==L"OMML"?sourceSignature(sourcePackage,true):sourceSignature(range.Get(),true);
+                if(target.kind==L"OMML"||reverse)sourcePackage=text(range.Get(),L"WordOpenXML");
+                if(!fast)beforeXml=(target.kind==L"OMML"||reverse)?sourceSignature(sourcePackage,true):sourceSignature(range.Get(),true);
             }
             // 区域内只复用已完整核验并提交的状态；失败恢复不推进基线，区域重跑会重新建立。
             if(!fast&&!stateReady){committedState=documentState(root,timings);stateReady=true;}
@@ -372,20 +406,23 @@ static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const s
             const auto prefix=fast?std::wstring():text(sliceRange(root,integer(root,L"Start"),item.span.start).Get(),L"Text"),suffix=fast?std::wstring():text(sliceRange(root,item.span.end,rootEnd).Get(),L"Text");
             auto undo=get(word.application.Get(),L"UndoRecord");bool record=false,active=false,wrote=false;ComPtr<IDispatch> activeObject;NativeAsset removed;std::vector<unsigned char> native;std::wstring output,input;DocumentState currentState;
             try{
-                if(!connected){if(!api.initialized){require(api.init(0,10)>0,"Initialize experimental MathType");api.initialized=true;taskMathTypeConnected();}if(!fast)defaults=readDefaultPrefs(api);connected=true;}
-                if(reverse){removed=rangeNativeAsset(range.Get());output=exportedInner(exportNativeTex(api,nativePayload(removed.equation)),item.display,fast);output=(item.display?(dollar?L"$$":L"\\["):L"$")+output+(item.display?(dollar?L"$$":L"\\]"):L"$");}
-                else input=prepareInput(word,target,sourcePackage,stylesheet,fast,timings);
+                if(!connected){if(!api.initialized){if(scanOptions.progress)std::puts("UI_PHASE CONNECTING_MATHTYPE");require(api.init(0,10)>0,"Initialize experimental MathType");api.initialized=true;taskMathTypeConnected();}if(!fast)defaults=readDefaultPrefs(api);connected=true;}
+                if(reverse){if(scanOptions.progress)std::puts("UI_PHASE FORMULA_EXPORTING");removed=fast?std::move(target.asset):rangeNativeAsset(sourcePackage);output=exportedInner(exportNativeTex(api,nativePayload(removed.equation)),item.display,fast);output=(item.display?(dollar?L"$$":L"\\["):L"$")+output+(item.display?(dollar?L"$$":L"\\]"):L"$");}
+                else{if(scanOptions.progress)std::puts("UI_PHASE FORMULA_PREPARING");input=prepareInput(word,target,sourcePackage,stylesheet,fast,timings);}
                 // 首次真正写入前建立检查点；无目标或仅有拒绝项时不复制整份文件。
-                if(!fast&&!checkpoint)checkpoint=std::make_unique<ConversionCheckpoint>(path,L".experimental-checkpoint");
+                if(!fast&&!checkpoint){if(scanOptions.progress)std::puts("UI_PHASE FORMULA_CHECKPOINT");checkpoint=std::make_unique<ConversionCheckpoint>(path,L".experimental-checkpoint");}
                 invoke(word.document.Get(),L"Activate",DISPATCH_METHOD);invoke(undo.Get(),L"StartCustomRecord",DISPATCH_METHOD,{L"实验性公式替换"});record=true;
                 wrote=true;
-                if(reverse)invoke(range.Get(),L"Text",DISPATCH_PROPERTYPUT,{output.c_str()});
+                if(reverse){if(scanOptions.progress)std::puts("UI_PHASE FORMULA_REPLACING");invoke(range.Get(),L"Text",DISPATCH_PROPERTYPUT,{output.c_str()});}
                 else{
                     invoke(range.Get(),L"Text",DISPATCH_PROPERTYPUT,{L""});invoke(range.Get(),L"Collapse",DISPATCH_METHOD,{1L});
+                    if(scanOptions.progress)std::puts("UI_PHASE FORMULA_INSERTING");
                     auto shape=insertBlankEquation(word.document.Get(),range.Get(),api.install,root,fast);auto ole=get(shape.Get(),L"OLEFormat");invoke(ole.Get(),L"DoVerb",DISPATCH_METHOD,{2L});activeObject=get(ole.Get(),L"Object");active=true;
                     const auto empty=fast?std::vector<unsigned char>():readNative(api,activeObject.Get());if(!fast)emptyNative.insert(empty);
+                    if(scanOptions.progress)std::puts("UI_PHASE FORMULA_IMPORTING");
                     {ScopedConversionTiming timing(timings,target.kind==L"OMML"?ConversionMetric::MathmlImport:ConversionMetric::TexImport);require(api.write(activeObject.Get(),target.kind==L"OMML"?2:1,input.c_str(),static_cast<long>(input.size()))==0,"Experimental equation import");}
-                    if(!fast){native=readNative(api,activeObject.Get());require(native!=empty&&native.size()>empty.size(),"Experimental equation contains native data");}
+                    if(!fast){if(scanOptions.progress)std::puts("UI_PHASE FORMULA_VERIFYING");native=readNative(api,activeObject.Get());require(native!=empty&&native.size()>empty.size(),"Experimental equation contains native data");}
+                    if(scanOptions.progress)std::puts("UI_PHASE FORMULA_CLOSING");
                     require(api.close(OLECLOSE_NOSAVE,activeObject.Get())==0,"Close experimental converted equation");active=false;
                 }
                 taskTestBoundary(L"EXPERIMENTAL_REPLACED");
@@ -393,10 +430,13 @@ static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const s
                 require(!regionFault(region.key,L"RECOVERY"),"Injected experimental region recovery failure");
                 // 开发自检在真实替换后注入失败，核对 Undo 能完整恢复公式与容器属性。
                 require(!(selfTest&&item.inner==L"experimental_rollback"),"Injected experimental replacement failure");
-                const long end=item.span.end+integer(root,L"End")-rootEnd;auto replacement=sliceRange(root,item.span.start,end);
-                if(!reverse){auto shapes=get(replacement.Get(),L"InlineShapes");if(!fast)require(integer(shapes.Get(),L"Count")==1,"One experimental object inserted");auto objectRange=get(collectionItem(shapes.Get(),1).Get(),L"Range");output=text(objectRange.Get(),L"Text");if(!fast)require(text(replacement.Get(),L"Text")==output&&nativePayload(rangeNativeAsset(objectRange.Get()).equation)==native,"Experimental native data bound to target");}
-                // 含控件的表格在整段和切片中返回不同的结束标记，前后片段须分别核对。
+                long end{};
                 if(!fast){
+                end=item.span.end+integer(root,L"End")-rootEnd;auto replacement=sliceRange(root,item.span.start,end);
+                if(!reverse){auto shapes=get(replacement.Get(),L"InlineShapes");require(integer(shapes.Get(),L"Count")==1,"One experimental object inserted");auto objectRange=get(collectionItem(shapes.Get(),1).Get(),L"Range");output=text(objectRange.Get(),L"Text");require(text(replacement.Get(),L"Text")==output&&nativePayload(rangeNativeAsset(objectRange.Get()).equation)==native,"Experimental native data bound to target");}
+                // 含控件的表格在整段和切片中返回不同的结束标记，前后片段须分别核对。
+                if(scanOptions.progress)std::puts("UI_PHASE FORMULA_VERIFYING");
+                if(scanOptions.progress)std::puts("UI_PHASE FORMULA_VERIFYING");
                 const long currentEnd=integer(root,L"End");currentState=documentState(root,timings);const auto& currentLayout=currentState.layout;
                 const bool textPreserved=text(sliceRange(root,integer(root,L"Start"),item.span.start).Get(),L"Text")==prefix&&
                     text(sliceRange(root,end,currentEnd).Get(),L"Text")==suffix&&text(replacement.Get(),L"Text")==output;
@@ -414,7 +454,7 @@ static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const s
                 }
                 report.status=L"SUCCEEDED";++result.succeeded;modified=true;
                 if(!fast)committedState=std::move(currentState);
-            }catch(const std::exception& error){ScopedConversionTiming recoveryTiming(timings,ConversionMetric::ExperimentalRecovery);std::printf("EXPERIMENTAL_ITEM_FAILURE %s\n",error.what());if(active)require(api.close(OLECLOSE_NOSAVE,activeObject.Get())==0,"Close failed experimental equation");if(record)invoke(undo.Get(),L"EndCustomRecord",DISPATCH_METHOD);
+            }catch(const std::exception& error){if(scanOptions.progress)std::puts("UI_PHASE FORMULA_RECOVERING");ScopedConversionTiming recoveryTiming(timings,ConversionMetric::ExperimentalRecovery);std::printf("EXPERIMENTAL_ITEM_FAILURE %s\n",error.what());if(active)require(api.close(OLECLOSE_NOSAVE,activeObject.Get())==0,"Close failed experimental equation");if(record)invoke(undo.Get(),L"EndCustomRecord",DISPATCH_METHOD);
                 if(fast?wrote:(text(root,L"Text")!=beforeText||sourceSignature(sliceRange(root,item.span.start,item.span.end).Get(),true)!=beforeXml)){
                     if(target.kind==L"OMML"){
                         auto replacement=sliceRange(root,item.span.start,item.span.end+integer(root,L"End")-rootEnd);invoke(replacement.Get(),L"InsertXML",DISPATCH_METHOD,{sourcePackage.c_str()});
@@ -430,13 +470,16 @@ static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const s
                 report.status=fast?L"FAILED_UNVERIFIED":L"FAILED_PRESERVED";result.failedUnverified+=fast;const std::string reason=error.what();report.reason=std::wstring(reason.begin(),reason.end());++result.failed;
             }
             std::printf("UI_ITEM_RESULT %zu %s %s\n",report.id,report.status==L"SUCCEEDED"?"SUCCEEDED":fast?"FAILED_UNVERIFIED":"FAILED_PRESERVED",wireHex(utf8(report.reason)).c_str());result.items.push_back(std::move(report));
+            formulaProgress.advance();
         }
-        }catch(const std::exception& error){require(!taskCancelled(),"TASK_CANCELLED");if(fast){result.issues.push_back(failure(region.key,stage,error).issue);emitProcessingIssue(result.issues.back());continue;}if(connected)require(readDefaultPrefs(api)==defaults,"Experimental conversion preserves global MathType preferences");throw failure(region.key,stage,error);}
+        regionProgress.advance();
+        }catch(const std::exception& error){require(!taskCancelled(),"TASK_CANCELLED");if(fast){result.issues.push_back(failure(region.key,stage,error).issue);emitProcessingIssue(result.issues.back());regionProgress.advance();continue;}if(connected)require(readDefaultPrefs(api)==defaults,"Experimental conversion preserves global MathType preferences");throw failure(region.key,stage,error);}
     }
-    if(connected&&!fast)require(readDefaultPrefs(api)==defaults,"Experimental conversion preserves global MathType preferences");
+    if(connected&&!fast){if(scanOptions.progress)std::puts("UI_PHASE VERIFY_PREFERENCES");require(readDefaultPrefs(api)==defaults,"Experimental conversion preserves global MathType preferences");}
     if(fast){if(plans.empty())result.skipped=L"NO_TARGETS";else if(!modified)result.skipped=L"NO_CHANGES";return result;}
     // 没有实验目标：不保存、不重开，直接复用正文阶段已保存并核验的副本。
     if(plans.empty()){
+        if(scanOptions.progress)std::puts("UI_PHASE EXP_CLOSING");
         invoke(word.document.Get(),L"Close",DISPATCH_METHOD,{0L});word.document.Reset();
         // 重做轮次里全部区域都已被跳过时仍要保留先前的区域问题，不把它伪装成“无目标”。
         if(skipped.empty()){std::puts("EXPERIMENTAL_NO_TARGETS");std::puts("UI_EXPERIMENTAL_SKIPPED NO_TARGETS");result.skipped=L"NO_TARGETS";}
@@ -444,17 +487,21 @@ static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const s
     }
     // 有目标但没有任何成功替换：逐式恢复已经核对，这里再确认整段正文没有被全局改动，然后跳过保存重开。
     if(!modified){
+        if(scanOptions.progress)std::puts("UI_PHASE EXP_VERIFYING_BODY");
         try{require(!prepared||(text(regions.front().range.Get(),L"Text")==bodyOriginalText&&layoutSnapshot(regions.front().range.Get(),timings)==bodyLayout),"Experimental attempts preserve body text and layout");}
         catch(const std::exception& error){throw failure(L"body",L"VERIFYING",error);}
         std::puts("EXPERIMENTAL_NO_CHANGES");std::puts("UI_EXPERIMENTAL_SKIPPED NO_CHANGES");
+        if(scanOptions.progress)std::puts("UI_PHASE EXP_CLOSING");
         invoke(word.document.Get(),L"Close",DISPATCH_METHOD,{0L});word.document.Reset();result.skipped=L"NO_CHANGES";return result;
     }
     std::puts("UI_EXPERIMENTAL_PHASE VERIFYING");
     std::puts("TIMING_STAGE EXPERIMENTAL_VERIFY");
+    if(scanOptions.progress)std::puts("UI_PHASE EXP_VERIFYING_BODY");
     try{std::wstring expectedBody;for(size_t i=0;i<bodyTables.size();++i)expectedBody+=bodyGaps[i]+text(regions[bodyTables[i]].range.Get(),L"Text");expectedBody+=bodyGaps.back();
         const auto body=regions.front().range.Get();const auto bodyState=documentState(body,timings);
         require(text(body,L"Text")==expectedBody&&bodyState.layout==bodyLayout,"Experimental conversion preserves all surrounding body text and layout");
         // 先逐式核对预期内容，避免后续对象写入或区域操作串改已经成功的公式。
+        StageProgress bindingProgress("EXP_BINDINGS",bindings.size(),scanOptions.progress);
         for(const auto& binding:bindings){taskPulse();try{const long start=integer(binding.owner.Get(),L"Start");auto range=sliceRange(binding.owner.Get(),start+binding.span.start,start+binding.span.end);
             require(text(range.Get(),L"Text")==binding.output,"Experimental output stays at its bound source position");if(!binding.native.empty())require(nativePayload(rangeNativeAsset(range.Get()).equation)==binding.native,"Experimental native data stays bound to its own source formula");
             if(!reverse){const auto& report=result.items[binding.itemIndex];LayoutWarning context{report.id,report.region,L"",report.source,report.position};
@@ -465,14 +512,21 @@ static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const s
                     std::printf("LAYOUT_CHECK_FAILED ID=%zu %s\n",report.id,error.what());context.code=L"LAYOUT_CHECK_UNAVAILABLE";result.warnings.push_back(std::move(context));}
             }
             }
-            catch(const std::exception& error){throw failure(binding.key,L"VERIFYING",error);}}
+            catch(const std::exception& error){throw failure(binding.key,L"VERIFYING",error);}bindingProgress.advance();}
         // 所有修改完成后固定各区域快照，保存重开时逐区域核对对象顺序和完整内容。
+        if(scanOptions.progress)std::puts("UI_PHASE EXP_BODY_NATIVE");
         std::vector<Snapshot> expected;expected.reserve(regions.size());auto bodyAssets=confirmedBodyNative(word.document.Get());
-        for(const auto& region:regions){try{expected.push_back(region.main?snapshotWithState(region,bodyState,std::move(bodyAssets)):snapshot(region,{},timings));}
-            catch(const std::exception& error){throw failure(region.key,L"VERIFYING",error);}}
-        require(!taskCancelled(),"TASK_CANCELLED");invoke(word.document.Get(),L"Save",DISPATCH_METHOD);invoke(word.document.Get(),L"Close",DISPATCH_METHOD,{0L});word.document.Reset();
+        StageProgress snapshotProgress("EXP_SNAPSHOTS",regions.size(),scanOptions.progress);
+        for(const auto& region:regions){try{expected.push_back(region.main?snapshotWithState(region,bodyState,std::move(bodyAssets),scanOptions.progress):snapshot(region,{},timings,scanOptions.progress));}
+            catch(const std::exception& error){throw failure(region.key,L"VERIFYING",error);}snapshotProgress.advance();}
+        require(!taskCancelled(),"TASK_CANCELLED");
+        if(scanOptions.progress)std::puts("UI_PHASE EXP_SAVING");
+        invoke(word.document.Get(),L"Save",DISPATCH_METHOD);
+        if(scanOptions.progress)std::puts("UI_PHASE EXP_CLOSING");
+        invoke(word.document.Get(),L"Close",DISPATCH_METHOD,{0L});word.document.Reset();
+        if(scanOptions.progress)std::puts("UI_PHASE EXP_REOPENING");
         word.document=asObject(invoke(documents.Get(),L"Open",DISPATCH_METHOD,{path.c_str(),false,true,false,Value(),Value(),false,Value(),Value(),Value(),Value(),false}));
-        std::vector<Region> reopened;try{reopened=collectRegions(word.document.Get(),options,headers);}
+        std::vector<Region> reopened;try{reopened=collectRegions(word.document.Get(),options,headers,scanOptions.progress);}
         catch(const std::exception& error){throw failure(L"*",L"REOPENING",error);}
         if(reopened.size()!=expected.size()){
             std::printf("REGION_IDENTITY_COUNT expected=%zu reopened=%zu\n",expected.size(),reopened.size());
@@ -480,18 +534,22 @@ static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const s
             for(const auto& region:reopened)std::printf("REGION_IDENTITY_REOPENED %s\n",utf8(region.key).c_str());
         }
         if(reopened.size()!=expected.size())throw failure(L"*",L"REOPENING",std::runtime_error("Experimental region identities preserved"));
+        if(scanOptions.progress)std::puts("UI_PHASE EXP_BODY_NATIVE");
         auto reopenedBodyAssets=confirmedBodyNative(word.document.Get());
+        StageProgress verifyProgress("EXP_VERIFY_REGIONS",expected.size(),scanOptions.progress);
         for(const auto& before:expected){taskPulse();try{
             auto found=std::find_if(reopened.begin(),reopened.end(),[&](const Region& region){return region.key==before.key;});require(found!=reopened.end(),"Experimental region identity exists after save");
-            const auto actual=found->main?snapshotWithState(*found,documentState(found->range.Get(),timings),std::move(reopenedBodyAssets)):snapshot(*found,{},timings);
+            if(scanOptions.progress)std::puts("UI_PHASE EXP_LAYOUT_SNAPSHOT");
+            const auto actual=found->main?snapshotWithState(*found,documentState(found->range.Get(),timings),std::move(reopenedBodyAssets),scanOptions.progress):snapshot(*found,{},timings,scanOptions.progress);
             require(skipped.count(before.key)||!regionFault(before.key,L"VERIFY"),"Injected experimental saved verification failure");
             std::printf("EXPERIMENTAL_VERIFY %s key=%d text=%d layout=%d omml=%d fields=%d native=%d\n",utf8(before.key).c_str(),actual.key==before.key,actual.body==before.body,actual.layout==before.layout,actual.maths==before.maths,actual.fields==before.fields,actual.native==before.native);
             require(actual.key==before.key&&actual.body==before.body&&actual.layout==before.layout&&actual.maths==before.maths&&actual.fields==before.fields&&actual.native==before.native,"Saved experimental text, layout, fields, OMML and ordered native contents verified");
             const auto table=bodyTableEnds.find(before.key);
             if(table!=bodyTableEnds.end())result.bodyPositionShifts.push_back({table->second,integer(found->range.Get(),L"End")-table->second});}
-            catch(const std::exception& error){throw failure(before.key,L"VERIFYING",error);}}
+            catch(const std::exception& error){throw failure(before.key,L"VERIFYING",error);}verifyProgress.advance();}
         // 逐区域有序原生流已覆盖逻辑对象；这里只核对整包资产都必须来自原对象、新导入或空模板。
-        try{const auto saved=inspectPackage(path);requireContains(saved.equations,retained.equations,"Experimental retained native streams unchanged");requireContains(saved.media,retained.media,"Experimental retained media unchanged");requireContains(saved.otherEmbeddings,retained.otherEmbeddings,"Experimental unconverted embedded packages unchanged");
+        if(scanOptions.progress)std::puts("UI_PHASE EXP_PACKAGE_VERIFY");
+        try{const auto saved=inspectPackage(path,"EXP_SAVED_PARTS",false,scanOptions.progress);if(scanOptions.progress)std::puts("UI_PHASE EXP_PACKAGE_VERIFY");requireContains(saved.equations,retained.equations,"Experimental retained native streams unchanged");requireContains(saved.media,retained.media,"Experimental retained media unchanged");requireContains(saved.otherEmbeddings,retained.otherEmbeddings,"Experimental unconverted embedded packages unchanged");
         std::set<std::vector<unsigned char>> expectedNative,actualNative,allowed=emptyNative;
         for(const auto& value:retained.equations)expectedNative.insert(nativePayload(value));expectedNative.insert(added.begin(),added.end());
         allowed.insert(expectedNative.begin(),expectedNative.end());if(reverse)for(const auto& value:bodyPackage.equations)allowed.insert(nativePayload(value));
@@ -499,7 +557,8 @@ static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const s
         for(const auto& value:expectedNative)require(actualNative.count(value)!=0,"Expected experimental native data exists in saved package");
         }catch(const std::exception& error){throw failure(L"*",L"PACKAGE_VERIFY",error);}
     }catch(const std::exception&){if(word.document){invoke(word.document.Get(),L"Close",DISPATCH_METHOD,{0L});word.document.Reset();}throw;}
-    if(selfTest)invoke(word.document.Get(),L"ExportAsFixedFormat",DISPATCH_METHOD,{(path+L".pdf").c_str(),17L});
+    if(selfTest){if(scanOptions.progress)std::puts("UI_PHASE EXPORTING_PREVIEW");invoke(word.document.Get(),L"ExportAsFixedFormat",DISPATCH_METHOD,{(path+L".pdf").c_str(),17L});}
+    if(scanOptions.progress)std::puts("UI_PHASE EXP_CLOSING");
     invoke(word.document.Get(),L"Close",DISPATCH_METHOD,{0L});word.document.Reset();
     std::puts("EXPERIMENTAL_CONVERSION_VERIFIED");return result;
 }
@@ -520,6 +579,7 @@ ExperimentalResult convertExperimental(WordSession& word,MathTypeApi& api,const 
         }catch(const RegionError& error){
             require(!taskCancelled(),"TASK_CANCELLED");
             emitProcessingIssue(error.issue);
+            if(scanOptions.progress)std::puts("UI_PHASE EXP_RECOVERING");
             // 局部恢复失败后不再信任当前文档；先丢弃全部本轮实验修改，再从正文检查点重做其余区域。
             if(word.document){invoke(word.document.Get(),L"Close",DISPATCH_METHOD,{0L});word.document.Reset();}
             // 扫描阶段失败时还没有建立检查点，候选文件仍是已核验的正文副本，无需恢复。

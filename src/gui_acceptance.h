@@ -21,7 +21,7 @@ struct GuiAcceptance {
     bool batch{},initialReverse{};
     int step{};
     size_t refreshes{},backgroundPaints{};
-    bool scanProgress{},savedProgress{},reopenMarquee{},parameterPaint{};
+    bool scanProgress{},savedProgress{},reopenMarquee{},parameterPaint{},stageElapsed{},formulaProgress{};
     bool active() const {return !directory.empty();}
     bool interactive() const {return active()&&!batch&&mode!=L"preview";}
 
@@ -30,7 +30,7 @@ struct GuiAcceptance {
             inputs.push_back(absolutePath(argv[2]));directory=absolutePath(argv[3]);mode=argv[4];
             initialReverse=mode.rfind(L"reverse-",0)==0;
             if(mode==L"reverse-bracket"){initialReverse=false;step=-1;}
-            require(mode==L"normal"||mode==L"stop"||mode==L"reverse-bracket"||mode==L"reverse-dollar"||mode==L"reverse-stop"||mode==L"preview","Known GUI test mode");
+            require(mode==L"normal"||mode==L"fast"||mode==L"ultra"||mode==L"stop"||mode==L"reverse-bracket"||mode==L"reverse-dollar"||mode==L"reverse-stop"||mode==L"preview","Known GUI test mode");
         }else if(argc>=5&&std::wstring(argv[1])==L"--ui-batch-test"){
             batch=true;directory=absolutePath(argv[2]);mode=L"batch-"+std::wstring(argv[3]);initialReverse=std::wstring(argv[3])==L"reverse";
             for(int i=4;i<argc;++i)inputs.push_back(absolutePath(argv[i]));
@@ -43,9 +43,14 @@ struct GuiAcceptance {
     void painted(HDC destination) {if(!destination&&active())++backgroundPaints;}
     bool updated(const WorkerUpdate& update,HWND window,bool marquee,size_t batchPosition,size_t completed) {
         if(!active())return false;
+        if(window&&!update.label.empty()){
+            const auto elapsed=windowText(GetDlgItem(window,Elapsed));
+            require(elapsed.find(L"本步 ")!=std::wstring::npos&&elapsed.find(L"总计 ")!=std::wstring::npos,"Active stage and batch elapsed times are visible");stageElapsed=true;
+        }
         if(update.reopening)reopenMarquee=marquee&&(GetWindowLongPtrW(GetDlgItem(window,Progress),GWL_STYLE)&PBS_MARQUEE)!=0;
         if(update.scanning&&update.current)scanProgress=true;if(update.saved&&update.current)savedProgress=true;
-        return update.event==WorkerEvent::ConversionProgress&&(mode==L"stop"||mode==L"reverse-stop"||(batch&&mode==L"batch-stop"&&batchPosition==1))&&completed==1;
+        if(update.current&&update.total&&update.label.find(L"正在转换公式")!=std::wstring::npos)formulaProgress=true;
+        return (update.event==WorkerEvent::ConversionProgress||update.event==WorkerEvent::ConversionCount)&&(mode==L"stop"||mode==L"reverse-stop"||(batch&&mode==L"batch-stop"&&batchPosition==1))&&completed==1;
     }
     void trace(const std::string& value) const {
         if(!active())return;
@@ -143,10 +148,22 @@ struct GuiAcceptance {
                 CheckRadioButton(window,Bracket,Dollar,dollar?Dollar:Bracket);set(SizeBox,L"NaN");refresh();require(IsWindowEnabled(control(Start)),"Ignore reverse hidden size settings");}
             set(SizeBox,L"18");set(NameBox,L":");refresh();require(!IsWindowEnabled(control(Start)),"Reject invalid output suffix");
             set(NameBox,L"_"+mode);refresh();require(IsWindowEnabled(control(Start)),"Enable without pre-scan");
+            // 真实滑块检查三档、键盘以及极速边界，结束后恢复本次验收档位。
+            if(!reverseMode){
+                require(SendMessageW(control(FastConversion),TBM_GETRANGEMIN,0,0)==0&&SendMessageW(control(FastConversion),TBM_GETRANGEMAX,0,0)==2,"Three discrete conversion modes");
+                const auto scope=SendMessageW(control(ModeBox),CB_GETCURSEL,0,0),follow=SendMessageW(control(FollowSize),CB_GETCURSEL,0,0);
+                SendMessageW(control(FastConversion),WM_KEYDOWN,VK_END,0);SendMessageW(control(FastConversion),WM_KEYUP,VK_END,0);
+                require(SendMessageW(control(FastConversion),TBM_GETPOS,0,0)==2&&!IsWindowEnabled(control(Advanced))&&!IsWindowEnabled(control(ModeBox))&&SendMessageW(control(ModeBox),CB_GETCURSEL,0,0)==0&&SendMessageW(control(FollowSize),CB_GETCURSEL,0,0)==1,"Ultra mode uses all body formulas and fixed size");
+                SendMessageW(control(FastConversion),WM_KEYDOWN,VK_HOME,0);SendMessageW(control(FastConversion),WM_KEYUP,VK_HOME,0);
+                require(IsWindowEnabled(control(Advanced))&&SendMessageW(control(ModeBox),CB_GETCURSEL,0,0)==scope&&SendMessageW(control(FollowSize),CB_GETCURSEL,0,0)==follow,"Leaving ultra restores normal options");
+            }
+            if(mode==L"fast"||mode==L"ultra"){SendMessageW(control(FastConversion),TBM_SETPOS,TRUE,mode==L"ultra"?2:1);SendMessageW(window,WM_HSCROLL,TB_THUMBPOSITION,reinterpret_cast<LPARAM>(control(FastConversion)));}
             saveNew(directory+L"\\gui-ready.json","{\"NoPreScan\":true}\n");step=1;SetTimer(window,2,1500,nullptr);return;
         }
         require(run.summary&&(run.outcome==L"COMPLETE"||run.outcome==L"PARTIAL"),"GUI outcome");
-        require(scanProgress&&savedProgress&&reopenMarquee&&!progressMarquee,"Scan and saved verification counters with marquee Word reopen");
+        require((mode==L"ultra"?formulaProgress:scanProgress)&&stageElapsed&&!progressMarquee&&
+            (mode==L"fast"||mode==L"ultra"?(!savedProgress&&!reopenMarquee):(savedProgress&&reopenMarquee)),"Three conversion modes show their actual stages and elapsed times");
+        require(run.mode==(mode==L"ultra"?ConversionMode::Ultra:mode==L"fast"?ConversionMode::Fast:ConversionMode::Standard),"Completed worker retains selected conversion mode");
         refresh();RECT client{};GetClientRect(window,&client);
         for(int id:{OpenOutput,OpenFolder,OpenReport})if(GetWindowLongPtrW(control(id),GWL_STYLE)&WS_VISIBLE){
             RECT bounds{};GetWindowRect(control(id),&bounds);MapWindowPoints(nullptr,window,reinterpret_cast<POINT*>(&bounds),2);
@@ -160,7 +177,7 @@ struct GuiAcceptance {
         }
         std::string json="{\"Status\":\"PASSED\",\"MathTypeDirectory\":"+quote(install)+",\"Input\":"+quote(input)+",\"Output\":"+quote(output)+",\"Report\":"+quote(directory+L"\\report.json")+
             ",\"Outcome\":"+quote(run.outcome)+(reverseMode?",\"Direction\":\"REVERSE\",\"DisplayDelimiter\":"+quote(mode==L"reverse-dollar"?L"dollar":L"bracket"):",\"DefaultFont\":true,\"RequestedSizePt\":18")+
-            ",\"ControlValidation\":true,\"ScanProgress\":true,\"SavedProgress\":true,\"ReopenMarquee\":true,\"SizeArrows\":"+(reverseMode?std::string("false"):std::string("true"))+",\"ParameterRepaint\":"+(parameterPaint?std::string("true"):std::string("false"))+",\"KeyboardTabNavigation\":true,\"Layout\":true,\"NoPreScan\":true,\"Succeeded\":"+std::to_string(run.succeeded)+",\"FailedPreserved\":"+std::to_string(run.failed)+",\"NotAttempted\":"+std::to_string(run.unattempted)+"}\n";
+            ",\"ControlValidation\":true,\"ScanProgress\":"+(scanProgress?std::string("true"):std::string("false"))+",\"SavedProgress\":"+(savedProgress?std::string("true"):std::string("false"))+",\"ReopenMarquee\":"+(reopenMarquee?std::string("true"):std::string("false"))+",\"StageElapsed\":"+(stageElapsed?std::string("true"):std::string("false"))+",\"SizeArrows\":"+(reverseMode?std::string("false"):std::string("true"))+",\"ParameterRepaint\":"+(parameterPaint?std::string("true"):std::string("false"))+",\"KeyboardTabNavigation\":true,\"Layout\":true,\"NoPreScan\":true,\"Succeeded\":"+std::to_string(run.succeeded)+",\"FailedPreserved\":"+std::to_string(run.failed)+",\"NotAttempted\":"+std::to_string(run.unattempted)+"}\n";
         saveNew(directory+L"\\gui-check.json",json);step=2;SetTimer(window,3,1500,nullptr);
     }
 

@@ -5,12 +5,12 @@
 #include <cstddef>
 #include <cstdio>
 
-enum class ConversionMetric {SourceXml,OmmlSnapshot,XslCompile,XmlPrepare,XslTransform,MathmlAdapt,TexImport,MathmlImport,SourceLocations,ExperimentalRegionState,ExperimentalRecovery,Count};
+enum class ConversionMetric {SourceXml,OmmlSnapshot,XslCompile,XmlPrepare,XslTransform,MathmlAdapt,TexImport,MathmlImport,SourceLocations,ExperimentalRegionState,ExperimentalRecovery,TemplateInsert,ObjectActivate,StyleWrite,NumberCreate,NumberUpdate,NumberResult,ComResolve,PackageRead,PackageWrite,OleStore,PreviewExport,OleCreate,OleLoad,OleClose,OmmlTexPrepare,Count};
 struct ConversionTimings {
     struct Sample {std::chrono::nanoseconds elapsed{};size_t count{};};
     std::array<Sample,static_cast<size_t>(ConversionMetric::Count)> samples{};
     void report() const {
-        constexpr const char* names[]{"SOURCE_XML","OMML_SNAPSHOT","XSL_COMPILE","XML_PREPARE","XSL_TRANSFORM","MATHML_ADAPT","TEX_IMPORT","MATHML_IMPORT","SOURCE_LOCATIONS","EXPERIMENTAL_REGION_STATE","EXPERIMENTAL_RECOVERY"};
+        constexpr const char* names[]{"SOURCE_XML","OMML_SNAPSHOT","XSL_COMPILE","XML_PREPARE","XSL_TRANSFORM","MATHML_ADAPT","TEX_IMPORT","MATHML_IMPORT","SOURCE_LOCATIONS","EXPERIMENTAL_REGION_STATE","EXPERIMENTAL_RECOVERY","TEMPLATE_INSERT","OBJECT_ACTIVATE","STYLE_WRITE","NUMBER_CREATE","NUMBER_UPDATE","NUMBER_RESULT","COM_RESOLVE","PACKAGE_READ","PACKAGE_WRITE","OLE_STORE","PREVIEW_EXPORT","OLE_CREATE","OLE_LOAD","OLE_CLOSE","OMML_TEX_PREPARE"};
         static_assert(sizeof(names)/sizeof(*names)==static_cast<size_t>(ConversionMetric::Count),"Every timing stage has a name");
         for(size_t i=0;i<samples.size();++i)if(samples[i].count)
             std::printf("TIMING_DETAIL %s COUNT=%zu MS=%.3f\n",names[i],samples[i].count,std::chrono::duration<double,std::milli>(samples[i].elapsed).count());

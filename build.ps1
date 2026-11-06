@@ -1,6 +1,6 @@
 #requires -Version 7.0
 # 原生 C++ 构建：工具链来自系统安装，源码与生成物全部位于当前项目。
-param([ValidateSet('All','Native','Scan','Convert','Gui')][string]$Target='All')
+param([ValidateSet('All','Native','Scan','Convert','Gui','Prototype')][string]$Target='All')
 $ErrorActionPreference='Stop'
 $projectRoot=$PSScriptRoot
 $bin=Join-Path $projectRoot 'build/bin'
@@ -27,15 +27,17 @@ try{
         if($LASTEXITCODE -ne 0){throw '图标资源编译失败。'}
     }
     $programs=@(
+        @{Target='Prototype';Source=@('src/ultra_equation_worker.cpp','src/ultra_conversion.cpp','src/omml_adapter.cpp');Name='ultra-equation-worker';Info='ultra-build-info.json'},
         @{Target='Native';Source=@('tests/native/native_api_probe.cpp','src/omml_adapter.cpp');Name='native-api-probe';Info='build-info.json'},
         @{Target='Native';Source=@('tests/native/test_worker_client.cpp','src/worker_client.cpp');Name='worker-client-tests';Info='worker-test-build-info.json'},
         @{Target='Scan';Source=@('src/scan_docx.cpp');Name='docx-math-scan';Info='scan-build-info.json'},
-        @{Target='Convert';Source=@('src/convert_docx.cpp','src/body_conversion.cpp','src/experimental_conversion.cpp','src/omml_adapter.cpp');Name='docx-math-convert';Info='convert-build-info.json'},
-        @{Target='Gui';Source=@('src/gui.cpp','src/worker_client.cpp','src/convert_docx.cpp','src/body_conversion.cpp','src/experimental_conversion.cpp','src/omml_adapter.cpp');Name='DocxMathTypeBatch';Info='gui-build-info.json'}
+        @{Target='Convert';Source=@('src/convert_docx.cpp','src/body_conversion.cpp','src/experimental_conversion.cpp','src/ultra_conversion.cpp','src/omml_adapter.cpp');Name='docx-math-convert';Info='convert-build-info.json'},
+        @{Target='Gui';Source=@('src/gui.cpp','src/worker_client.cpp','src/convert_docx.cpp','src/body_conversion.cpp','src/experimental_conversion.cpp','src/ultra_conversion.cpp','src/omml_adapter.cpp');Name='DocxMathTypeBatch';Info='gui-build-info.json'}
     )
     foreach($program in ($programs|Where-Object {$Target -eq 'All' -or $_.Target -eq $Target})){
         $exe=Join-Path $bin ($program.Name+'.exe')
         $extra=@();$links=@();$sources=@($program.Source|ForEach-Object {Join-Path $projectRoot $_})
+        if($program.Target -in @('Prototype','Convert')){$links=@('gdi32.lib')}
         if($program.Target -eq 'Gui'){
             $extra=@('/DDOCX_MATH_GUI');$sources+=$resource
             $links=@('/SUBSYSTEM:WINDOWS','/MANIFEST:EMBED','comctl32.lib','comdlg32.lib','shell32.lib','gdi32.lib','gdiplus.lib','d2d1.lib','dwrite.lib','advapi32.lib','uxtheme.lib','uuid.lib')

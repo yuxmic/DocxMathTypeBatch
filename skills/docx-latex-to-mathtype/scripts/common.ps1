@@ -6,7 +6,7 @@ function Throw-ConverterError([string]$Code,[string]$Message) {
 }
 
 function Write-ConverterJson($Value) {
-    $Value['SkillVersion']='0.2.1'
+    $Value['SkillVersion']='0.2.2'
     $Value|ConvertTo-Json -Depth 8 -Compress|Write-Output
 }
 

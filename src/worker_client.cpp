@@ -58,6 +58,11 @@ static std::wstring reasonText(const std::wstring& reason) {
     if (reason == L"LINKED_MATHTYPE_PRESERVED") return L"链接型 MathType 对象暂不导出";
     if (reason == L"UNSUPPORTED_MATHTYPE_CLASS") return L"当前不支持此 MathType 对象类型，原对象保留";
     if (reason == L"NO_TARGET_FORMULAS") return L"未找到需要转换的公式，请检查定界符及公式模式";
+    if (reason == L"ULTRA_UNSUPPORTED_SETTINGS") return L"当前设置不适用于极速模式：支持所有正文 LaTeX 与 OMML、指定字号和默认右编号";
+    if (reason == L"ULTRA_EXISTING_NUMBERS") return L"文档已有 MathType 编号，极速模式不能重复添加编号";
+    if (reason == L"ULTRA_SINGLE_SECTION_REQUIRED") return L"文档包含多个节，极速模式暂不支持为它添加右编号";
+    if (reason == L"ULTRA_SINGLE_COLUMN_REQUIRED") return L"文档采用多栏排版，极速模式暂不支持为它添加右编号";
+    if (reason == L"ULTRA_PAGE_SIZE_REQUIRED") return L"文档缺少页宽或页边距，无法为极速转换设置右编号位置";
     if (reason == L"TASK_TIMEOUT") return L"Word 或 MathType 接口长时间未返回，任务已自动终止";
     if (reason == L"GUI_COMMIT_TIMEOUT") return L"主界面未及时确认输出，任务未完成交付";
     if (reason == L"MATHTYPE_SERVICE_DISCONNECTED") return L"MathType 服务已失联，转换任务已终止";
@@ -109,6 +114,7 @@ std::wstring problemReason(const std::wstring& reason) {
     return translated;
 }
 std::wstring problemAdvice(const std::wstring& reason) {
+    if(reason.rfind(L"ULTRA_",0)==0)return L"切换为标准或快速模式保留现有设置；若只需转换正文公式，也可关闭右编号后使用极速模式。";
     if(reason==L"EMPTY")return L"补上公式内容，或删除空的公式定界符。";
     if(reason==L"UNBALANCED_BRACES")return L"检查并补齐成对的 { }，再重新转换。";
     if(reason==L"UNBALANCED_ENVIRONMENTS")return L"将每个 begin 与同名 end 配对，并检查嵌套顺序。";
@@ -133,15 +139,16 @@ void WorkerState::addProblem(WorkerProblem problem,const std::wstring& detail) {
     problems.push_back(std::move(problem));if(!detail.empty())failures.push_back(detail);
 }
 
-void WorkerState::reset(bool fastConversion) {
-    *this={};fast=fastConversion;busy=true;lastStage=L"启动后台任务";
+void WorkerState::reset(ConversionMode conversionMode) {
+    *this={};mode=conversionMode;busy=true;lastStage=L"启动后台任务";
 }
 
 WorkerUpdate WorkerState::read(const std::string& value) {
     std::istringstream stream(value);std::string kind;stream>>kind;
     if(kind=="UI_CANCELLED"){outcome=L"CANCELLED";summary=false;error.clear();workerFailed=false;return {};}
     if(kind=="UI_COMMIT_READY")return {cancelling?WorkerEvent::None:WorkerEvent::CommitReady};
-    if(cancelling&&kind!="UI_ERROR")return {};
+    // 停止后继续展示后台释放与清理，结果统计和交付确认仍不得恢复。
+    if(cancelling&&kind!="UI_ERROR"&&kind!="UI_PHASE"&&kind!="UI_STAGE_PROGRESS")return {};
     if(kind=="UI_LAYOUT_CHECKED"){
         int checked{};require(static_cast<bool>(stream>>checked)&&(checked==0||checked==1),"Layout check result");layoutChecked=checked!=0;return {};
     }
@@ -151,11 +158,12 @@ WorkerUpdate WorkerState::read(const std::string& value) {
         warnings.push_back({index,fromUtf8(code),unhex(region),unhex(location),unhex(source),unhex(message)});return {};
     }
     if(kind=="UI_BODY_RESET"){
-        failures.clear();problems.clear();warnings.clear();layoutChecked=false;currentProblem={};interrupted={};currentFormula.clear();targets=inlines=completed=succeeded=failed=unattempted=rejected=0;scanned=false;experimentalStarted=experimentalConverting=false;experimentalDone=0;
-        lastStage=L"已从原件重建副本，正在跳过失败公式并继续转换";return {WorkerEvent::Status,lastStage};
+        failures.clear();problems.clear();warnings.clear();layoutChecked=false;currentProblem={};interrupted={};currentFormula.clear();targets=inlines=completed=succeeded=failed=unattempted=rejected=0;scanned=false;processingFormulas=experimentalStarted=experimentalConverting=false;experimentalDone=0;
+        progressStage="BODY_RECOVERING";lastStage=L"已从原件重建副本，正在跳过失败公式并继续转换";return {WorkerEvent::Status,lastStage};
     }
     if(kind=="UI_EXPERIMENTAL_PHASE"){
         std::string phase;require(static_cast<bool>(stream>>phase),"Experimental phase record");
+        progressStage="EXPERIMENTAL_"+phase;processingFormulas=false;
         if(!experimentalStarted){experimentalStarted=true;experimentalSucceeded=succeeded;experimentalFailed=failed;experimentalFailures=failures.size();experimentalProblems=problems.size();experimentalWarnings=warnings.size();experimentalLayoutChecked=layoutChecked;}
         if(phase=="PREPARING"){experimentalConverting=false;lastStage=L"正在准备实验区域";}
         else if(phase=="CONVERTING"){experimentalConverting=true;experimentalDone=0;lastStage=L"正在转换实验区域公式";}
@@ -165,18 +173,18 @@ WorkerUpdate WorkerState::read(const std::string& value) {
     }
     if(kind=="UI_EXPERIMENTAL_SKIPPED"){
         std::string reason;require(static_cast<bool>(stream>>reason),"Experimental skip reason");
-        experimentalConverting=false;experimentalDone=0;currentFormula.clear();currentProblem={};lastStage=reason=="NO_TARGETS"?L"实验区域没有待转换公式":L"实验区域没有实际改动";
+        progressStage="EXPERIMENTAL_SKIPPED";experimentalConverting=false;experimentalDone=0;currentFormula.clear();currentProblem={};lastStage=reason=="NO_TARGETS"?L"实验区域没有待转换公式":L"实验区域没有实际改动";
         return {WorkerEvent::BatchStatus,lastStage};
     }
     if(kind=="UI_EXPERIMENTAL_RESET"){
         require(experimentalStarted,"Experimental retry follows phase start");succeeded=experimentalSucceeded;failed=experimentalFailed;failures.resize(experimentalFailures);problems.resize(experimentalProblems);warnings.resize(experimentalWarnings);layoutChecked=experimentalLayoutChecked;currentProblem={};currentFormula.clear();experimentalConverting=false;experimentalDone=0;
-        lastStage=L"已保留正文结果，正在跳过失败区域并继续转换";return {WorkerEvent::Status,lastStage};
+        progressStage="EXPERIMENTAL_RECOVERING";lastStage=L"已保留正文结果，正在跳过失败区域并继续转换";return {WorkerEvent::Status,lastStage};
     }
     if(kind=="UI_PROCESSING_ISSUE"){
         std::string region,stage,reason,location;require(static_cast<bool>(stream>>region>>stage>>reason>>location),"Processing issue record");const auto step=unhex(stage);
         std::string source;stream>>source;
-        const auto detail=fast?L"快速模式下发生错误，当前输出未经核验。":step==L"NUMBERING"?L"本次编号及引用修改已撤回，公式转换结果保留。":step==L"FORMATTING"?L"本段排版未更新，原公式及段落格式保留。":L"该区域未转换，原内容保留。";
-        addProblem({0,unhex(region),unhex(location),unhex(source),unhex(reason),fast?L"FAILED_UNVERIFIED":L"PROCESSING_ISSUE",step},unhex(location)+L"\r\n"+unhex(region)+L"\r\n"+failureText(unhex(reason))+L"\r\n"+detail);return {};
+        const auto detail=step==L"SCANNING"?L"该式未转换，原文保留。":unverifiedMode(mode)?L"转换过程中发生错误，当前输出未经核验。":step==L"NUMBERING"?L"本次编号及引用修改已撤回，公式转换结果保留。":step==L"FORMATTING"?L"本段排版未更新，原公式及段落格式保留。":L"该区域未转换，原内容保留。";
+        addProblem({0,unhex(region),unhex(location),unhex(source),unhex(reason),step==L"SCANNING"?L"REJECTED_PRESERVED":unverifiedMode(mode)?L"FAILED_UNVERIFIED":L"PROCESSING_ISSUE",step},unhex(location)+L"\r\n"+unhex(region)+L"\r\n"+failureText(unhex(reason))+L"\r\n"+detail);return {};
     }
     if(kind=="UI_EXPERIMENTAL_ITEM"||kind=="UI_EXPERIMENTAL_REJECTED"){
         size_t index{};std::string region,source,reason,location;require(static_cast<bool>(stream>>index>>region>>source),"Experimental diagnostic context");
@@ -210,17 +218,59 @@ WorkerUpdate WorkerState::read(const std::string& value) {
         require(static_cast<bool>(stream>>existing>>targets>>inlines>>rejected)&&inlines<=targets,"Scan counters");scanned=true;return {WorkerEvent::ScanCounts};
     }
     if(kind=="UI_PHASE"){
-        std::string phase;stream>>phase;currentFormula.clear();currentProblem={};
+        std::string phase;require(static_cast<bool>(stream>>phase),"Worker phase record");progressStage=phase;
+        const bool formulaStep=phase.rfind("FORMULA_",0)==0;
+        if(!formulaStep)processingFormulas=false;
         const wchar_t* label=phase=="PREPARING"?L"正在检查输入文档…":phase=="OPENING"?L"正在加载文档…":phase=="SCANNING"?L"正在识别文档公式…":
             phase=="SCANNING_OBJECTS"?L"正在识别已有 MathType…":phase=="SOURCE_LOCATIONS"?L"正在记录原文公式位置…":phase=="INITIALIZING"?L"正在准备公式样式…":phase=="CONVERTING"?L"正在转换公式…":
+            phase=="SNAPSHOT_STRUCTURE"?L"正在记录文档结构…":phase=="SNAPSHOT_OMML"?L"正在记录原生公式内容…":phase=="SNAPSHOT_BODY"?L"正在记录正文内容…":phase=="SNAPSHOT_OBJECTS"?L"正在记录已有公式内容…":
+            phase=="NUMBERING"?L"正在准备公式编号…":phase=="NUMBER_CHECKPOINT"?L"正在保存编号前恢复点…":
             phase=="VERIFYING"?L"正在核对公式、残留原文和文档结构…":phase=="SAVING"?L"正在保存副本…":phase=="REOPENING"?L"正在重新打开并核验新公式…":
             phase=="RESCANNING"?L"正在检查保存后的正文…":phase=="RESCANNING_OBJECTS"?L"正在检查保存后的公式对象…":phase=="CLOSING"?L"正在关闭检查文档…":
-            phase=="PACKAGE_VERIFY"?L"正在检查输出文件…":phase=="PACKAGE_COMPARE"?L"正在核对原文件及公式数据…":L"正在完成输出…";
-        lastStage=fromUtf8(phase)+L" · "+label;
-        return {WorkerEvent::Phase,label,0,targets,phase!="CONVERTING"||!targets,false,false,phase=="REOPENING"};
+            phase=="CLOSING_WORK_COPY"?L"正在关闭工作副本…":phase=="EXITING_WORD"?L"正在结束 Word 会话…":
+            phase=="PACKAGE_VERIFY"?L"正在检查输出文件…":phase=="PACKAGE_COMPARE"?L"正在核对原文件及公式数据…":
+            phase=="PACKAGE_READ"?L"正在读取文档及原生公式…":phase=="PACKAGE_WRITE"?L"正在写入转换文档…":
+            phase=="SOURCE_SNAPSHOT"?L"正在读取原文件内容…":phase=="SOURCE_COMPARE"?L"正在确认原文件未被修改…":phase=="COPYING_FILE"?L"正在复制文档副本…":
+            phase=="LINK_SETTINGS"?L"正在检查文档链接设置…":phase=="RESTORE_LINKS"?L"正在恢复文档链接…":phase=="LINK_SETTINGS_WRITE"?L"正在保存文档链接设置…":
+            phase=="LINK_SETTINGS_SERIALIZE"?L"正在整理文档链接设置…":phase=="PACKAGE_RELEASE"?L"正在释放文档数据包…":
+            phase=="OPENING_PACKAGE"?L"正在打开文档数据包…":phase=="PACKAGE_RELATIONSHIPS"?L"正在读取文档关联数据…":phase=="PACKAGE_ENUMERATION"?L"正在枚举文档部件…":
+            phase=="REPORT_BUILD"?L"正在整理转换报告…":phase=="REPORT_DETAILS"?L"正在整理问题与提醒…":phase=="REPORT_WRITE"?L"正在写入转换报告…":phase=="PUBLISHING"?L"正在交付输出文件…":
+            phase=="PUBLISH_DOCUMENT"?L"正在交付转换文档…":phase=="PUBLISH_REPORT"?L"正在交付转换报告…":phase=="PUBLISH_PREVIEW"?L"正在交付文档预览…":
+            phase=="RESULT_SUMMARY"?L"正在汇总转换结果…":phase=="COM_UNINITIALIZE"?L"正在释放文档接口…":phase=="WORKER_CLEANUP"?L"正在清理工作副本…":
+            phase=="WORD_OPTIONS_RESTORE"?L"正在恢复 Word 设置…":phase=="WORD_COM_RELEASE"?L"正在释放 Word 会话…":
+            phase=="LOAD_MATHTYPE"?L"正在加载 MathType 接口…":phase=="MATHTYPE_INITIALIZE"?L"正在初始化 MathType…":
+            phase=="TERMINATING_MATHTYPE"?L"正在结束 MathType 转换会话…":phase=="RELEASE_MATHTYPE"?L"正在释放 MathType 接口…":
+            phase=="WAITING_WORKER"||phase=="WAIT_WORKER_EXIT"?L"正在等待后台任务退出…":phase=="WAITING_WORD"?L"正在等待 Word 退出…":
+            phase=="GUI_CONFIRM"?L"正在确认输出交付…":phase=="TASK_CLEANUP"?L"正在清理任务临时文件…":phase=="RESTORE_PREFERENCES"?L"正在恢复任务设置…":phase=="RECOVERY_MARKER_CLEANUP"?L"正在清理设置恢复记录…":
+            phase=="VERIFY_BODY"?L"正在核对正文内容…":phase=="VERIFY_COUNTS"?L"正在核对公式和文档数量…":phase=="SAVED_STRUCTURE"?L"正在核对保存后的文档结构…":phase=="SAVED_NATIVE"?L"正在读取保存后的公式内容…":
+            phase=="PAGINATING_SOURCE"?L"正在计算原文页码…":phase=="CONNECTING_MATHTYPE"?L"正在连接 MathType…":phase=="READING_PREFERENCES"?L"正在读取公式样式设置…":phase=="PREPARING_TEMPLATE"?L"正在准备公式模板…":
+            phase=="FINALIZING_FORMULAS"?L"公式转换已完成，正在整理后续处理…":phase=="NUMBER_PREPARING"?L"正在准备公式编号范围…":phase=="NUMBER_RECOVERING"?L"正在恢复编号前的文档…":
+            phase=="VERIFY_PREFERENCES"?L"正在核对公式样式设置…":phase=="EXPORTING_PREVIEW"?L"正在导出文档预览…":phase=="BODY_RECOVERING"?L"正在重建文档副本并恢复原式…":
+            phase=="EXP_HEADER_REFERENCES"?L"正在读取页眉页脚关联…":phase=="EXP_ENUMERATING"?L"正在枚举额外区域…":phase=="EXP_SCANNING"?L"正在识别额外区域公式…":
+            phase=="EXP_BODY_NATIVE"?L"正在记录正文公式内容…":phase=="EXP_LAYOUT_SNAPSHOT"?L"正在记录额外区域版式…":phase=="EXP_OPENING"?L"正在打开额外区域工作副本…":
+            phase=="EXP_CLOSING"?L"正在关闭额外区域检查文档…":phase=="EXP_PACKAGE_VERIFY"?L"正在核对额外区域文档数据…":phase=="EXP_RECOVERING"?L"正在恢复额外区域原文…":
+            phase=="EXP_REOPENING"?L"正在重新打开额外区域文档…":phase=="EXP_SAVING"?L"正在保存额外区域转换结果…":phase=="EXP_VERIFYING_BODY"?L"正在核对额外区域之外的正文…":
+            phase=="SCAN_BOUNDARIES"||phase=="RESCAN_BOUNDARIES"?L"正在读取文档区域边界…":phase=="SCAN_TABLES"||phase=="RESCAN_TABLES"?L"正在读取表格范围…":
+            phase=="SCAN_BOUNDARY_OBJECTS"||phase=="RESCAN_BOUNDARY_OBJECTS"?L"正在读取对象边界…":phase=="SCAN_OMML_BOUNDARIES"||phase=="RESCAN_OMML_BOUNDARIES"?L"正在读取原生公式边界…":
+            phase=="SCAN_REVISIONS"||phase=="RESCAN_REVISIONS"?L"正在检查修订范围…":phase=="SCAN_CONTROLS"||phase=="RESCAN_CONTROLS"?L"正在检查内容控件…":
+            phase=="SCAN_FIELDS"||phase=="RESCAN_FIELDS"?L"正在检查文档域…":phase=="SCAN_FOOTNOTES"||phase=="RESCAN_FOOTNOTES"?L"正在检查脚注…":
+            phase=="SCAN_ENDNOTES"||phase=="RESCAN_ENDNOTES"?L"正在检查尾注…":phase=="SCAN_OMML"||phase=="RESCAN_OMML"?L"正在识别 Word 原生公式…":
+            phase=="SCAN_ORDERING"||phase=="RESCAN_ORDERING"?L"正在整理公式顺序…":phase=="RESCAN_PARAGRAPHS"?L"正在读取保存后的段落信息…":
+            phase=="FORMULA_SOURCE"?L"正在读取当前公式…":phase=="FORMULA_PREPARING"?L"正在准备当前公式样式…":phase=="FORMULA_STYLE"?L"正在应用当前公式样式…":
+            phase=="FORMULA_INSERTING"||phase=="FORMULA_IMPORTING"?L"正在转换当前公式…":
+            phase=="FORMULA_CLOSING"?L"正在关闭当前公式对象…":phase=="FORMULA_LAYOUT"?L"正在调整当前公式排版…":
+            phase=="FORMULA_VERIFYING"?L"正在核对当前公式…":phase=="FORMULA_EXPORTING"?L"正在导出当前公式…":phase=="FORMULA_REPLACING"?L"正在替换当前公式…":phase=="FORMULA_RECOVERING"?L"正在恢复当前公式原文…":phase=="FORMULA_CHECKPOINT"?L"正在保存当前公式恢复点…":nullptr;
+        const auto description=label?std::wstring(label):L"正在执行后台步骤（"+fromUtf8(phase)+L"）…";
+        lastStage=fromUtf8(phase)+L" · "+description;
+        // 单式内部动作保留公式整体进度及错误上下文，由结果记录结束这条公式。
+        if(formulaStep)return {WorkerEvent::Status,formulaConversionStage(phase)?formulaLabel(formulaProgress,formulaTotal):description+(formulaTotal?L"  ·  已完成 "+std::to_wstring(formulaProgress)+L" / "+std::to_wstring(formulaTotal):L"")};
+        if(phase=="CONVERTING"){formulaProgress=0;formulaTotal=targets;}
+        return {WorkerEvent::Phase,phase=="CONVERTING"?formulaLabel(formulaProgress,formulaTotal):description,0,targets,phase!="CONVERTING"||!targets,phase.rfind("SCAN_",0)==0,phase.rfind("RESCAN_",0)==0,phase=="REOPENING"||phase=="EXP_REOPENING"};
     }
     if(kind=="UI_STAGE_PROGRESS"){
         std::string stage;size_t current{},total{};require(static_cast<bool>(stream>>stage>>current>>total)&&total>0&&current<=total&&total<=INT_MAX,"Stage progress record");
+        progressStage=stage;
+        if(stage=="CONVERTING"||stage=="PROCESS_FORMULAS"||stage=="EXP_FORMULAS"){formulaProgress=current;formulaTotal=total;}
         // 新进度阶段属于展示信息，不能把已经成功的转换判成失败。
         const wchar_t *label=L"正在处理文档",*unit=L"项";bool scanning=false,saved=false;
         if(stage=="INPUT_PARTS")label=L"正在检查输入文件";
@@ -229,29 +279,99 @@ WorkerUpdate WorkerState::read(const std::string& value) {
         else if(stage=="SCAN_OBJECTS"||stage=="RESCAN_OBJECTS"){saved=stage=="RESCAN_OBJECTS";scanning=!saved;label=saved?L"正在检查保存后的公式对象":L"正在识别已有公式";unit=L"个对象";}
         else if(stage=="SCAN_RANGES"||stage=="RESCAN_RANGES"){saved=stage=="RESCAN_RANGES";scanning=!saved;label=saved?L"正在核对保留原文":L"正在核对识别范围";}
         else if(stage=="BIND_OBJECTS")label=L"正在核对公式位置";
+        else if(stage=="SOURCE_POSITIONS")label=L"正在记录原文公式位置";
+        else if(stage=="OMML_SNAPSHOT")label=L"正在记录原生公式内容";
+        else if(stage=="BODY_SNAPSHOT"){label=L"正在记录正文内容";unit=L"段";}
+        else if(stage=="CONVERTING"||stage=="PROCESS_FORMULAS"){label=L"正在处理公式";processingFormulas=true;}
         else if(stage=="VERIFY_POSITIONS"){label=L"正在核对保存后的公式位置";saved=true;}
         else if(stage=="VERIFY_ITEMS"){label=L"正在核验转换结果";saved=true;}
         else if(stage=="NUMBER_EQUATIONS")label=L"正在添加公式编号";
-        const auto counts=L" "+std::to_wstring(current)+L" / "+std::to_wstring(total);lastStage=fromUtf8(stage)+L" · "+label+counts;
-        return {WorkerEvent::Progress,std::wstring(label)+counts+L" "+unit,current,total,false,scanning,saved};
+        else if(stage=="NUMBER_UPDATES")label=L"正在更新公式编号";
+        else if(stage=="NUMBER_REFERENCES")label=L"正在更新编号引用";
+        else if(stage=="NUMBER_TEXT")label=L"正在核对编号后的正文";
+        else if(stage=="SOURCE_SNAPSHOT"){label=L"正在读取原文件内容";unit=L"块";}
+        else if(stage=="SOURCE_COMPARE"){label=L"正在确认原文件未被修改";unit=L"块";}
+        else if(stage=="COPY_FILE"){label=L"正在复制文档副本";unit=L"";}
+        else if(stage=="LINK_PARTS"){label=L"正在处理文档链接";unit=L"个部件";}
+        else if(stage=="RESTORE_LINK_PARTS"){label=L"正在恢复文档链接";unit=L"个部件";}
+        else if(stage=="INPUT_STYLES"){label=L"正在读取文档样式";unit=L"个部件";}
+        else if(stage=="REPORT_ITEMS"){label=L"正在整理公式转换报告";unit=L"条公式";}
+        else if(stage=="REPORT_DETAILS")label=L"正在整理问题与提醒";
+        else if(stage=="REPORT_WRITE"){label=L"正在写入转换报告";unit=L"步";}
+        else if(stage=="REPORT_FLUSH"){label=L"正在刷新报告文件";unit=L"步";}
+        else if(stage=="REPORT_CLOSE"){label=L"正在关闭报告文件";unit=L"步";}
+        else if(stage=="PUBLISH_FILES"){label=L"正在交付输出文件";unit=L"个文件";}
+        else if(stage=="PUBLISH_DOCUMENT"){label=L"正在交付转换文档";unit=L"个文件";}
+        else if(stage=="PUBLISH_REPORT"){label=L"正在交付转换报告";unit=L"个文件";}
+        else if(stage=="PUBLISH_PREVIEW"){label=L"正在交付文档预览";unit=L"个文件";}
+        else if(stage=="TASK_CLEANUP"){label=L"正在清理任务临时文件";unit=L"个文件";}
+        else if(stage=="EXP_FORMULAS"){label=L"正在转换额外区域公式";processingFormulas=true;}
+        else if(stage=="TABLE_STRUCTURE"){label=L"正在读取表格结构";unit=L"个表格";}
+        else if(stage=="TABLE_CELLS"){label=L"正在读取表格单元格";unit=L"个单元格";}
+        else if(stage=="NATIVE_READBACK"){label=L"正在回读公式实际内容";unit=L"条公式";}
+        else if(stage=="PACKAGE_NATIVE"){label=L"正在读取公式数据";unit=L"个对象";}
+        else if(stage=="NUMBER_RANGES"){label=L"正在读取编号范围";unit=L"个域";}
+        else if(stage=="NUMBER_REFERENCE_SCAN"){label=L"正在查找编号引用";unit=L"个域";}
+        else if(stage=="FIELD_SNAPSHOT"){label=L"正在记录文档域";unit=L"个域";}
+        else if(stage=="EXP_TEXTBOXES"){label=L"正在查找文本框";unit=L"个对象";}
+        else if(stage=="EXP_HEADER_REFERENCES"){label=L"正在读取页眉页脚关联";unit=L"节";}
+        else if(stage=="EXP_TABLES"||stage=="EXP_REGION_TABLES"){label=L"正在查找额外区域表格";unit=L"个表格";}
+        else if(stage=="EXP_HEADERS"){label=L"正在读取页眉页脚";unit=L"个页眉页脚";}
+        else if(stage=="EXP_NOTES"){label=L"正在读取脚注尾注";unit=L"条注释";}
+        else if(stage=="EXP_BOUNDARIES")label=L"正在读取额外区域边界";
+        else if(stage=="EXP_FIELDS"){label=L"正在检查额外区域文档域";unit=L"个域";}
+        else if(stage=="EXP_OMML"){label=L"正在识别额外区域原生公式";unit=L"条公式";}
+        else if(stage=="EXP_OBJECTS"){label=L"正在识别额外区域公式对象";unit=L"个对象";}
+        else if(stage=="EXP_PARAGRAPH_BOUNDS"){label=L"正在读取额外区域段落范围";unit=L"段";}
+        else if(stage=="EXP_TEXT"){label=L"正在识别额外区域正文";unit=L"段";}
+        else if(stage=="EXP_CANDIDATES"){label=L"正在核对额外区域公式范围";unit=L"条公式";}
+        else if(stage=="EXP_BINDINGS"){label=L"正在定位额外区域公式对象";unit=L"个对象";}
+        else if(stage=="EXP_FIELDS_SNAPSHOT"){label=L"正在记录额外区域文档域";unit=L"个域";}
+        else if(stage=="EXP_NATIVE_SNAPSHOT"){label=L"正在记录额外区域公式内容";unit=L"条公式";}
+        else if(stage=="EXP_PRESENCE"){label=L"正在核对保留的额外区域";unit=L"个区域";}
+        else if(stage=="EXP_REGIONS"){label=L"正在处理额外区域";unit=L"个区域";}
+        else if(stage=="EXP_SNAPSHOTS"){label=L"正在记录额外区域内容";unit=L"个区域";}
+        else if(stage=="EXP_SOURCE_ITEMS"){label=L"正在记录原件额外区域公式";unit=L"条公式";}
+        else if(stage=="EXP_SOURCE_REGIONS"){label=L"正在读取原件额外区域";unit=L"个区域";}
+        else if(stage=="EXP_VERIFY_REGIONS"){label=L"正在核验保存后的额外区域";unit=L"个区域";saved=true;}
+        else if(stage=="EXP_SAVED_PARTS"){label=L"正在检查额外区域输出文件";unit=L"个部件";saved=true;}
+        else if(stage=="SCAN_TABLES"||stage=="RESCAN_TABLES"){saved=stage=="RESCAN_TABLES";scanning=!saved;label=saved?L"正在读取保存后的表格范围":L"正在读取表格范围";unit=L"个表格";}
+        else if(stage=="SCAN_BOUNDARY_OBJECTS"||stage=="RESCAN_BOUNDARY_OBJECTS"){saved=stage=="RESCAN_BOUNDARY_OBJECTS";scanning=!saved;label=saved?L"正在读取保存后的对象边界":L"正在读取对象边界";unit=L"个对象";}
+        else if(stage=="SCAN_OMML_BOUNDARIES"||stage=="RESCAN_OMML_BOUNDARIES"){saved=stage=="RESCAN_OMML_BOUNDARIES";scanning=!saved;label=saved?L"正在读取保存后的原生公式边界":L"正在读取原生公式边界";unit=L"条公式";}
+        else if(stage=="SCAN_REVISIONS"||stage=="RESCAN_REVISIONS"){saved=stage=="RESCAN_REVISIONS";scanning=!saved;label=saved?L"正在检查保存后的修订范围":L"正在检查修订范围";unit=L"条修订";}
+        else if(stage=="SCAN_CONTROLS"||stage=="RESCAN_CONTROLS"){saved=stage=="RESCAN_CONTROLS";scanning=!saved;label=saved?L"正在检查保存后的内容控件":L"正在检查内容控件";unit=L"个控件";}
+        else if(stage=="SCAN_FIELDS"||stage=="RESCAN_FIELDS"){saved=stage=="RESCAN_FIELDS";scanning=!saved;label=saved?L"正在检查保存后的文档域":L"正在检查文档域";unit=L"个域";}
+        else if(stage=="SCAN_FOOTNOTES"||stage=="RESCAN_FOOTNOTES"){saved=stage=="RESCAN_FOOTNOTES";scanning=!saved;label=saved?L"正在检查保存后的脚注":L"正在检查脚注";unit=L"条脚注";}
+        else if(stage=="SCAN_ENDNOTES"||stage=="RESCAN_ENDNOTES"){saved=stage=="RESCAN_ENDNOTES";scanning=!saved;label=saved?L"正在检查保存后的尾注":L"正在检查尾注";unit=L"条尾注";}
+        else if(stage=="SCAN_OMML"||stage=="RESCAN_OMML"){saved=stage=="RESCAN_OMML";scanning=!saved;label=saved?L"正在核对保存后的原生公式":L"正在识别 Word 原生公式";unit=L"条公式";}
+        else if(stage=="RESCAN_PARAGRAPHS"){saved=true;label=L"正在读取保存后的段落信息";unit=L"段";}
+        const auto counts=stage=="COPY_FILE"?L" "+std::to_wstring(current)+L"%":L" "+std::to_wstring(current)+L" / "+std::to_wstring(total);
+        lastStage=fromUtf8(stage)+L" · "+label+counts;
+        return {WorkerEvent::Progress,formulaConversionStage(stage)?formulaLabel(formulaProgress,formulaTotal):std::wstring(label)+counts+(*unit?L" "+std::wstring(unit):L""),current,total,false,scanning,saved};
     }
     if(kind=="CONVERT_PROGRESS"){
         size_t total{};require(sscanf_s(value.c_str(),"CONVERT_PROGRESS %zu/%zu",&completed,&total)==2&&completed<=total&&total<=INT_MAX,"Conversion progress record");
-        return {WorkerEvent::ConversionProgress,L"正在转换 "+std::to_wstring(completed)+L" / "+std::to_wstring(total)+L"  ·  成功 "+std::to_wstring(succeeded)+(fast?L"，异常 ":L"，保留 ")+std::to_wstring(failed),completed,total};
+        // 混合文档按新旧公式统一显示进度，仍保留新公式转换计数。
+        if(processingFormulas)return {WorkerEvent::ConversionCount,{},completed,total};
+        formulaProgress=completed;formulaTotal=total;
+        progressStage="CONVERTING";lastStage=L"正在转换 "+std::to_wstring(completed)+L" / "+std::to_wstring(total)+L"  ·  成功 "+std::to_wstring(succeeded)+(unverifiedMode(mode)?L"，异常 ":L"，保留 ")+std::to_wstring(failed);
+        return {WorkerEvent::ConversionProgress,formulaLabel(formulaProgress,formulaTotal),completed,total};
     }
     if(kind=="UI_ITEM_RESULT"){
         size_t index{};std::string state,reason;require(static_cast<bool>(stream>>index>>state>>reason)&&index>0,"Conversion item record");
         succeeded+=state=="SUCCEEDED";failed+=state=="FAILED_PRESERVED"||state=="FAILED_UNVERIFIED";
         if(state=="FAILED_PRESERVED"||state=="FAILED_UNVERIFIED"){
             auto problem=currentProblem;problem.id=index;problem.reason=unhex(reason);problem.state=fromUtf8(state);
-            addProblem(std::move(problem),(currentFormula.empty()?L"公式 "+std::to_wstring(index):currentFormula)+L"\r\n"+failureText(unhex(reason))+(state=="FAILED_UNVERIFIED"?L"\r\n快速转换失败，当前内容未经核验。":L"\r\n该式转换失败，原文保留。"));
+            addProblem(std::move(problem),(currentFormula.empty()?L"公式 "+std::to_wstring(index):currentFormula)+L"\r\n"+failureText(unhex(reason))+(state=="FAILED_UNVERIFIED"?L"\r\n转换失败，当前内容未经核验。":L"\r\n该式转换失败，原文保留。"));
         }
         currentFormula.clear();currentProblem={};
-        if(experimentalConverting){++experimentalDone;return {WorkerEvent::Status,L"正在转换实验区域公式（已完成 "+std::to_wstring(experimentalDone)+L"）"};}return {};
+        if(experimentalConverting){++experimentalDone;if(!processingFormulas)return {WorkerEvent::Status,formulaLabel(experimentalDone,0)};}return {};
     }
     if(kind=="UI_CONVERT_SUMMARY"){
         std::string state;size_t total{};require(static_cast<bool>(stream>>state>>total>>succeeded>>failed>>unattempted>>rejected)&&total==succeeded+failed+unattempted,"Final conversion counters");
         require(state=="COMPLETE"||state=="PARTIAL","Known conversion outcome");targets=total;outcome=fromUtf8(state);summary=true;
+        progressStage="WAITING_WORKER";lastStage=L"转换结果已生成，正在结束后台任务…";
+        return {WorkerEvent::Phase,lastStage,0,0,true};
     }
     return {};
 }
@@ -260,7 +380,7 @@ bool WorkerState::finish(DWORD code,const std::wstring& output,const std::wstrin
     busy=false;const bool cancelled=code==TaskCancelExit&&outcome==L"CANCELLED";
     workerFailed=!cancelled&&(workerFailed||code!=0||!summary||GetFileAttributesW(output.c_str())==INVALID_FILE_ATTRIBUTES||GetFileAttributesW(report.c_str())==INVALID_FILE_ATTRIBUTES);
     if(workerFailed&&error.empty()){
-        const auto reason=code!=0?L"后台进程未正常完成，原文件保留。":!summary?L"未收到转换结果摘要，原文件保留。":GetFileAttributesW(output.c_str())==INVALID_FILE_ATTRIBUTES?L"未找到已核验的输出文档，原文件保留。":L"未找到转换核验报告，原文件保留。";
+        const auto reason=code!=0?L"后台进程未正常完成，原文件保留。":!summary?L"未收到转换结果摘要，原文件保留。":GetFileAttributesW(output.c_str())==INVALID_FILE_ATTRIBUTES?L"未找到输出文档，原文件保留。":L"未找到转换报告，原文件保留。";
         error=(currentFormula.empty()?L"":L"中断时正在处理："+currentFormula+L"\r\n")+std::wstring(reason);interrupted=currentProblem;
         addProblem({0,L"",L"",L"",reason,L"TASK_FAILED",L""});
     }
@@ -305,7 +425,7 @@ void WorkerClient::start(HWND target,const std::wstring& program,const std::vect
                     while((newline=pending.find('\n'))!=std::string::npos) {auto line=pending.substr(0,newline);while(!line.empty()&&line.back()=='\r')line.pop_back();post(line);pending.erase(0,newline+1);}
                     if(pending.size()>4*1024*1024){pending.clear();oversized=true;}
                 }
-                if(!pending.empty())post(pending); WaitForSingleObject(process.hProcess,INFINITE);
+                if(!pending.empty())post(pending);post("UI_PHASE WAIT_WORKER_EXIT");WaitForSingleObject(process.hProcess,INFINITE);
                 require(GetExitCodeProcess(process.hProcess,&code)!=0,"Read worker exit code");
                 if(oversized){post("UI_ERROR "+wireHex("Worker output exceeded record bounds"));code=1;}
             } catch(const std::exception& exception) {post("UI_ERROR "+wireHex(exception.what()));}

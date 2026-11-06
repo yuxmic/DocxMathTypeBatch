@@ -28,6 +28,9 @@ try{
         Invoke-NativeCheck $exe $arguments ($kind+'-convert')
         $result=Get-Content -LiteralPath $report -Raw|ConvertFrom-Json
         if($result.Status -ne 'COMPLETE' -or $result.NumbersAdded -ne 5 -or $result.Succeeded -ne 6){throw '新增编号或公式数量不符。'}
+        # 编号只移动文本和域，保存前不应重复遍历全部公式对象。
+        $trace=[IO.File]::ReadAllText((Join-Path $run ($kind+'-convert.log')))
+        if([regex]::Matches($trace,'(?m)^UI_STAGE_PROGRESS BIND_OBJECTS 0 ').Count -ne 1){throw '编号前后重复绑定了公式对象。'}
         Invoke-NativeCheck $probe @('--numbering-self-test',$output,$caseDir) ($kind+'-native-commands')
         $count=if($kind -eq 'mixed'){6}else{5}
         & python -B -X utf8 (Join-Path $PSScriptRoot 'helpers/test_native_numbering.py') check $caseDir $count $kind |Set-Content -LiteralPath (Join-Path $caseDir 'pdf-check.jsonl') -Encoding utf8
@@ -36,6 +39,13 @@ try{
         $evidence.Cases+=@{Name=$kind;NoNewEquationBreaks=$true;NativeUpdate=$true;NativeFormat=$true;NativeAppend=$true;SavedReopen=$true;EquationAssetsUnchanged=$true;PdfNumbersVerified=$true;Count=$count;Directory=$caseDir}
         Write-Output ('NATIVE_NUMBERING_PASSED: '+$kind)
     }
+    # CLI 允许行内范围与编号同时指定；没有行外目标时应省去整个编号检查点。
+    $inlineOutput=Join-Path $run 'inline-only.docx';$inlineReport=Join-Path $run 'inline-only.json'
+    Invoke-NativeCheck $exe @('--worker-convert',$source,$inlineOutput,$inlineReport,'paragraph',(Join-Path $run 'inline-stop.flag'),'--scope=inline','--numbers') 'inline-numbering-skipped'
+    $inlineResult=Get-Content -LiteralPath $inlineReport -Raw|ConvertFrom-Json
+    $inlineTrace=[IO.File]::ReadAllText((Join-Path $run 'inline-numbering-skipped.log'))
+    if($inlineResult.Status -ne 'COMPLETE' -or $inlineResult.Succeeded -ne 1 -or $inlineResult.NumbersAdded -ne 0 -or $inlineResult.NumbersUpdated -ne 0 -or -not $inlineResult.WordReopenVerified -or $inlineTrace.Contains('UI_PHASE NUMBER_CHECKPOINT')){throw '无行外目标时仍执行了编号检查点，或标准保存后核验未保留。'}
+    $evidence.Cases+=@{Name='inline-numbering-skipped';Count=0;SavedReopen=$true}
     $evidence.Status='PASSED'
 }finally{
     $evidence.SourceSHA256=Get-TestSourceHashes

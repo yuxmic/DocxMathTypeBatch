@@ -14,6 +14,16 @@ assets/app_icon.png
 assets/build-icon.ps1
 assets/icon-source.json
 build.ps1
+src/ultra_equation_worker.cpp
+src/ultra_conversion.cpp
+src/ultra_conversion.h
+src/ultra_source.h
+src/ultra_assets.h
+tests/helpers/create_ultra_fixture.py
+tests/helpers/check_ultra_fixture.py
+src/conversion_mode.h
+tests/native/test_ultra_native.h
+tests/try-ultra.ps1
 check-upload.ps1
 update-github.ps1
 更新GitHub源码.cmd
@@ -55,6 +65,7 @@ src/native_numbering.h
 src/numbering_rules.h
 src/omml_adapter.cpp
 src/omml_adapter.h
+src/omml_tex.h
 src/scan_docx.cpp
 src/scan_file.h
 src/task_guard.h

@@ -7,17 +7,24 @@ param(
     [switch]$NoNumbers,
     [string]$InputFile,
     [switch]$FastConversion,
+    [switch]$UltraConversion,
+    [ValidateRange(0,256)][double]$Points=0,
+    [switch]$NoProgress,
     [ValidateSet('tables','textboxes','headers','notes')][string[]]$Experimental=@()
 )
 $ErrorActionPreference='Stop'
+if($FastConversion -and $UltraConversion){throw '一次只能选择一个转换模式。'}
+if($UltraConversion -and $Points -lt 1){throw '极速实测必须指定固定字号。'}
+if($NoProgress -and $Version -eq 'Baseline'){throw '无进度对照使用当前原生命令行构建。'}
 . (Join-Path $PSScriptRoot 'helpers/common.ps1')
 $project=[IO.Path]::GetFullPath($ProjectRoot)
 $sample=if($InputFile){[IO.Path]::GetFullPath($InputFile)}else{Join-Path (New-TestFixtures).Directory 'performance-100-400.docx'}
 $originalHash=(Get-FileHash -LiteralPath $sample).Hash
 $run=[IO.Path]::GetFullPath($RunDirectory)
 $exe=if($Version -eq 'Baseline'){Join-Path $run 'baseline\DocxMathTypeBatch.exe'}else{Join-Path $project 'build\bin\DocxMathTypeBatch.exe'}
+if($NoProgress){$exe=Join-Path $project 'build/bin/docx-math-convert.exe'}
 # 显式输入和快速模式分别隔离结果及基线，不能交叉比较 LaTeX 与 OMML 的 Source 文本。
-$variant=$(if($InputFile){'-input-'+$originalHash.Substring(0,12).ToLowerInvariant()}else{''})+$(if($NoNumbers){'-unnumbered'}else{''})+$(if($FastConversion){'-fast'}else{''})
+$variant=$(if($InputFile){'-input-'+$originalHash.Substring(0,12).ToLowerInvariant()}else{''})+$(if($NoNumbers){'-unnumbered'}else{''})+$(if($FastConversion){'-fast'}elseif($UltraConversion){'-ultra'}else{''})+$(if($Points){'-size'+$Points.ToString([Globalization.CultureInfo]::InvariantCulture)}else{''})+$(if($NoProgress){'-no-progress'}else{''})
 if($Experimental.Count){$variant+='-regions-'+(($Experimental|Sort-Object -Unique)-join '-')}
 $name=$Version.ToLowerInvariant()+$variant+'-'+$Round
 $output=Join-Path $run ($name+'.docx');$report=Join-Path $run ($name+'.report.json');$stop=Join-Path $run ($name+'.stop')
@@ -53,14 +60,18 @@ public static class PressureTiming {
     }
 }
 '@
-$arguments=@('--worker-convert',$sample,$output,$report,'paragraph',$stop,'--scope=all');if(-not $NoNumbers){$arguments+='--numbers'}
+$style=if($Points){'size='+$Points.ToString([Globalization.CultureInfo]::InvariantCulture)}else{'paragraph'}
+$arguments=if($NoProgress){@('--convert',$sample,$output,$report,$style,'--scope=all')}else{@('--worker-convert',$sample,$output,$report,$style,$stop,'--scope=all')};if(-not $NoNumbers){$arguments+='--numbers'}
 if($FastConversion){$arguments+='--experimental-fast'}
+if($UltraConversion){$arguments+='--ultra'}
 $arguments+=@($Experimental|Sort-Object -Unique|ForEach-Object {'--experimental-'+$_})
 $timing=[PressureTiming]::Run($exe,$arguments,(Join-Path $run ($name+'.log')),$stop)
 $result=Get-Content -LiteralPath $report -Raw|ConvertFrom-Json
 $audit=(& python -B -X utf8 (Join-Path $PSScriptRoot 'helpers/audit_docx.py') $output)|ConvertFrom-Json
 if($LASTEXITCODE -ne 0 -or $result.FullDevelopmentReadback -or $result.ReopenedEquationActivations -ne 0){throw '压力转换未通过独立包审计或使用了开发回读。'}
-if($FastConversion){
+if($UltraConversion){
+    if($result.ConversionMode -ne 'Ultra' -or $result.Validation -ne 'NONE' -or $result.WordStarted -or $result.WordReopenVerified){throw '极速模式报告契约不符。'}
+}elseif($FastConversion){
     if(-not $result.FastConversion -or $result.Validation -ne 'SKIPPED_EXPERIMENTAL_FAST' -or $result.PostConversionScans -ne 0 -or $result.WordReopenVerified -or
         $null -ne $result.OriginalFileBytesUnchanged -or $null -ne $result.ExistingNativeStreamsUnchanged -or $null -ne $result.ExistingMediaBytesPreserved){throw '快速压力转换的未核验报告契约不符。'}
 }elseif($result.FastConversion -or -not $result.WordReopenVerified -or -not $result.OriginalFileBytesUnchanged -or -not $result.ExistingNativeStreamsUnchanged -or -not $result.ExistingMediaBytesPreserved){throw '压力转换未通过完整性检查。'}
@@ -88,7 +99,7 @@ $details=@($detailRecords|Group-Object Name|ForEach-Object{
 })
 $evidence=[ordered]@{
     Status='PASSED';Version=$Version;Round=$Round;Executable=$exe;ExecutableSHA256=(Get-FileHash -LiteralPath $exe).Hash
-    Input=$sample;InputSHA256=$originalHash;FastConversion=[bool]$FastConversion;Experimental=@($Experimental|Sort-Object -Unique);Settings=('全部公式；跟随原文字号/行距；'+$(if($NoNumbers){'不编号'}else{'添加右编号 (1)'})+$(if($FastConversion){'；快速生产路径（未经核验）'}else{'；普通生产路径'}))
+    Input=$sample;InputSHA256=$originalHash;FastConversion=[bool]$FastConversion;UltraConversion=[bool]$UltraConversion;ProgressEnabled=(-not $NoProgress);Experimental=@($Experimental|Sort-Object -Unique);Settings=('全部公式；'+$style+'；行距跟随原文；'+$(if($NoNumbers){'不编号'}else{'添加右编号 (1)'})+$(if($UltraConversion){'；极速生产路径（未经核验）'}elseif($FastConversion){'；快速生产路径（未经核验）'}else{'；普通生产路径'}))
     Timing=$timing;Signature=$signature;Output=$output;Report=$report;IndependentPackageAudit=$true
     TimingDetailsAvailable=($detailRecords.Count -gt 0);TimingDetails=$details;TimingDetailRecords=$detailRecords
     # 单轮功能通过不代表已经完成新旧成品对照，证据中显式区分。

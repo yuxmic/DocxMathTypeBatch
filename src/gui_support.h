@@ -19,7 +19,7 @@ struct QueuedDocument {
     std::wstring context, stage;
     std::string trace;
     DWORD exitCode{STILL_ACTIVE};
-    bool fast{};
+    ConversionMode mode{ConversionMode::Standard};
     std::vector<WorkerProblem> problems;
     WorkerProblem interrupted;
     std::vector<WorkerWarning> warnings;
@@ -39,7 +39,7 @@ inline void saveNew(const std::wstring& path, const std::string& bytes) {
     if (!saved || !flushed || !closed) { DeleteFileW(path.c_str()); throw std::runtime_error("Save complete GUI task file"); }
 }
 inline std::wstring documentDetails(const QueuedDocument& item,const std::wstring& environment) {
-        std::wstring text=L"文档："+item.path+L"\r\n结果："+DocumentStates[static_cast<int>(item.state)]+(item.fast?L"（快速，未核验）":L"")+L"\r\n退出码："+(item.exitCode==STILL_ACTIVE?std::wstring(L"尚未结束"):std::to_wstring(item.exitCode))+L"\r\n最后阶段："+item.stage+L"\r\n";
+        std::wstring text=L"文档："+item.path+L"\r\n结果："+DocumentStates[static_cast<int>(item.state)]+(unverifiedMode(item.mode)?L"（"+std::wstring(conversionModeLabel(item.mode))+L"，未核验）":L"")+L"\r\n退出码："+(item.exitCode==STILL_ACTIVE?std::wstring(L"尚未结束"):std::to_wstring(item.exitCode))+L"\r\n最后阶段："+item.stage+L"\r\n";
         if(!item.error.empty())text+=L"原因："+item.error+L"\r\n";
         else if(item.state==DocumentState::Pending){const auto& problem=environment;if(!problem.empty())text+=L"未开始原因："+problem+L"\r\n";}
         text+=L"\r\n"+item.context+L"\r\n本次后台日志\r\n";
@@ -52,7 +52,7 @@ inline std::wstring documentDetails(const QueuedDocument& item,const std::wstrin
 
 inline std::wstring documentSummary(const QueuedDocument& item,const std::wstring& environment) {
     const auto name=item.path.substr(item.path.find_last_of(L"\\/")+1);
-    std::wstring text=std::wstring(DocumentStates[static_cast<int>(item.state)])+(item.fast?L"（快速）":L"")+L" · "+std::to_wstring(item.problems.size())+L" 条问题";
+    std::wstring text=std::wstring(DocumentStates[static_cast<int>(item.state)])+(unverifiedMode(item.mode)?L"（"+std::wstring(conversionModeLabel(item.mode))+L"）":L"")+L" · "+std::to_wstring(item.problems.size())+L" 条问题";
     if(!item.warnings.empty())text+=L" · "+std::to_wstring(item.warnings.size())+L" 条版式提醒";
     text+=L"\r\n"+name+L"\r\n";
     if(item.state==DocumentState::Failed){
@@ -61,8 +61,8 @@ inline std::wstring documentSummary(const QueuedDocument& item,const std::wstrin
     }else if(item.state==DocumentState::Cancelled)text+=L"用户已取消，当前文件未交付转换结果。\r\n";
     else if(item.state==DocumentState::Pending)text+=environment.empty()?L"尚未开始处理。\r\n":problemReason(environment)+L"\r\n";
     else if(item.state==DocumentState::Running)text+=L"正在处理，任务结束后可查看完整问题摘要。\r\n";
-    else if(item.state==DocumentState::Complete&&item.problems.empty()&&item.warnings.empty())text+=item.fast?L"未报告转换错误，快速输出未经核验。\r\n":L"未发现转换问题。\r\n";
-    if(item.fast&&!item.layoutChecked)text+=L"未进行版式检查。\r\n";
+    else if(item.state==DocumentState::Complete&&item.problems.empty()&&item.warnings.empty())text+=unverifiedMode(item.mode)?L"未报告转换错误，"+std::wstring(conversionModeLabel(item.mode))+L"输出未经核验。\r\n":L"未发现转换问题。\r\n";
+    if(unverifiedMode(item.mode)&&!item.layoutChecked)text+=L"未进行版式检查。\r\n";
     const auto hasPage=[](const auto& record){return record.location.find(L"原文第")!=std::wstring::npos&&record.location.find(L"页")!=std::wstring::npos;};
     if(std::any_of(item.problems.begin(),item.problems.end(),hasPage)||hasPage(item.interrupted)||std::any_of(item.warnings.begin(),item.warnings.end(),hasPage)){
         text+=item.warnings.empty()?L"页码按转换前原文从首页连续计数（含封面）。\r\n":L"页码按转换前原文从首页连续计数（含封面）；版式提醒针对转换结果，原文页码不代表结果页码。\r\n";
@@ -79,7 +79,7 @@ inline std::wstring documentSummary(const QueuedDocument& item,const std::wstrin
         const auto reason=problem.stage==L"RECOVERY"?L"该式转换失败，原式恢复未通过核验。":problemReason(problem.reason);
         const auto advice=problem.stage==L"RECOVERY"?L"打开原文检查上述公式；该式已保留，可先单独处理后再转换。":problemAdvice(problem.reason);
         text+=L"原因："+std::wstring(reason)+L"\r\n建议："+advice+L"\r\n";
-        const wchar_t* retained=problem.state==L"TASK_FAILED"?L"本文件任务未正常完成。":problem.state==L"FAILED_UNVERIFIED"?L"快速输出未经核验，请检查该位置。":problem.state==L"REJECTED_PRESERVED"?L"未转换，原式保留。":problem.state==L"FAILED_PRESERVED"?L"转换失败，原式已保留。":problem.stage==L"NUMBERING"?L"编号及引用修改已撤回，公式转换结果保留。":problem.stage==L"FORMATTING"?L"本段排版保留原样。":problem.stage==L"RECOVERY"?L"已从原件重建副本并保留该式。":L"该区域未完成转换，原内容保留。";
+        const wchar_t* retained=problem.state==L"TASK_FAILED"?L"本文件任务未正常完成。":problem.state==L"FAILED_UNVERIFIED"?L"输出未经核验，请检查该位置。":problem.state==L"REJECTED_PRESERVED"?L"未转换，原式保留。":problem.state==L"FAILED_PRESERVED"?L"转换失败，原式已保留。":problem.stage==L"NUMBERING"?L"编号及引用修改已撤回，公式转换结果保留。":problem.stage==L"FORMATTING"?L"本段排版保留原样。":problem.stage==L"RECOVERY"?L"已从原件重建副本并保留该式。":L"该区域未完成转换，原内容保留。";
         text+=L"处理结果："+std::wstring(retained)+L"\r\n";
     }
     if(item.interrupted.id||!item.interrupted.source.empty()){

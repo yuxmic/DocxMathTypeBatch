@@ -7,6 +7,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "conversion_mode.h"
 
 constexpr UINT WorkerLine=WM_APP+1,WorkerDone=WM_APP+2,WorkerLog=WM_APP+5;
 constexpr size_t MaximumLogBytes=256*1024;
@@ -26,7 +27,12 @@ struct WorkerWarning {
     std::wstring code,region,location,source,message;
 };
 
-enum class WorkerEvent { None, CommitReady, ScanCounts, Status, BatchStatus, Phase, Progress, ConversionProgress };
+enum class WorkerEvent { None, CommitReady, ScanCounts, Status, BatchStatus, Phase, Progress, ConversionProgress, ConversionCount };
+// 正常单式步骤共用界面文案和计时；失败恢复继续单独展示。
+inline bool formulaConversionStage(const std::string& stage) {
+    return stage=="CONVERTING"||stage=="PROCESS_FORMULAS"||stage=="EXP_FORMULAS"||
+        (stage.rfind("FORMULA_",0)==0&&stage!="FORMULA_RECOVERING");
+}
 struct WorkerUpdate {
     WorkerEvent event{WorkerEvent::None};
     std::wstring label;
@@ -34,19 +40,25 @@ struct WorkerUpdate {
     bool marquee{},scanning{},saved{},reopening{};
 };
 struct WorkerState {
-    bool busy{},workerFailed{},summary{},scanned{},cancelling{},acceptingResult{},fast{},layoutChecked{};
+    bool busy{},workerFailed{},summary{},scanned{},cancelling{},acceptingResult{},layoutChecked{};
+    ConversionMode mode{ConversionMode::Standard};
     long existing{};
     size_t targets{},inlines{},completed{},succeeded{},failed{},unattempted{},rejected{};
+    std::string progressStage;
     std::wstring error,outcome,lastStage,currentFormula;
     std::vector<std::wstring> failures;
     std::vector<WorkerProblem> problems;
     std::vector<WorkerWarning> warnings;
     WorkerProblem currentProblem,interrupted;
     WorkerUpdate read(const std::string& value);
-    void reset(bool fastConversion);
+    void reset(ConversionMode conversionMode);
     bool finish(DWORD code,const std::wstring& output,const std::wstring& report);
 private:
-    bool experimentalStarted{},experimentalConverting{},experimentalLayoutChecked{};
+    bool processingFormulas{},experimentalStarted{},experimentalConverting{},experimentalLayoutChecked{};
+    size_t formulaProgress{},formulaTotal{};
+    static std::wstring formulaLabel(size_t current,size_t total) {
+        return L"正在转换公式…  ·  已完成 "+std::to_wstring(current)+(total?L" / "+std::to_wstring(total):L"");
+    }
     size_t experimentalSucceeded{},experimentalFailed{},experimentalFailures{},experimentalProblems{},experimentalWarnings{},experimentalDone{};
     void addProblem(WorkerProblem problem,const std::wstring& detail={});
 };

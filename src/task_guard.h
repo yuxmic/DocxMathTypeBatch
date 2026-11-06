@@ -132,13 +132,32 @@ inline void taskReservePrivatePath(const std::wstring& path) {
     wcscpy_s(taskShared->tracked[index].path,path.c_str());taskShared->tracked[index].finalFile=false;InterlockedExchange(&taskShared->files,index+1);
 }
 inline void taskCopy(const std::wstring& input, const std::wstring& output) {
-    if (!taskShared) { require(CopyFileW(input.c_str(), output.c_str(), TRUE) != 0, "Create independent task copy"); return; }
-    // 先独占创建再登记，后续只填充本任务拥有的文件，避免覆盖别人创建的路径。
-    taskReservePrivatePath(output);
-    TaskHandle file(CreateFileW(output.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                               nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
-    require(file.value != INVALID_HANDLE_VALUE, "Reserve independent task copy");
-    require(CopyFileW(input.c_str(), output.c_str(), FALSE) != 0, "Fill reserved task copy");
+    // 复用系统复制回调的真实字节进度，不额外读取文件估算耗时。
+    struct CopyProgress {ULONGLONG updated{};} progress;
+    const auto copied=[](LARGE_INTEGER total,LARGE_INTEGER transferred,LARGE_INTEGER,LARGE_INTEGER,DWORD,DWORD,HANDLE,HANDLE,LPVOID context)->DWORD {
+        auto& state=*static_cast<CopyProgress*>(context);const auto now=GetTickCount64();
+        // 原生回调不能抛出取消异常；只用实际复制活动续心跳，停止仍由监管进程执行。
+        ULONGLONG activeTicks{};if(taskShared&&QueryUnbiasedInterruptTime(&activeTicks))InterlockedExchange64(&taskShared->heartbeat,static_cast<LONG64>(activeTicks/10000));
+        if(total.QuadPart>0&&(transferred.QuadPart==total.QuadPart||now-state.updated>=150)){
+            const auto percent=static_cast<unsigned long long>(transferred.QuadPart)*100/static_cast<unsigned long long>(total.QuadPart);
+            std::printf("UI_STAGE_PROGRESS COPY_FILE %llu 100\n",percent);state.updated=now;
+        }
+        return PROGRESS_CONTINUE;
+    };
+    std::puts("UI_PHASE COPYING_FILE");std::puts("UI_STAGE_PROGRESS COPY_FILE 0 100");
+    if (!taskShared) require(CopyFileExW(input.c_str(), output.c_str(),copied,&progress,nullptr,COPY_FILE_FAIL_IF_EXISTS) != 0, "Create independent task copy");
+    else {
+        // 先独占创建再登记，后续只填充本任务拥有的文件，避免覆盖别人创建的路径。
+        taskReservePrivatePath(output);
+        TaskHandle file(CreateFileW(output.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                   nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
+        require(file.value != INVALID_HANDLE_VALUE, "Reserve independent task copy");
+        require(CopyFileExW(input.c_str(), output.c_str(),copied,&progress,nullptr,0) != 0, "Fill reserved task copy");
+    }
+    // CopyFileEx 会继承只读属性；只解除自建副本的只读，原件与其他属性保持。
+    const auto attributes=GetFileAttributesW(output.c_str());require(attributes!=INVALID_FILE_ATTRIBUTES,"Read private copy attributes");
+    if(attributes&FILE_ATTRIBUTE_READONLY){const auto writable=attributes&~FILE_ATTRIBUTE_READONLY;
+        require(SetFileAttributesW(output.c_str(),writable?writable:FILE_ATTRIBUTE_NORMAL)!=0,"Make private task copy writable");}
 }
 inline void taskTrackWordOwner(const std::wstring& document) {
     if (!taskShared) return;
@@ -231,6 +250,7 @@ inline TaskHandle* taskVerifiedWord(TaskSharedState& state, bool terminating) {
     return process.release();
 }
 inline void taskFinishOwnedWord(TaskSharedState& state,bool terminating,DWORD code) {
+    if(state.wordReady)std::puts("UI_PHASE WAITING_WORD");
     std::unique_ptr<TaskHandle> word(taskVerifiedWord(state,terminating));
     if(word&&WaitForSingleObject(word->value,0)==WAIT_TIMEOUT){
         // 只处理已核实归属的 Word；退出请求与自然退出竞争时，按实际退出结果判断。
@@ -242,33 +262,38 @@ inline void taskFinishOwnedWord(TaskSharedState& state,bool terminating,DWORD co
 }
 inline void taskEndBlockedWorker(TaskSharedState& state, HANDLE job, HANDLE worker, DWORD code) {
     // 先让任务 Word 断连，给后端一次有界的异常展开/MTTermAPI 机会，避免硬杀积累 SDK 会话。
-    std::unique_ptr<TaskHandle> word(taskVerifiedWord(state, false));
+    std::puts("UI_PHASE WAITING_WORD");std::unique_ptr<TaskHandle> word(taskVerifiedWord(state, false));
     if (word && WaitForSingleObject(word->value, 0) == WAIT_TIMEOUT) {
         const bool requested = TerminateProcess(word->value, code) != 0;
         const auto exited = WaitForSingleObject(word->value, 5000);
         require((requested || exited == WAIT_OBJECT_0) && exited == WAIT_OBJECT_0, "Blocked owned Word exits");
     }
+    std::puts("UI_PHASE WAITING_WORKER");
     if (WaitForSingleObject(worker, 3000) == WAIT_OBJECT_0) std::puts("BLOCKED_WORKER_UNWOUND_PASSED");
     else { require(TerminateJobObject(job, code), "End only isolated blocked task job"); std::puts("BLOCKED_WORKER_HARD_EXIT_PASSED"); }
 }
 inline bool taskCleanupFiles(TaskSharedState& state) {
     bool complete = true; const auto count = InterlockedCompareExchange(&state.files, 0, 0);
     require(count >= 0 && static_cast<size_t>(count) <= TaskMaxFiles, "Valid owned-file journal count");
+    std::puts("UI_PHASE TASK_CLEANUP");ULONGLONG updated{};
+    const auto report=[&](LONG completed){const auto now=GetTickCount64();if(count&&(completed==0||completed==count||now-updated>=150)){std::printf("UI_STAGE_PROGRESS TASK_CLEANUP %ld %ld\n",completed,count);updated=now;}};
+    report(0);
     for (LONG index = 0; index < count; ++index) {
-        const auto& entry = state.tracked[index]; if (entry.finalFile && state.committed) continue;
-        if (GetFileAttributesW(entry.path) == INVALID_FILE_ATTRIBUTES) continue;
+        const auto& entry = state.tracked[index]; if (entry.finalFile && state.committed) {report(index+1);continue;}
+        if (GetFileAttributesW(entry.path) == INVALID_FILE_ATTRIBUTES) {report(index+1);continue;}
         if (entry.finalFile) {
             // 发布过程中遇到重名失败时，绝不能回滚原来属于用户的目标文件。
             TaskHandle file(CreateFileW(entry.path, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
             BY_HANDLE_FILE_INFORMATION identity{};
             if (file.value == INVALID_HANDLE_VALUE || !GetFileInformationByHandle(file.value, &identity) || identity.dwVolumeSerialNumber != entry.volume ||
-                identity.nFileIndexHigh != entry.indexHigh || identity.nFileIndexLow != entry.indexLow) continue;
+                identity.nFileIndexHigh != entry.indexHigh || identity.nFileIndexLow != entry.indexLow) {report(index+1);continue;}
         }
         bool removed{}; for (int attempt = 0; attempt != 40; ++attempt) {
             if (DeleteFileW(entry.path) || GetLastError() == ERROR_FILE_NOT_FOUND) { removed = true; break; }
             Sleep(50);
         }
         if (!removed) { complete = false; std::printf("TASK_COPY_CLEANUP_FAILED WIN32=%lu\n", GetLastError()); }
+        report(index+1);
     }
     if (complete) std::puts("TASK_COPY_CLEANUP_PASSED"); return complete;
 }
@@ -314,6 +339,7 @@ struct TaskAwake {
 inline int superviseTaskArguments(const std::vector<std::wstring>& arguments, bool mathTypeTask = true);
 inline bool taskRecover(TaskMapping& original, const std::wstring& originalName, bool preferences) {
     if (!preferences && !original.state->linksChanged) return true;
+    std::puts("UI_PHASE RESTORE_PREFERENCES");
     std::puts(preferences ? "PREFERENCE_RECOVERY_BEGIN" : "WORD_OPTIONS_RECOVERY_BEGIN");
     const int code = superviseTaskArguments({L"--worker-recover", originalName});
     return code == 0 && (!preferences || !original.state->pendingPrefs) && !original.state->linksChanged;
@@ -415,7 +441,7 @@ inline int superviseTaskArguments(const std::vector<std::wstring>& arguments, bo
                 DWORD remaining{}; if (PeekNamedPipe(read.value, nullptr, 0, nullptr, &remaining, nullptr) && remaining) continue;
                 require(GetExitCodeProcess(process.value, &code), "Read supervised worker outcome");
                 if(guiPublication&&code==0&&state.committed){
-                    if(!commitRequested){std::puts("UI_COMMIT_READY");commitRequested=true;commitWaiting=taskActiveMilliseconds();}
+                    if(!commitRequested){std::puts("UI_PHASE GUI_CONFIRM");std::puts("UI_COMMIT_READY");commitRequested=true;commitWaiting=taskActiveMilliseconds();}
                     if(GetFileAttributesW(guiCommit)==INVALID_FILE_ATTRIBUTES){
                         if(taskElapsed(taskActiveMilliseconds(),commitWaiting)>=timeout*1000ULL){InterlockedExchange(&state.committed,0);taskError("GUI_COMMIT_TIMEOUT");code=TaskTimeoutExit;break;}
                         Sleep(20);continue;
@@ -447,6 +473,7 @@ inline int superviseTaskArguments(const std::vector<std::wstring>& arguments, bo
         }
     } catch (...) { TerminateJobObject(job.value, 1); WaitForSingleObject(process.value, 5000); throw; }
     if (!recoveryOnly) SetConsoleCtrlHandler(taskConsoleHandler, FALSE);
+    std::puts("UI_PHASE WAITING_WORKER");
     require(WaitForSingleObject(process.value, 5000) == WAIT_OBJECT_0, "Supervised worker exits after bounded termination");
     // 分别记录进程退出与副本清理，避免把退出等待误算为公式转换耗时。
     const auto wordExitStarted=GetTickCount64();
@@ -458,7 +485,7 @@ inline int superviseTaskArguments(const std::vector<std::wstring>& arguments, bo
     if (!recoveryOnly&&!cancelled) {
         const bool pending = InterlockedCompareExchange(&state.pendingPrefs, 0, 0) != 0;
         if (!taskRecover(mapping, mappingName, pending)) { taskError("PREFERENCE_RECOVERY_REQUIRED"); if (!code) code = TaskRecoveryExit; }
-        else if (state.recordSaved && GetFileAttributesW(recoveryPath.c_str()) != INVALID_FILE_ATTRIBUTES) require(DeleteFileW(recoveryPath.c_str()), "Clear resolved task preference marker");
+        else if (state.recordSaved && GetFileAttributesW(recoveryPath.c_str()) != INVALID_FILE_ATTRIBUTES) {std::puts("UI_PHASE RECOVERY_MARKER_CLEANUP");require(DeleteFileW(recoveryPath.c_str()), "Clear resolved task preference marker");}
     }
     if (terminated) std::puts("TASK_FAILURE_CLEANUP_FINISHED");
     if(cancelled&&code==TaskCancelExit)std::puts("UI_CANCELLED");

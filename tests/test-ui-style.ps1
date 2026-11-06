@@ -1,6 +1,6 @@
 #requires -Version 7.0
 # 原生界面外观验收：真实控件状态、最小窗口布局和截图；不启动 Office，不写用户设置。
-param([switch]$SkipBuild,[ValidateSet('All','Fast','Help')][string]$Case='All')
+param([switch]$SkipBuild,[ValidateSet('All','Fast','Help','Modes')][string]$Case='All',[string]$OutputDirectory)
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'helpers/common.ps1')
 if(-not $SkipBuild){& (Join-Path $ProjectRoot 'build.ps1') -Target Gui}
@@ -47,7 +47,7 @@ public static class StyleCheck {
     public static IntPtr Tooltip(uint pid){IntPtr found=IntPtr.Zero;EnumWindows((hwnd,data)=>{uint owner;GetWindowThreadProcessId(hwnd,out owner);var name=new StringBuilder(64);GetClassName(hwnd,name,name.Capacity);if(owner==pid&&name.ToString()=="tooltips_class32"&&IsWindowVisible(hwnd)){found=hwnd;return false;}return true;},IntPtr.Zero);return found;}
 }
 '@
-$styleFolder=Join-Path $ProjectRoot ('tests\output\UI样式-'+[Guid]::NewGuid().ToString('N'))
+$styleFolder=if($OutputDirectory){[IO.Path]::GetFullPath($OutputDirectory)}else{Join-Path $ProjectRoot ('tests\output\UI样式-'+[Guid]::NewGuid().ToString('N'))}
 New-Item -ItemType Directory -Path $styleFolder | Out-Null
 $styleExe=Join-Path $ProjectRoot 'build\bin\DocxMathTypeBatch.exe'
 # 预览只读文件元数据，使用占位文件，完全不读取或转换真实文档。
@@ -55,7 +55,7 @@ $styleCopy=Join-Path $styleFolder '研究报告.docx';[IO.File]::WriteAllText($s
 $styleProcess=$null
 $styleDpi=[GuiBatchCheck]::SetThreadDpiAwarenessContext([IntPtr](-4))
 $styleEvidence=[ordered]@{Status='FAILED';Case=$Case;Direction='A按钮质感+B布局';Screenshots=@();Checks=[ordered]@{}}
-$fastHelpText='舍弃版式检查，提高转换速度，但存在错位风险'
+$fastHelpText='标准：核验与失败恢复。快速：减少读取，跳过核验。极速：转换正文行内和行外的 LaTeX、OMML，使用指定字号；独立行外公式可加从 1 开始的默认右编号。极速不处理额外位置，不核验结果，高级设置不生效。方向键切换档位。'
 function Save-StyleFrame([string]$Name) {
     $framePath=Join-Path $styleFolder ($Name+'.png')
     if(-not (Save-GuiWindow -PidValue $styleProcess.Id -Path $framePath)){throw ('截图失败：'+$Name)}
@@ -185,10 +185,10 @@ try {
     $styleStart=[StyleCheck]::GetDlgItem($styleWindow,125)
     $styleSize=[StyleCheck]::GetDlgItem($styleWindow,113)
     $styleSpin=[StyleCheck]::GetDlgItem($styleWindow,114)
-    # 首页开关保留原生勾选状态及空格键操作，默认关闭。
+    # 首页用系统滑块保留离散档位、键盘与可访问接口，默认标准。
     $styleFast=[StyleCheck]::GetDlgItem($styleWindow,146)
-    if($styleFast -eq [IntPtr]::Zero -or ([StyleCheck]::GetWindowLongPtr($styleFast,-16).ToInt64() -band 0x1001000F) -ne 0x10010003){throw '首页快速转换未使用原生可访问开关。'}
-    if([StyleCheck]::SendMessage($styleFast,0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 0){throw '快速转换默认开启。'}
+    if($styleFast -eq [IntPtr]::Zero -or ([StyleCheck]::GetWindowLongPtr($styleFast,-16).ToInt64() -band 0x10010000) -ne 0x10010000 -or [StyleCheck]::SendMessage($styleFast,0x402,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 2){throw '转换模式未使用可访问的三档滑块。'}
+    if([StyleCheck]::SendMessage($styleFast,0x400,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 0){throw '转换模式默认不是标准。'}
     $fastBounds=[StyleCheck+Rect]::new();$numberBounds=[StyleCheck+Rect]::new();$outputBounds=[StyleCheck+Rect]::new();$fastLabelBounds=[StyleCheck+Rect]::new()
     [StyleCheck]::GetWindowRect($styleFast,[ref]$fastBounds)|Out-Null
     [StyleCheck]::GetWindowRect([StyleCheck]::GetDlgItem($styleWindow,137),[ref]$numberBounds)|Out-Null
@@ -213,40 +213,34 @@ try {
         Write-Output ('UI_STYLE_PASSED: '+$styleFolder)
         return
     }
-    # 点击文字、右侧空白都不应切换；只有滑块本身命中按钮。
+    # 标签与帮助不切换模式；滑块三等分命中，方向键逐档切换。
     $fastY=[int](($fastBounds.Top+$fastBounds.Bottom)/2)
-    foreach($fastX in @(($fastLabelBounds.Left+4),([int](($fastHelpBounds.Left+$fastHelpBounds.Right)/2)),($outputBounds.Right-4))){
+    foreach($fastX in @(($fastLabelBounds.Left+4),([int](($fastHelpBounds.Left+$fastHelpBounds.Right)/2)))){
         $hit=[StyleCheck]::ClickAtScreen($styleWindow,$fastX,$fastY)
-        if($hit -eq $styleFast -or [StyleCheck]::SendMessage($styleFast,0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 0){throw '点击快速转换文字或同行空白仍会触发开关。'}
+        if($hit -eq $styleFast -or [StyleCheck]::SendMessage($styleFast,0x400,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 0){throw '点击标签或帮助切换了转换模式。'}
     }
-    $hit=[StyleCheck]::ClickAtScreen($styleWindow,[int](($fastBounds.Left+$fastBounds.Right)/2),$fastY)
-    if($hit -ne $styleFast -or [StyleCheck]::SendMessage($styleFast,0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 1){throw '点击滑块未切换。'}
-    [StyleCheck]::SendMessage($styleFast,0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
-    Start-Sleep -Milliseconds 220
-    # 动画期间保持预览窗口可见，避免反复显示窗口的系统动画耗尽中间帧时间。
     [GuiBatchCheck]::ShowWindow($styleWindow,4)|Out-Null
     [StyleCheck]::SetWindowPos($styleWindow,[IntPtr](-1),0,0,0,0,0x13)|Out-Null
-    Save-StyleFrame '00c-首页快速转换关闭'|Out-Null
-    $fastOffPixel=Save-FastFrame '00e-开关关闭细节'
+    Save-StyleFrame '00c-标准模式'|Out-Null
+    $hit=[StyleCheck]::ClickAtScreen($styleWindow,[int](($fastBounds.Left+$fastBounds.Right)/2),$fastY)
+    if($hit -ne $styleFast -or [StyleCheck]::SendMessage($styleFast,0x400,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 1){throw '点击中档未切换快速模式。'}
+    Start-Sleep -Milliseconds 200
+    Save-StyleFrame '00d-快速模式'|Out-Null
     [StyleCheck]::SendMessage($styleWindow,0x28,$styleFast,[IntPtr]1)|Out-Null
-    [StyleCheck]::SendMessage($styleFast,0x100,[IntPtr]0x20,[IntPtr]::Zero)|Out-Null
-    [StyleCheck]::SendMessage($styleFast,0x101,[IntPtr]0x20,[IntPtr]::Zero)|Out-Null
-    if([StyleCheck]::SendMessage($styleFast,0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 1){throw '快速开关空格键未生效。'}
-    Start-Sleep -Milliseconds 60
-    $fastMidPixel=Save-FastFrame '00f-开关切换中间帧'
-    # 动画期间再次关闭再打开，确认最终状态正确且视觉能继续过渡。
-    [StyleCheck]::SendMessage($styleFast,0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
-    [StyleCheck]::SendMessage($styleFast,0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
-    Start-Sleep -Milliseconds 220
-    $fastOnPixel=Save-FastFrame '00g-开关开启细节'
-    if($Case -eq 'All' -and [StyleCheck]::ClientAnimations() -and @($fastOffPixel,$fastMidPixel,$fastOnPixel|Select-Object -Unique).Count -ne 3){throw '快速开关未呈现独立的动画中间帧。'}
-    if([StyleCheck]::SendMessage($styleFast,0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 1){throw '连续切换后状态错误。'}
-    Save-StyleFrame '00d-首页快速转换开启'|Out-Null
+    [StyleCheck]::SendMessage($styleFast,0x100,[IntPtr]0x27,[IntPtr]::Zero)|Out-Null
+    [StyleCheck]::SendMessage($styleFast,0x101,[IntPtr]0x27,[IntPtr]::Zero)|Out-Null
+    if([StyleCheck]::Text($styleFast) -ne '转换模式：极速'){throw '极速模式名称显示错误。'}
+    if([StyleCheck]::SendMessage($styleFast,0x400,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 2 -or [StyleCheck]::IsWindowEnabled([StyleCheck]::GetDlgItem($styleWindow,143)) -or [StyleCheck]::IsWindowEnabled([StyleCheck]::GetDlgItem($styleWindow,111))){throw '右方向键或极速范围约束未生效。'}
+    if([StyleCheck]::Text([StyleCheck]::GetDlgItem($styleWindow,115)) -notmatch '正文 LaTeX 与 OMML' -or [StyleCheck]::Text([StyleCheck]::GetDlgItem($styleWindow,113)) -ne '12' -or [StyleCheck]::SendMessage([StyleCheck]::GetDlgItem($styleWindow,111),0x147,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 0){throw '极速模式全部正文范围或默认字号不清楚。'}
+    Start-Sleep -Milliseconds 200
+    Save-StyleFrame '00e-极速模式'|Out-Null
+    [StyleCheck]::SendMessage($styleFast,0x100,[IntPtr]0x25,[IntPtr]::Zero)|Out-Null
+    [StyleCheck]::SendMessage($styleFast,0x101,[IntPtr]0x25,[IntPtr]::Zero)|Out-Null
+    if([StyleCheck]::SendMessage($styleFast,0x400,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 1 -or -not [StyleCheck]::IsWindowEnabled([StyleCheck]::GetDlgItem($styleWindow,143))){throw '离开极速未恢复高级设置。'}
     # 显式显示键盘焦点，再隐藏焦点提示；同一开关状态的两帧用于核验实线轮廓。
     foreach($target in @($styleWindow,$styleFast)){[StyleCheck]::SendMessage($target,0x127,[IntPtr](2 -bor (1 -shl 16)),[IntPtr]::Zero)|Out-Null}
     [StyleCheck]::SendMessage($styleWindow,0x28,$styleFast,[IntPtr]1)|Out-Null
-    if(([StyleCheck]::SendMessage($styleFast,0x129,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -band 1) -ne 0 -or
-       ([StyleCheck]::SendMessage($styleFast,0xF2,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -band 8) -eq 0){throw '快速开关未取得可见的键盘焦点。'}
+    if(([StyleCheck]::SendMessage($styleFast,0x129,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -band 1) -ne 0){throw '模式滑块未显示键盘焦点。'}
     # 此处不由截图辅助函数补画，保留焦点消息处理后的真实即时外观。
     Save-FastFrame '00h-开关实线焦点' -NoRedraw|Out-Null
     foreach($target in @($styleWindow,$styleFast)){[StyleCheck]::SendMessage($target,0x127,[IntPtr](1 -bor (1 -shl 16)),[IntPtr]::Zero)|Out-Null}
@@ -256,17 +250,25 @@ try {
     $hiddenFocusHash=(Get-FileHash -LiteralPath (Join-Path $styleFolder '00i-开关隐藏焦点.png')).Hash
     if($focusHash -eq $hiddenFocusHash){throw '快速开关显示及隐藏键盘焦点的两帧相同。'}
     $styleEvidence.FastFocusFrames=@{VisibleSHA256=$focusHash;HiddenSHA256=$hiddenFocusHash}
-    Assert-FastHelpTooltip
-    if($Case -eq 'Fast'){
+    if($Case -ne 'Modes'){Assert-FastHelpTooltip}
+    if($Case -in @('Fast','Modes')){
         # 定向入口仅增加一次 800 DIP 客户宽度检查，随后由原 finally 关闭预览并保存证据。
         $outer=[StyleCheck+Rect]::new();$client=[StyleCheck+Rect]::new()
         [StyleCheck]::GetWindowRect($styleWindow,[ref]$outer)|Out-Null;[StyleCheck]::GetClientRect($styleWindow,[ref]$client)|Out-Null
         $scale=[StyleCheck]::GetDpiForWindow($styleWindow)/96.0
         [StyleCheck]::SetWindowPos($styleWindow,[IntPtr]::Zero,0,0,[int](800*$scale+$outer.Right-$outer.Left-$client.Right),$outer.Bottom-$outer.Top,0x16)|Out-Null
         Assert-FastHelp|Out-Null
-        Save-StyleFrame '00j-最小800宽快速帮助'|Out-Null
+        Save-StyleFrame '00j-最小800宽三档模式'|Out-Null
+        if($Case -eq 'Modes'){
+            [StyleCheck]::SendMessage($styleFast,0x100,[IntPtr]0x23,[IntPtr]::Zero)|Out-Null
+            [StyleCheck]::DpiChange($styleWindow,[int]($scale*96),144)
+            Start-Sleep -Milliseconds 200
+            Save-StyleFrame '00k-150缩放极速模式'|Out-Null
+            [StyleCheck]::SendMessage([StyleCheck]::GetDlgItem($styleWindow,102),0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
+            if([StyleCheck]::SendMessage($styleFast,0x400,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 0 -or [StyleCheck]::Text([StyleCheck]::GetDlgItem($styleWindow,115)) -notmatch '极速不支持反向'){throw '反向转换未明确退回标准模式。'}
+        }
         if(Test-Path -LiteralPath (Join-Path $styleFolder 'gui-worker.log')){throw '预览意外启动转换。'}
-        $styleEvidence.Checks=@{HomeFastToggle=$true;FastHelpAccessibleName=$true;FastHelpPosition=$true;FastToggleHitArea=$true;FastHelpClickDoesNotToggle=$true;FastHelpTooltipOnHover=$true;FastHelpTooltipHidesOnLeave=$true;FastToggleSpaceKey=$true;FastToggleFocusCue=$true;FastFocusFramesDiffer=$true;FastToggleAnimationFramesCaptured=$true;MinimumFastHelpVisible=$true;NoOfficeTask=$true}
+        $styleEvidence.Checks=@{ThreeModes=$true;DefaultStandard=$true;UltraScopeVisible=$true;UltraFixedSize=$true;UltraAdvancedDisabled=$true;ArrowKeys=$true;FocusFramesDiffer=$true;MinimumLayout=$true;NoOfficeTask=$true}
         $styleEvidence.Status='PASSED'
         $styleEvidence.ExecutableSHA256=(Get-FileHash -LiteralPath $styleExe).Hash
         $styleEvidence.SourceSHA256=Get-TestSourceHashes
@@ -325,7 +327,7 @@ try {
     [StyleCheck]::SendMessage([StyleCheck]::GetDlgItem($advanced,235),0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
     [StyleCheck]::PostMessage($advanced,0x10,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
     [StyleCheck]::SendMessage($styleWindow,0,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
-    if([StyleCheck]::SendMessage($styleFast,0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 1){throw '取消高级设置错误地关闭了首页快速转换。'}
+    if([StyleCheck]::SendMessage($styleFast,0x400,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 1){throw '取消高级设置错误地关闭了首页快速转换。'}
     # 取消不提交实验设置，确定后再次打开可见；恢复默认关闭全部实验项。
     [StyleCheck]::PostMessage($styleWindow,0x111,[IntPtr]143,[IntPtr]::Zero)|Out-Null
     $deadline=[DateTime]::UtcNow.AddSeconds(10)
@@ -408,7 +410,7 @@ try {
     Assert-QueueColumns
     [StyleCheck]::SendMessage([StyleCheck]::GetDlgItem($styleWindow,102),0xF5,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
     Save-StyleFrame '07-反向格式'|Out-Null
-    if(([StyleCheck]::GetWindowLongPtr($styleFast,-16).ToInt64() -band 0x10000000) -eq 0 -or -not [StyleCheck]::IsWindowEnabled($styleFast) -or [StyleCheck]::SendMessage($styleFast,0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 1){throw '切换方向未保留快速开关。'}
+    if(([StyleCheck]::GetWindowLongPtr($styleFast,-16).ToInt64() -band 0x10000000) -eq 0 -or -not [StyleCheck]::IsWindowEnabled($styleFast) -or [StyleCheck]::SendMessage($styleFast,0x400,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 1){throw '切换方向未保留快速开关。'}
     if([StyleCheck]::Text([StyleCheck]::GetDlgItem($styleWindow,109)) -ne '导出格式'){throw '反向设置没有切换。'}
     [StyleCheck]::PostMessage($styleWindow,0x111,[IntPtr]143,[IntPtr]::Zero)|Out-Null
     $deadline=[DateTime]::UtcNow.AddSeconds(10)
@@ -423,7 +425,7 @@ try {
     [StyleCheck]::PostMessage($advanced,0x111,[IntPtr]1,[IntPtr]::Zero)|Out-Null
     [StyleCheck]::SendMessage($styleWindow,0,[IntPtr]::Zero,[IntPtr]::Zero)|Out-Null
     if(Test-Path -LiteralPath (Join-Path $styleFolder 'gui-worker.log')){throw '预览意外启动转换。'}
-    if([StyleCheck]::SendMessage($styleFast,0xF0,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 0){throw '确认恢复默认后首页快速开关未关闭。'}
+    if([StyleCheck]::SendMessage($styleFast,0x400,[IntPtr]::Zero,[IntPtr]::Zero).ToInt32() -ne 0){throw '确认恢复默认后首页快速开关未关闭。'}
     # 通过 DPI 变化消息验证实际控件排版；高缩放下按钮可经键盘滚动到可见区域。
     $previousScale=[int][StyleCheck]::GetDpiForWindow($styleWindow)
     foreach($scale in @(96,120,144,192)){
@@ -452,7 +454,7 @@ try {
     $styleEvidence.Checks.FastHelpClickDoesNotToggle=$true
     $styleEvidence.Checks.FastHelpTooltipOnHover=$true
     $styleEvidence.Checks.FastHelpTooltipHidesOnLeave=$true
-    $styleEvidence.Checks.FastToggleSpaceKey=$true
+    $styleEvidence.Checks.ModeArrowKeys=$true
     $styleEvidence.Checks.FastToggleFocusCue=$true
     $styleEvidence.Checks.FastFocusFramesDiffer=$true
     $styleEvidence.Checks.ExperimentalCheckboxesOnly=$true
@@ -466,5 +468,5 @@ try {
         if(-not $styleProcess.WaitForExit(15000)){throw '预览窗口没有退出。'}};$styleProcess.Dispose()}
     Remove-Item -LiteralPath $styleCopy -Force
     $styleEvidence|ConvertTo-Json -Depth 8|Set-Content -LiteralPath (Join-Path $styleFolder 'style-results.json') -Encoding utf8
-    $styleEvidence|ConvertTo-Json -Depth 8|Set-Content -LiteralPath (Join-Path $TestOutputRoot 'ui-style-results.json') -Encoding utf8
+    if(-not $OutputDirectory){$styleEvidence|ConvertTo-Json -Depth 8|Set-Content -LiteralPath (Join-Path $TestOutputRoot 'ui-style-results.json') -Encoding utf8}
 }

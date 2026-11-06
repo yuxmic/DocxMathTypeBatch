@@ -13,7 +13,7 @@ struct SourcePosition {
     std::wstring location;
 };
 struct ScannedShape {Span span;std::wstring classType;long type{};};
-struct ScannedField {Span codeSpan;long kind{};std::wstring code,result;Span span;};
+struct ScannedField {Span codeSpan;long kind{};std::wstring code,result;Span span;ComPtr<IDispatch> pendingResult;};
 enum class EquationScope { All, Inline, Display };
 struct ScanOptions {
     EquationScope scope{EquationScope::All};
@@ -50,10 +50,26 @@ struct ScanResult {
 
 inline ComPtr<IDispatch> docRange(IDispatch* document, long start, long end) {
     require(start >= 0 && end >= start, "Valid Word range bounds");
-    return asObject(invoke(document, L"Range", DISPATCH_METHOD, {start, end}));
+    // 仅复用固定 Word.Document 接口的成员标识，不按同名成员跨接口共用。
+    static DISPID member=DISPID_UNKNOWN;
+    return asObject(invoke(document, L"Range", DISPATCH_METHOD, {start, end},&member));
 }
 inline ComPtr<IDispatch> collectionItem(IDispatch* collection, long index) {
     return asObject(invoke(collection, L"Item", DISPATCH_METHOD, {index}));
+}
+// 只读阶段按集合顺序枚举，避免 Item(index) 为每个对象重复定位。
+inline std::vector<ComPtr<IDispatch>> enumerateCollection(IDispatch* collection,long expected,StageProgress* progress=nullptr) {
+    std::vector<ComPtr<IDispatch>> objects;objects.reserve(static_cast<size_t>(expected));
+    if(!expected)return objects;
+    const auto source=invoke(collection,L"_NewEnum",DISPATCH_PROPERTYGET);ComPtr<IEnumVARIANT> sequence;
+    require(source.v.vt==VT_UNKNOWN&&source.v.punkVal,"Word collection enumerator");check(source.v.punkVal->QueryInterface(IID_PPV_ARGS(&sequence)),"Word collection enumeration interface");
+    for(;;){
+        struct CollectionBatch {VARIANT values[32]{};~CollectionBatch(){for(auto& value:values)VariantClear(&value);}} batch;
+        ULONG count{};taskPulse();check(sequence->Next(32,batch.values,&count),"Read collection batch");
+        for(ULONG i=0;i<count;++i){Value value;std::swap(value.v,batch.values[i]);objects.push_back(asObject(value));if(progress)progress->advance();}
+        if(count<32)break;
+    }
+    require(objects.size()==static_cast<size_t>(expected),"Word collection enumeration count");return objects;
 }
 inline long information(IDispatch* range, long type) {
     auto value = invoke(range, L"Information", DISPATCH_PROPERTYGET, {type});
@@ -73,15 +89,17 @@ inline SourcePosition originalSourcePosition(IDispatch* document,long start,cons
 inline std::string sourcePositionJson(const SourcePosition& position) {
     return ",\"SourceLocation\":"+quote(position.location.empty()?L"原文页码未知":position.location)+",\"Page\":"+(position.page?std::to_string(position.page):"null");
 }
-inline Span bounds(IDispatch* range) { return {integer(range, L"Start"), integer(range, L"End")}; }
-inline Span fieldBounds(IDispatch* field,ScannedField* snapshot=nullptr) {
+inline Span bounds(IDispatch* range) {static DISPID start=DISPID_UNKNOWN,end=DISPID_UNKNOWN;return {integer(range,L"Start",&start),integer(range,L"End",&end)};}
+inline Span fieldBounds(IDispatch* field,ScannedField* snapshot=nullptr,bool captureText=true,bool deferResult=false) {
     auto codeRange=get(field,L"Code"),resultRange=get(field,L"Result");const auto code=bounds(codeRange.Get()),value=bounds(resultRange.Get());
     const long kind=snapshot||value.start==value.end?integer(field,L"Type"):0;
     // 保存后扫描已取得域范围，顺便记录核验所需的代码和缓存，避免再遍历整份域集合。
-    if(snapshot){snapshot->codeSpan=code;snapshot->kind=kind;if(kind!=58){snapshot->code=text(codeRange.Get(),L"Text");snapshot->result=text(resultRange.Get(),L"Text");}}
+    if(snapshot){snapshot->codeSpan=code;snapshot->kind=kind;if(kind!=58&&captureText){snapshot->code=text(codeRange.Get(),L"Text");
+        // 初始标准扫描暂存结果范围；分页后才读结果，避免把旧页码缓存当作核验基线。
+        if(deferResult)snapshot->pendingResult=resultRange;else snapshot->result=text(resultRange.Get(),L"Text");}}
     Span span{code.start-1,value.end+1};
     if(value.start==value.end&&kind==51){
-        const auto instruction=snapshot?snapshot->code:text(codeRange.Get(),L"Text");
+        const auto instruction=snapshot&&captureText?snapshot->code:text(codeRange.Get(),L"Text");
         if(nativeNumberWithoutSeparator(instruction))
             span.end=code.end+1; // 原生编号没有结果分隔符，避免多占相邻内容。
     }
@@ -149,7 +167,8 @@ inline bool tokensMatch(TokenKind opening, TokenKind closing) {
 inline std::vector<Token> tokens(const ScanRangeContext& document, Span segment, const std::wstring& source) {
     std::vector<Token> result;
     long cursor = segment.start;
-    while (auto found = findLiteral(document, cursor, segment.end, L"$")) {
+    // 没有美元符号时跳过空搜索；公式的实际位置仍由 Word Find 返回。
+    if(source.find(L'$')!=std::wstring::npos)while (auto found = findLiteral(document, cursor, segment.end, L"$")) {
         auto dollar = bounds(found.Get());
         if (escapedAt(document, dollar.start, segment.start)) { cursor = dollar.end; continue; }
         long count = 1;
@@ -198,10 +217,13 @@ inline void addItem(const ScanRangeContext& document, Span span, Span inner, Tok
                     long paragraph, ScanResult& result, const std::wstring& paragraphText, Span allowed) {
     auto range = docRange(document, span.start, span.end);
     ScanItem item;
-    item.span = span; item.position.sourceStart=span.start;item.paragraph = paragraph; item.reason = reason; item.ready = reason.empty();
+    item.span = span; item.position.sourceStart=span.start;item.paragraph = paragraph;
     item.source = text(range.Get(), L"Text");
     if (inner.end >= inner.start && inner.start >= span.start && inner.end <= span.end)
         item.inner = text(docRange(document, inner.start, inner.end).Get(), L"Text");
+    // 复用已经读取的公式内容检查语法，保留显式的定界符错误原因。
+    item.reason = reason.empty() ? lexicalReason(item.inner,document.options.fast) : reason;
+    item.ready = item.reason.empty();
     item.delimiter = kind == TokenKind::Dollar ? L"$" : kind == TokenKind::DoubleDollar || kind == TokenKind::EmptyDisplay ? L"$$" :
                      kind == TokenKind::BracketOpen || kind == TokenKind::BracketClose ? L"\\[\\]" :
                      kind == TokenKind::RepairedBracketOpen ? L"[\\]" :
@@ -265,7 +287,7 @@ inline long scanSegment(const ScanRangeContext& document, Span segment, long par
         if (closes) {
             const Span inner{opening.span.end, token.span.start};
             addItem(document, {opening.span.start, token.span.end}, inner, opening.kind,
-                    lexicalReason(text(docRange(document, inner.start, inner.end).Get(), L"Text"),document.options.fast), paragraph, result, paragraphText, allowed);
+                    L"", paragraph, result, paragraphText, allowed);
         } else {
             // 混用定界符时消费冲突标记，保守拒绝，不生成互相覆盖的可转换范围。
             addItem(document, {opening.span.start, token.span.end}, {-1, -1}, opening.kind, L"MIXED_DELIMITERS", paragraph, result, paragraphText, allowed);
@@ -284,7 +306,7 @@ inline long scanSegment(const ScanRangeContext& document, Span segment, long par
             const auto all=tokens(document,{opening.span.start,closing.end},text(docRange(document,opening.span.start,closing.end).Get(),L"Text"));
             if(body.find_first_of(L"\r\n\v")!=std::wstring::npos && structuredMultiline(body) && all.size()==2 &&
                 tokensMatch(opening.kind, all.back().kind)) {
-                addItem(document,{opening.span.start,closing.end},inner,opening.kind,lexicalReason(body,document.options.fast),paragraph,result,paragraphText,allowed);return closing.end;
+                addItem(document,{opening.span.start,closing.end},inner,opening.kind,L"",paragraph,result,paragraphText,allowed);return closing.end;
             }
         }
         addItem(document, {opening.span.start, segment.end}, {-1, -1}, opening.kind, L"UNMATCHED_OPEN", paragraph, result, paragraphText, allowed);
@@ -319,8 +341,9 @@ inline bool addExistingDisplay(IDispatch* document,IDispatch* range,long paragra
     result.items.push_back(std::move(item));return true;
 }
 
-inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bool captureFields=false,bool includeExisting=false,bool includeOmml=false,const ScanOptions& options={}) {
+inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bool captureFields=false,bool includeExisting=false,bool includeOmml=false,const ScanOptions& options={},const std::vector<long>* skipFieldText=nullptr,bool deferFieldResults=false) {
     if(options.saved)std::puts("TIMING_STAGE RESCAN_BOUNDARIES");
+    if(options.progress)std::puts(options.saved?"UI_PHASE RESCAN_BOUNDARIES":"UI_PHASE SCAN_BOUNDARIES");
     ScanResult result;
     const bool capturePoints=options.capturePoints&&!options.saved;
     const bool scanOmml=includeOmml&&options.convertOmml;
@@ -342,14 +365,19 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
         if(scanOmml&&protect&&blockOmml)ommlExcluded.push_back(excluded.back());
         return excluded.back();
     };
+    if(options.progress)std::puts(options.saved?"UI_PHASE RESCAN_TABLES":"UI_PHASE SCAN_TABLES");
     auto tables=get(document,L"Tables");
     const long tableCount=integer(tables.Get(),L"Count");
-    for(long i=1;i<=tableCount;++i)exclude(get(collectionItem(tables.Get(),i).Get(),L"Range").Get());
+    StageProgress tableProgress(options.saved?"RESCAN_TABLES":"SCAN_TABLES",static_cast<size_t>(tableCount),options.progress);
+    for(long i=1;i<=tableCount;++i){exclude(get(collectionItem(tables.Get(),i).Get(),L"Range").Get());tableProgress.advance();}
+    if(options.progress)std::puts(options.saved?"UI_PHASE RESCAN_BOUNDARY_OBJECTS":"UI_PHASE SCAN_BOUNDARY_OBJECTS");
     auto shapes = get(content.Get(), L"InlineShapes");
     result.inlineShapes = integer(shapes.Get(), L"Count");
     result.shapes.reserve(static_cast<size_t>(result.inlineShapes));
+    StageProgress shapeProgress(options.saved?"RESCAN_BOUNDARY_OBJECTS":"SCAN_BOUNDARY_OBJECTS",static_cast<size_t>(result.inlineShapes),options.progress);
+    const auto scannedShapes=enumerateCollection(shapes.Get(),result.inlineShapes);
     for (long index = 1; index <= result.inlineShapes; ++index) {
-        auto shape = collectionItem(shapes.Get(), index);
+        const auto& shape = scannedShapes[static_cast<size_t>(index-1)];
         auto range=get(shape.Get(),L"Range");exclude(range.Get(),false);
         ScannedShape snapshot{excluded.back(),L""};
         const auto type = integer(shape.Get(), L"Type");
@@ -360,38 +388,56 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
             if (classType.find(L"Equation.DSMT") == 0) ++result.existingMathType;
         }
         result.shapes.push_back(std::move(snapshot));
+        shapeProgress.advance();
     }
     // 只读扫描内复用原生公式对象和真实范围，候选构造不再访问一次 COM 集合。
     struct OmmlRead {ComPtr<IDispatch> math,range;Span span;long ordinal;};
     std::vector<OmmlRead> ommlReads;
     for (const auto& entry : {std::make_pair(L"OMaths", &result.nativeMath), std::make_pair(L"Revisions", &result.revisions),
                               std::make_pair(L"ContentControls", &result.controls)}) {
+        const bool omml=wcscmp(entry.first,L"OMaths")==0;
+        const bool revisions=wcscmp(entry.first,L"Revisions")==0;
+        const char* stage=omml?(options.saved?"RESCAN_OMML_BOUNDARIES":"SCAN_OMML_BOUNDARIES"):
+            revisions?(options.saved?"RESCAN_REVISIONS":"SCAN_REVISIONS"):(options.saved?"RESCAN_CONTROLS":"SCAN_CONTROLS");
+        if(options.progress)std::printf("UI_PHASE %s\n",stage);
         auto collection = get(content.Get(), entry.first);
         *entry.second = integer(collection.Get(), L"Count");
-        const bool omml=wcscmp(entry.first,L"OMaths")==0;
+        StageProgress boundaryProgress(stage,static_cast<size_t>(*entry.second),options.progress);
         if(scanOmml&&omml)ommlReads.reserve(static_cast<size_t>(*entry.second));
         for (long index = 1; index <= *entry.second; ++index) {
             auto object=collectionItem(collection.Get(),index);auto range=get(object.Get(),L"Range");
             const auto span=exclude(range.Get(),true,!omml,wcscmp(entry.first,L"ContentControls")==0);
             if(scanOmml&&omml)ommlReads.push_back({std::move(object),std::move(range),span,index});
+            boundaryProgress.advance();
         }
     }
     // 关闭转换仍需为保留公式建立 XML 基线；候选开关不能关闭范围边界或核验。
     result.bodyOmml=includeOmml&&result.nativeMath>0;
+    if(options.progress)std::puts(options.saved?"UI_PHASE RESCAN_FIELDS":"UI_PHASE SCAN_FIELDS");
     auto fields = get(content.Get(), L"Fields");
     result.fields = integer(fields.Get(), L"Count");
     captureFields=captureFields||(includeExisting&&result.existingMathType>0);
     if(captureFields)result.fieldSnapshots.resize(static_cast<size_t>(result.fields));
+    StageProgress fieldProgress(options.saved?"RESCAN_FIELDS":"SCAN_FIELDS",static_cast<size_t>(result.fields),options.progress);
+    const auto scannedFields=enumerateCollection(fields.Get(),result.fields);
     for (long index = 1; index <= result.fields; ++index) {
-        auto field = collectionItem(fields.Get(), index);
-        excluded.push_back(fieldBounds(field.Get(),captureFields?&result.fieldSnapshots[static_cast<size_t>(index-1)]:nullptr));
+        const auto& field=scannedFields[static_cast<size_t>(index-1)];
+        // 本次编号域仅豁免文本比较，类型和边界仍完整记录；空结果域仍按需读取代码修正边界。
+        const bool captureText=!skipFieldText||!std::binary_search(skipFieldText->begin(),skipFieldText->end(),index-1);
+        excluded.push_back(fieldBounds(field.Get(),captureFields?&result.fieldSnapshots[static_cast<size_t>(index-1)]:nullptr,captureText,deferFieldResults));
         if(scanOmml)ommlExcluded.push_back(excluded.back());
+        fieldProgress.advance();
     }
     for (const auto name : {L"Footnotes", L"Endnotes"}) {
+        const bool footnotes=wcscmp(name,L"Footnotes")==0;
+        const char* stage=footnotes?(options.saved?"RESCAN_FOOTNOTES":"SCAN_FOOTNOTES"):(options.saved?"RESCAN_ENDNOTES":"SCAN_ENDNOTES");
+        if(options.progress)std::printf("UI_PHASE %s\n",stage);
         auto notes = get(document, name);
         const auto count = integer(notes.Get(), L"Count");
+        StageProgress noteProgress(stage,static_cast<size_t>(count),options.progress);
         for (long index = 1; index <= count; ++index) {
             exclude(get(collectionItem(notes.Get(), index).Get(), L"Reference").Get()); ++result.noteReferences;
+            noteProgress.advance();
         }
     }
     std::sort(excluded.begin(), excluded.end(), [](const Span& a, const Span& b) { return a.start < b.start; });
@@ -401,25 +447,15 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
     if(options.saved)std::puts("TIMING_STAGE RESCAN_PARAGRAPHS");
     auto paragraphs = get(content.Get(), L"Paragraphs");
     result.paragraphs = integer(paragraphs.Get(), L"Count");
-    std::vector<ComPtr<IDispatch>> savedParagraphs;
-    if(options.saved){
-        // 只读重扫按批顺序枚举段落，避免每段再经 Item(index) 查找；Word 坐标仍逐范围读取。
-        const auto source=invoke(paragraphs.Get(),L"_NewEnum",DISPATCH_PROPERTYGET);ComPtr<IEnumVARIANT> sequence;
-        require(source.v.vt==VT_UNKNOWN&&source.v.punkVal,"Word paragraph enumerator");check(source.v.punkVal->QueryInterface(IID_PPV_ARGS(&sequence)),"Word paragraph enumeration interface");
-        for(;;){
-            struct ParagraphBatch {VARIANT values[32]{};~ParagraphBatch(){for(auto& value:values)VariantClear(&value);}} batch;
-            ULONG count{};taskPulse();check(sequence->Next(32,batch.values,&count),"Read paragraph batch");
-            for(ULONG i=0;i<count;++i){Value value;std::swap(value.v,batch.values[i]);savedParagraphs.push_back(asObject(value));}
-            if(count<32)break;
-        }
-        require(savedParagraphs.size()==static_cast<size_t>(result.paragraphs),"Saved paragraph enumeration count");
-    }
+    if(options.saved&&options.progress)std::puts("UI_PHASE RESCAN_PARAGRAPHS");
+    StageProgress enumerationProgress("RESCAN_PARAGRAPHS",static_cast<size_t>(result.paragraphs),options.saved&&options.progress);
+    const auto scannedParagraphs=enumerateCollection(paragraphs.Get(),result.paragraphs,options.saved?&enumerationProgress:nullptr);
     StageProgress paragraphProgress(options.saved?"RESCAN_TEXT":"SCAN_TEXT",static_cast<size_t>(result.paragraphs),options.progress);
     // OMML 上下文复用本轮已经读取的段落文本，不为识别手动编号再次读取整段。
     std::vector<std::wstring> ommlParagraphText(scanOmml&&result.bodyOmml?static_cast<size_t>(result.paragraphs):0);
     long consumed{};size_t excludedIndex{};
     for (long index = 1; index <= result.paragraphs; ++index) {
-        auto paragraph = options.saved?savedParagraphs[static_cast<size_t>(index-1)]:collectionItem(paragraphs.Get(), index);
+        const auto& paragraph=scannedParagraphs[static_cast<size_t>(index-1)];
         auto range = get(paragraph.Get(), L"Range");
         auto paragraphSpan = bounds(range.Get());
         result.paragraphStarts.push_back(paragraphSpan.start);
@@ -452,8 +488,9 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
     }
     // 仅开启 OMML 时把正文原生公式并入同一清单；表格等区域仍由实验分支处理。
     if(scanOmml&&result.bodyOmml){
+        StageProgress ommlProgress(options.saved?"RESCAN_OMML":"SCAN_OMML",ommlReads.size(),options.progress);
         for(const auto& read:ommlReads){taskPulse();const auto& math=read.math;const auto& range=read.range;const auto span=read.span;
-            if(std::any_of(ommlExcluded.begin(),ommlExcluded.end(),[&](Span block){return block.start<span.end&&block.end>span.start;}))continue;
+            if(std::any_of(ommlExcluded.begin(),ommlExcluded.end(),[&](Span block){return block.start<span.end&&block.end>span.start;})){ommlProgress.advance();continue;}
             ScanItem item;item.span=span;item.position.sourceStart=span.start;item.ommlOrdinal=read.ordinal;item.delimiter=L"OMML";item.display=integer(math.Get(),L"Type")==0;item.ready=true;
             // 段落位置来自已记录的 Word 范围；文本匹配只判断上下文，不推算 Word 字符坐标。
             const auto paragraphIndex=static_cast<size_t>(std::upper_bound(result.paragraphStarts.begin(),result.paragraphStarts.end(),span.start)-result.paragraphStarts.begin()-1);
@@ -471,11 +508,13 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
                     // OMML 的段外空白同样不能跨过已记录的域和控件边界。
                     for(const auto block:ommlExcluded){if(block.end<=span.start)item.span.start=std::max(item.span.start,block.end);if(block.start>=span.end)item.span.end=std::min(item.span.end,block.start);}
                 }}
-            if(!selectedEquation(item.display,options.scope))continue;
+            if(!selectedEquation(item.display,options.scope)){ommlProgress.advance();continue;}
             if(capturePoints)item.points=equationPoints(range.Get(),ScanRangeContext{document,nullptr,true,options},span);
             item.source=item.span.start==span.start&&item.span.end==span.end?std::move(nativeText):text(docRange(document,item.span.start,item.span.end).Get(),L"Text");result.items.push_back(std::move(item));
+            ommlProgress.advance();
         }
     }
+    if(options.progress)std::puts(options.saved?"UI_PHASE RESCAN_ORDERING":"UI_PHASE SCAN_ORDERING");
     std::sort(result.items.begin(), result.items.end(), [](const ScanItem& a, const ScanItem& b) { return a.span.start < b.span.start; });
     if(!options.fast){long previousEnd = -1;
     if(options.saved)std::puts("TIMING_STAGE RESCAN_RANGES");

@@ -19,6 +19,14 @@ function Invoke-DisplayCase([string]$Name,[string]$InputFile,[int]$Targets,[int]
     try{if(-not $process.WaitForExit(180000) -or $process.ExitCode -ne 0){throw ('显示布局转换失败：'+$Name+'；'+$log)}}finally{$process.Dispose()}
     $result=Get-Content -LiteralPath $report -Raw|ConvertFrom-Json
     if($result.Status -ne 'COMPLETE' -or $result.Targets -ne $Targets -or $result.Succeeded -ne $Targets -or $result.NumbersAdded -ne $Added -or $result.NumbersUpdated -ne $Updated){throw ('显示布局数量错误：'+$Name+'；'+$report)}
+    # 纯补号沿用整段范围，不能再为编号和种子重复创建跟踪范围。
+    if($Targets -eq 0 -and $Start -and $result.NumberReferencesUpdated -eq 0){
+        $rangeCounts=[regex]::Matches([IO.File]::ReadAllText($log),'(?m)^UI_STAGE_PROGRESS NUMBER_RANGES 0 (\d+)')
+        if(-not $rangeCounts.Count){throw ('未取得纯补号的跟踪范围计数：'+$Name)}
+        foreach($match in $rangeCounts){
+            if([int]$match.Groups[1].Value -ne $Displays){throw ('纯补号创建了重复的跟踪范围：'+$Name)}
+        }
+    }
     & python -B -X utf8 (Join-Path $PSScriptRoot 'helpers/test_native_display.py') check $InputFile $output $Displays $CheckStart|ForEach-Object{Write-Host $_}
     if($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $InputFile).Hash -ne $hash){throw ('显示布局或原件核验失败：'+$Name)}
     if($Targets -eq 0 -and (Get-Content -LiteralPath $log -Raw).Contains('DEFAULT_PREFERENCES_LENGTH')){throw '纯编号任务不应初始化 MathType。'}

@@ -76,7 +76,7 @@ struct App {
     ComPtr<ID2D1Factory> drawingFactory;ComPtr<ID2D1DCRenderTarget> textTarget;ComPtr<IDWriteFactory> textFactory;
     ComPtr<IDWriteTextFormat> bodyText,headingText,titleText,helpText;
     HWND window{},fastTooltip{}; HINSTANCE instance{}; UINT dpi{96}; HFONT body{}, heading{}, title{}; HBRUSH white{}, background{};HICON documentIcon{};
-    std::wstring fastHelpText{L"舍弃版式检查，提高转换速度，但存在错位风险"};
+    std::wstring fastHelpText{L"标准：核验与失败恢复。快速：减少读取，跳过核验。极速：转换正文行内和行外的 LaTeX、OMML，使用指定字号；独立行外公式可加从 1 开始的默认右编号。极速不处理额外位置，不核验结果，高级设置不生效。方向键切换档位。"};
     std::wstring executable, input, task, stopFile, output, resultReport;
     std::wstring install, mathInstallError;
     WorkerClient worker;WorkerState run;
@@ -87,12 +87,14 @@ struct App {
     std::vector<size_t> batchOrder;
     size_t batchPosition{};
     bool batchRunning{}, batchStopping{};
-    ULONGLONG batchStarted{}, batchElapsed{};
+    ULONGLONG batchStarted{}, batchElapsed{},stageStarted{};
+    std::string stageKey;
     EquationSpacing inlineSpacing,displaySpacing;
     EquationNumbering numbering;
     ExperimentalOptions experimental;
     bool convertOmml{true};
-    bool fastConversion{};
+    ConversionMode conversionMode{ConversionMode::Standard};
+    int normalScope{},normalFollowSize{};
     float fastPosition{},fastStart{},fastTarget{};ULONGLONG fastStarted{};
     bool chapterNumber{},sectionNumber{};
     int chapterStyle{},sectionStyle{},equationStyle{},numberEnclosure{};
@@ -118,7 +120,7 @@ struct App {
         if(time>=1){fastStarted=0;KillTimer(child,92);}
     }
     void startFastTransition(HWND child) {
-        const float target=SendMessageW(child,BM_GETCHECK,0,0)==BST_CHECKED?1.0f:0.0f;
+        const float target=static_cast<float>(static_cast<int>(conversionMode));
         if(target==fastTarget)return;
         // 连续点击从当前画面反向过渡；系统关闭界面动画时立即显示最终状态。
         updateFastTransition(child);fastStart=fastPosition;fastTarget=target;
@@ -126,6 +128,23 @@ struct App {
         if(animate){fastStarted=GetTickCount64();SetTimer(child,92,15,nullptr);}
         else{fastPosition=target;fastStarted=0;KillTimer(child,92);}
         InvalidateRect(child,nullptr,FALSE);
+    }
+    void setConversionMode(ConversionMode mode) {
+        if(batchRunning)return;
+        if(reverseMode&&mode==ConversionMode::Ultra)mode=ConversionMode::Standard;
+        const bool wasUltra=conversionMode==ConversionMode::Ultra,isUltra=mode==ConversionMode::Ultra;
+        if(isUltra&&!wasUltra){
+            normalScope=static_cast<int>(SendMessageW(control(ModeBox),CB_GETCURSEL,0,0));
+            normalFollowSize=static_cast<int>(SendMessageW(control(FollowSize),CB_GETCURSEL,0,0));
+            SendMessageW(control(ModeBox),CB_SETCURSEL,0,0);SendMessageW(control(FollowSize),CB_SETCURSEL,1,0);
+            if(normalFollowSize==0)set(SizeBox,L"12");
+        }else if(wasUltra&&!isUltra){
+            SendMessageW(control(ModeBox),CB_SETCURSEL,normalScope,0);SendMessageW(control(FollowSize),CB_SETCURSEL,normalFollowSize,0);
+        }
+        conversionMode=mode;SendMessageW(control(FastConversion),TBM_SETPOS,TRUE,static_cast<LPARAM>(mode));
+        set(FastConversion,L"转换模式："+std::wstring(conversionModeLabel(mode)));startFastTransition(control(FastConversion));
+        set(StyleNote,isUltra?L"正文 LaTeX 与 OMML · 未核验\r\n行内/行外 · 指定字号 · 行外可编号":mode==ConversionMode::Fast?L"快速转换 · 跳过核验":reverseMode?L"标准转换 · 极速不支持反向转换":L"标准转换 · 核验与失败恢复");
+        if(wasUltra!=isUltra)layout();refresh();
     }
     void animateProgress(bool active) {
         if(progressMarquee==active)return;
@@ -141,9 +160,15 @@ struct App {
     bool cleanupTask() {
         // 临时目录由本实例唯一创建，仅清理登记的任务文件，不递归删除或枚举用户目录。
         if (task.empty()) return true;
-        bool clean=true;
-        for (const auto& path : {stopFile, resultReport,stopFile+L".commit"}) if (!path.empty() && !DeleteFileW(path.c_str()) && GetLastError()!=ERROR_FILE_NOT_FOUND) clean=false;
+        bool clean=true;size_t completed{};
+        const bool reporting=batchRunning&&window&&IsWindow(window);
+        if(reporting){stageKey="GUI_CLEANUP";stageStarted=GetTickCount64();set(Status,L"正在清理界面任务文件…");updateElapsed();countProgress(0,4);UpdateWindow(window);}
+        for (const auto& path : {stopFile, resultReport,stopFile+L".commit"}) {
+            if (!path.empty() && !DeleteFileW(path.c_str()) && GetLastError()!=ERROR_FILE_NOT_FOUND) clean=false;
+            if(reporting)countProgress(++completed,4);
+        }
         if(!RemoveDirectoryW(task.c_str())&&GetLastError()!=ERROR_PATH_NOT_FOUND)clean=false;
+        if(reporting)countProgress(4,4);
         if(clean){task.clear(); stopFile.clear(); resultReport.clear();}return clean;
     }
     void newTask() {
@@ -222,9 +247,11 @@ struct App {
         add(InlineDelimiterLabel,L"STATIC",L"行内定界符");add(InlineDelimiterNote,L"STATIC",L"$...$（固定）");add(DisplayDelimiterLabel,L"STATIC",L"行外定界符");
         add(Bracket,L"BUTTON",L"\\[...\\]",BS_AUTORADIOBUTTON|WS_TABSTOP|WS_GROUP);add(Dollar,L"BUTTON",L"$$...$$",BS_AUTORADIOBUTTON);
         SendMessageW(control(Bracket),BM_SETCHECK,BST_CHECKED,0);
-        add(FastLabel,L"STATIC",L"快速转换");
-        add(FastConversion,L"BUTTON",L"快速转换（跳过核验）",BS_AUTOCHECKBOX|WS_TABSTOP);
+        add(FastLabel,L"STATIC",L"转换模式");
+        add(FastConversion,TRACKBAR_CLASSW,L"转换模式：标准",TBS_HORZ|TBS_NOTICKS|WS_TABSTOP);
+        SendMessageW(control(FastConversion),TBM_SETRANGE,FALSE,MAKELPARAM(0,2));SendMessageW(control(FastConversion),TBM_SETPAGESIZE,0,1);
         add(FastHelp,L"BUTTON",fastHelpText.c_str(),BS_OWNERDRAW|WS_TABSTOP);
+        add(StyleNote,L"STATIC",L"标准转换 · 核验与失败恢复");
         add(OutputHeading,L"STATIC",L"输出设置");add(DirectoryLabel,L"STATIC",L"保存位置");
         add(OriginalDirectory,L"BUTTON",L"原文件夹",BS_AUTORADIOBUTTON|WS_GROUP|WS_TABSTOP);
         add(CustomDirectory,L"BUTTON",L"指定目录",BS_AUTORADIOBUTTON);SendMessageW(control(OriginalDirectory),BM_SETCHECK,BST_CHECKED,0);
@@ -242,7 +269,7 @@ struct App {
         SendMessageW(control(ModeBox),CB_SETITEMHEIGHT,static_cast<WPARAM>(-1),px(30));
         for(int id:{Forward,Reverse,FastConversion,FastHelp,Choose,AddFolder,ClearQueue,Advanced,ChooseDirectory,Start,Stop,ModeBox,FollowSize,AddNumbers,SizeSpin,Progress,Bracket,Dollar,QueueList})
             SetWindowSubclass(control(id),paintControl,1,reinterpret_cast<DWORD_PTR>(this));
-        // 由系统管理悬停显示和离开隐藏；说明仅关联问号，不扩大快速开关的点击区域。
+        // 由系统管理悬停说明；三档滑块保留系统键盘和可访问接口。
         fastTooltip=CreateWindowExW(WS_EX_TOPMOST,TOOLTIPS_CLASSW,nullptr,WS_POPUP|TTS_ALWAYSTIP|TTS_NOPREFIX,
             CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,CW_USEDEFAULT,window,nullptr,instance,nullptr);
         require(fastTooltip!=nullptr,"Create fast conversion tooltip");
@@ -271,7 +298,7 @@ struct App {
         show(Advanced,true);
     }
     void setDirection(bool reverse) {
-        if(batchRunning||reverseMode==reverse)return;reverseMode=reverse;updateDirectionControls();
+        if(batchRunning||reverseMode==reverse)return;reverseMode=reverse;setConversionMode(conversionMode);updateDirectionControls();
         set(NameBox,reverse?L"_LaTeX":L"_MathType");refresh();
         if(acceptance.interactive()&&!input.empty()&&acceptance.step==0)acceptance.advance(acceptanceView());
         InvalidateRect(control(Forward),nullptr,TRUE);InvalidateRect(control(Reverse),nullptr,TRUE);
@@ -311,14 +338,13 @@ struct App {
         move(NumberLabel,right,210,74,34);move(AddNumbers,right+82,210,rw-82,200);
         move(InlineDelimiterLabel,right,132,88,30);move(InlineDelimiterNote,right+90,132,rw-90,30);
         move(DisplayDelimiterLabel,right,172,88,30);move(Bracket,right+90,170,88,32);move(Dollar,right+182,170,80,32);
-        // 收紧设置行与输出区间距，为最后一行的快速开关留出空间。
-        // 标签与滑块分别占用独立控件，点击文字或同行空白不会切换状态。
-        move(FastLabel,right,250,52,30);move(FastHelp,right+56,258,16,16);move(FastConversion,right+82,254,40,22);
-        move(OutputHeading,right,294,rw,24);move(DirectoryLabel,right,328,74,28);
-        move(OriginalDirectory,right+82,324,90,30);move(CustomDirectory,right+180,324,90,30);
-        move(DirectoryBox,right+82,360,rw-142,34);move(ChooseDirectory,width-84,360,52,34);
-        move(NameLabel,right,404,78,32);move(NameBox,right+82,402,rw-82,34);move(OutputNote,right,442,rw,22);
-        move(Status,18,height-60,width-410,24);move(Elapsed,width-394,height-60,138,24);
+        move(FastLabel,right,250,52,32);move(FastHelp,right+56,258,16,16);move(FastConversion,right+82,250,rw-82,32);
+        move(StyleNote,right,284,rw,36);
+        move(OutputHeading,right,324,rw,24);move(DirectoryLabel,right,350,74,28);
+        move(OriginalDirectory,right+82,346,90,30);move(CustomDirectory,right+180,346,90,30);
+        move(DirectoryBox,right+82,382,rw-142,34);move(ChooseDirectory,width-84,382,52,34);
+        move(NameLabel,right,426,78,32);move(NameBox,right+82,424,rw-82,34);move(OutputNote,right,464,rw,22);
+        move(Status,18,height-60,width-476,24);move(Elapsed,width-452,height-60,196,24);
         move(Stop,width-250,height-62,90,34);move(Start,width-154,height-62,136,34);move(Progress,18,height-20,width-36,5);
         InvalidateRect(window,nullptr,TRUE);for(int id:{ModeBox,FollowSize,AddNumbers}){SendMessageW(control(id),CB_SETITEMHEIGHT,0,px(28));SendMessageW(control(id),CB_SETITEMHEIGHT,static_cast<WPARAM>(-1),px(28));}
     }
@@ -344,6 +370,7 @@ struct App {
         const bool validOutput=legalName(L"document"+suffix+L".docx")&&(original||(attributes!=INVALID_FILE_ATTRIBUTES&&(attributes&FILE_ATTRIBUTE_DIRECTORY)));
         enable(Start,!batchRunning&&!documents.empty()&&wordDetected&&mathDetected&&validStyle&&validOutput);
         for(int id:{Choose,AddFolder,ClearQueue,ModeBox,FollowSize,NameBox,Forward,Reverse,FastConversion,Bracket,Dollar,OriginalDirectory,CustomDirectory,Advanced})enable(id,!batchRunning);
+        if(conversionMode==ConversionMode::Ultra)for(int id:{ModeBox,FollowSize,Advanced})enable(id,false);
         enable(ChooseDirectory,!batchRunning&&!original);enable(DirectoryBox,!batchRunning&&!original);
         const bool fixed=SendMessageW(control(FollowSize),CB_GETCURSEL,0,0)==1;
         show(SizeBox,!reverseMode&&fixed);show(SizeSpin,!reverseMode&&fixed);enable(SizeBox,!batchRunning&&fixed);enable(SizeSpin,!batchRunning&&fixed);
@@ -363,7 +390,8 @@ struct App {
     }
     void launch(const std::vector<std::wstring>& arguments) {
         const bool hadCounts=run.scanned;
-        worker.join();run.reset(fastConversion);
+        worker.join();run.reset(conversionMode);
+        stageKey.clear();stageStarted=GetTickCount64();
         require(SetEnvironmentVariableW(L"DOCX_MATH_GUI_COMMIT",(stopFile+L".commit").c_str())!=0,"Set current GUI publication acknowledgement");
         if(hadCounts)redrawCounts();
         animateProgress(true);refresh();worker.start(window,executable,arguments,acceptance.active());
@@ -373,8 +401,8 @@ struct App {
         auto value=fileName(document.path);ListView_SetItemText(control(QueueList),static_cast<int>(index),0,value.data());
         wchar_t bytes[48]{};swprintf_s(bytes,document.bytes>=1024*1024?L"%.1f MB":L"%.0f KB",document.bytes>=1024*1024?document.bytes/1048576.0:std::max(1.0,document.bytes/1024.0));
         ListView_SetItemText(control(QueueList),static_cast<int>(index),1,bytes);
-        const auto state=document.fast&&document.state==DocumentState::Complete?L"完成·快速":document.fast&&document.state==DocumentState::Partial?L"部分·快速":document.state==DocumentState::Complete&&!document.warnings.empty()?L"完成·提醒":DocumentStates[static_cast<int>(document.state)];
-        ListView_SetItemText(control(QueueList),static_cast<int>(index),2,const_cast<wchar_t*>(state));
+        const std::wstring state=unverifiedMode(document.mode)&&(document.state==DocumentState::Complete||document.state==DocumentState::Partial)?std::wstring(document.state==DocumentState::Complete?L"完成·":L"部分·")+conversionModeLabel(document.mode):document.state==DocumentState::Complete&&!document.warnings.empty()?L"完成·提醒":DocumentStates[static_cast<int>(document.state)];
+        ListView_SetItemText(control(QueueList),static_cast<int>(index),2,const_cast<wchar_t*>(state.c_str()));
         ListView_SetItemText(control(QueueList),static_cast<int>(index),3,const_cast<wchar_t*>(L"×"));
         ListView_SetItemText(control(QueueList),static_cast<int>(index),4,const_cast<wchar_t*>(L"查看"));
     }
@@ -405,28 +433,35 @@ struct App {
     void updateElapsed() {
         const auto milliseconds=batchRunning?GetTickCount64()-batchStarted:batchElapsed;
         // 用系统单调时钟的差值计时，界面漏掉刷新也不会使计时变慢。
-        wchar_t duration[64]{};swprintf_s(duration,L"已用时 %02llu:%02llu",milliseconds/60000,(milliseconds/1000)%60);set(Elapsed,duration);
+        wchar_t duration[96]{};
+        if(batchRunning&&!stageKey.empty()){
+            const auto stageMilliseconds=GetTickCount64()-stageStarted;
+            swprintf_s(duration,L"本步 %02llu:%02llu · 总计 %02llu:%02llu",stageMilliseconds/60000,(stageMilliseconds/1000)%60,milliseconds/60000,(milliseconds/1000)%60);
+        }else swprintf_s(duration,L"已用时 %02llu:%02llu",milliseconds/60000,(milliseconds/1000)%60);
+        set(Elapsed,duration);
     }
 
     void finishBatch() {
         batchElapsed=GetTickCount64()-batchStarted;batchRunning=false;KillTimer(window,4);updateElapsed();animateProgress(false);
         run.summary=true;redrawCounts();refresh();
         const bool hasFailures=std::any_of(documents.begin(),documents.end(),[](const QueuedDocument& item){return item.state==DocumentState::Failed;});
-        set(Status,batchStopping?L"已停止":hasFailures?L"批次完成 · 双击失败文档查看详情":fastConversion?L"批次完成 · 快速输出未经核验":L"批次完成");
+        set(Status,batchStopping?L"已停止":hasFailures?L"批次完成 · 双击失败文档查看详情":unverifiedMode(conversionMode)?L"批次完成 · "+std::wstring(conversionModeLabel(conversionMode))+L"输出未经核验":L"批次完成");
         acceptance.finishedBatch(window,batchElapsed,batchStopping,documents,environmentProblem());
         if(closePending)DestroyWindow(window);
     }
     void nextDocument() {
         if(!batchRunning)return;
         if(batchStopping||batchPosition>=batchOrder.size()){finishBatch();return;}
+        stageKey="GUI_PREPARING";stageStarted=GetTickCount64();set(Status,L"正在准备文档任务…");updateElapsed();animateProgress(true);UpdateWindow(window);
         auto& document=documents.at(batchOrder.at(batchPosition));input=document.path;
-        document.fast=fastConversion;
+        document.mode=conversionMode;const bool ultra=conversionMode==ConversionMode::Ultra;
         document.state=DocumentState::Running;document.trace.clear();document.problems.clear();document.interrupted={};document.warnings.clear();document.layoutChecked=false;document.exitCode=STILL_ACTIVE;run.lastStage=L"准备任务";document.stage.clear();
         SYSTEMTIME started{};GetLocalTime(&started);wchar_t time[40]{};swprintf_s(time,L"%04d-%02d-%02d %02d:%02d:%02d",started.wYear,started.wMonth,started.wDay,started.wHour,started.wMinute,started.wSecond);
         document.context=L"程序："+executable+L"\r\n开始时间："+time+L"\r\n方向："+(reverseMode?L"MathType → LaTeX":L"LaTeX → MathType")+L"\r\n";
-        if(fastConversion)document.context+=L"模式：实验性快速转换（跳过核验，可能漏转、错位或内容错误）\r\n";
-        if(!reverseMode)document.context+=L"公式模式："+windowText(control(ModeBox))+L"\r\n字号："+windowText(control(FollowSize))+(SendMessageW(control(FollowSize),CB_GETCURSEL,0,0)==1?L" "+windowText(control(SizeBox))+L" pt":L"")+L"\r\n右编号："+windowText(control(AddNumbers))+L"\r\n行内行距："+spacingArgument(inlineSpacing)+L"；行外行距："+spacingArgument(displaySpacing)+L"\r\n";
-        if(!reverseMode)document.context+=L"Word 原生公式（OMML）："+std::wstring(convertOmml?L"转换":L"保留")+L"\r\n";
+        document.context+=L"模式："+std::wstring(conversionModeLabel(conversionMode))+(unverifiedMode(conversionMode)?L"（跳过核验）\r\n":L"\r\n");
+        if(ultra)document.context+=L"范围：正文行内/行外 LaTeX 与 OMML；额外位置保持，高级设置不生效。\r\n字号："+windowText(control(SizeBox))+L" pt\r\n行外右编号："+windowText(control(AddNumbers))+L"（默认格式，从 1 开始）\r\n";
+        else if(!reverseMode)document.context+=L"公式模式："+windowText(control(ModeBox))+L"\r\n字号："+windowText(control(FollowSize))+(SendMessageW(control(FollowSize),CB_GETCURSEL,0,0)==1?L" "+windowText(control(SizeBox))+L" pt":L"")+L"\r\n右编号："+windowText(control(AddNumbers))+L"\r\n行内行距："+spacingArgument(inlineSpacing)+L"；行外行距："+spacingArgument(displaySpacing)+L"\r\n";
+        if(!reverseMode&&!ultra)document.context+=L"Word 原生公式（OMML）："+std::wstring(convertOmml?L"转换":L"保留")+L"\r\n";
         updateRow(batchOrder[batchPosition]);ListView_EnsureVisible(control(QueueList),static_cast<int>(batchOrder[batchPosition]),FALSE);
         try{
             newTask();std::wstring styleArgument;
@@ -435,10 +470,12 @@ struct App {
             const auto directory=SendMessageW(control(OriginalDirectory),BM_GETCHECK,0,0)==BST_CHECKED?parentPath(input):windowText(control(DirectoryBox));
             const auto name=fileName(input);output=freshOutput(directory,name.substr(0,name.size()-5)+windowText(control(NameBox))+L".docx",input);
             document.context+=L"输出候选："+output+L"\r\n";
-            if(!reverseMode&&SendMessageW(control(AddNumbers),CB_GETCURSEL,0,0)==1)document.context+=L"编号格式："+numbering.format+L"；起始值："+std::to_wstring(numbering.start)+L"；章："+std::to_wstring(numbering.chapter)+L"；节："+std::to_wstring(numbering.section)+L"\r\n";
+            if(!reverseMode&&!ultra&&SendMessageW(control(AddNumbers),CB_GETCURSEL,0,0)==1)document.context+=L"编号格式："+numbering.format+L"；起始值："+std::to_wstring(numbering.start)+L"；章："+std::to_wstring(numbering.chapter)+L"；节："+std::to_wstring(numbering.section)+L"\r\n";
             if(reverseMode)document.context+=L"行外定界符："+std::wstring(SendMessageW(control(Dollar),BM_GETCHECK,0,0)==BST_CHECKED?L"$$...$$":L"\\[...\\]")+L"\r\n";
-            if(experimental.enabled())document.context+=L"实验性功能："+std::wstring(experimental.tables?L"表格 ":L"")+(experimental.textboxes?L"文本框 ":L"")+(experimental.headers?L"页眉页脚 ":L"")+(experimental.notes?L"脚注尾注":L"")+L"（仅转换公式）\r\n";
+            if(!ultra&&experimental.enabled())document.context+=L"实验性功能："+std::wstring(experimental.tables?L"表格 ":L"")+(experimental.textboxes?L"文本框 ":L"")+(experimental.headers?L"页眉页脚 ":L"")+(experimental.notes?L"脚注尾注":L"")+L"（仅转换公式）\r\n";
             std::vector<std::wstring> arguments{reverseMode?L"--worker-reverse":L"--worker-convert",input,output,resultReport,styleArgument,stopFile,install};
+            if(ultra){arguments.push_back(L"--ultra");arguments.push_back(L"--scope=all");if(SendMessageW(control(AddNumbers),CB_GETCURSEL,0,0)==1)arguments.push_back(L"--numbers");}
+            else {
             if(!reverseMode){const auto mode=SendMessageW(control(ModeBox),CB_GETCURSEL,0,0);arguments.push_back(mode==1?L"--scope=inline":mode==2?L"--scope=display":L"--scope=all");if(mode!=1&&SendMessageW(control(AddNumbers),CB_GETCURSEL,0,0)==1){
                     arguments.push_back(L"--numbers");if(numbering.custom)arguments.push_back(L"--number-custom");arguments.push_back(L"--number-format="+numbering.format);
                     arguments.push_back(L"--number-start="+std::to_wstring(numbering.start));arguments.push_back(L"--number-chapter="+std::to_wstring(numbering.chapter));arguments.push_back(L"--number-section="+std::to_wstring(numbering.section));
@@ -450,7 +487,8 @@ struct App {
             if(experimental.textboxes)arguments.push_back(L"--experimental-textboxes");
             if(experimental.headers)arguments.push_back(L"--experimental-headers");
             if(experimental.notes)arguments.push_back(L"--experimental-notes");
-            if(fastConversion)arguments.push_back(L"--experimental-fast");
+            if(conversionMode==ConversionMode::Fast)arguments.push_back(L"--experimental-fast");
+            }
             acceptance.batchStarted(batchPosition);
             launch(arguments);
         }catch(const std::exception& exception){
@@ -470,11 +508,17 @@ struct App {
         if(!batchRunning||batchStopping)return;batchStopping=true;
         if(!run.busy||run.acceptingResult){refresh();return;}run.cancelling=true;
         if(GetFileAttributesW(stopFile.c_str())==INVALID_FILE_ATTRIBUTES)saveNew(stopFile,"");
+        stageKey="STOPPING";stageStarted=GetTickCount64();updateElapsed();animateProgress(true);
         set(Status,L"正在停止并清理当前文档…");EnableWindow(control(Stop),FALSE);
     }
     void line(const std::string& value) {
         acceptance.trace(value);
         const auto update=run.read(value);
+        // 单式正常步骤及完成计数共用界面阶段，后台日志和错误定位仍保留真实步骤。
+        const bool converting=formulaConversionStage(run.progressStage);
+        const char* displayStage=converting?"FORMULA_CONVERTING":run.progressStage.c_str();
+        // 同一阶段的计数变化不重置耗时，单次接口迟迟不返回时计时仍持续更新。
+        if(!update.label.empty()&&*displayStage&&stageKey!=displayStage){stageKey=displayStage;stageStarted=GetTickCount64();}
         switch(update.event) {
         case WorkerEvent::CommitReady:
             saveNew(stopFile+L".commit","");run.acceptingResult=true;show(Stop,false);break;
@@ -482,18 +526,20 @@ struct App {
             acceptance.scanned(run,batchPosition);
             redrawCounts();break;
         case WorkerEvent::BatchStatus:case WorkerEvent::Phase:
-            set(Status,std::to_wstring(batchPosition+1)+L"/"+std::to_wstring(batchOrder.size())+L" · "+update.label);
+            set(Status,converting?update.label:std::to_wstring(batchPosition+1)+L"/"+std::to_wstring(batchOrder.size())+L" · "+update.label);
             if(update.marquee)animateProgress(true);else if(update.event==WorkerEvent::Phase)countProgress(update.current,update.total);
             break;
         case WorkerEvent::Progress:case WorkerEvent::ConversionProgress:
             countProgress(update.current,update.total);set(Status,update.label);
             break;
         case WorkerEvent::Status:set(Status,update.label);break;
-        case WorkerEvent::None:break;
+        case WorkerEvent::ConversionCount:case WorkerEvent::None:break;
         }
+        updateElapsed();
         if(acceptance.updated(update,window,progressMarquee,batchPosition,run.completed))stop();
     }
     void done(DWORD code) {
+        stageKey="GUI_RESULT";stageStarted=GetTickCount64();set(Status,L"正在登记文档处理结果…");updateElapsed();animateProgress(true);UpdateWindow(window);
         worker.join();animateProgress(false);
         const bool cancelled=run.finish(code,output,resultReport);
         auto& document=documents.at(batchOrder.at(batchPosition));
@@ -731,13 +777,13 @@ struct App {
             if(id==IDOK){
                 try{
                     ExperimentalOptions options{IsDlgButtonChecked(dialog,241)==BST_CHECKED,IsDlgButtonChecked(dialog,242)==BST_CHECKED,IsDlgButtonChecked(dialog,243)==BST_CHECKED,IsDlgButtonChecked(dialog,244)==BST_CHECKED};
-                    const bool fast=app->fastConversion&&!GetPropW(dialog,L"ResetFastConversion");
-                    if(app->reverseMode){app->experimental=options;app->fastConversion=fast;EndDialog(dialog,IDOK);return TRUE;}
+                    const auto mode=GetPropW(dialog,L"ResetFastConversion")?ConversionMode::Standard:app->conversionMode;
+                    if(app->reverseMode){app->experimental=options;app->setConversionMode(mode);EndDialog(dialog,IDOK);return TRUE;}
                     EquationSpacing spacing[2];for(int row=0;row<2;++row){auto& value=spacing[row];value.mode=static_cast<int>(SendDlgItemMessageW(dialog,201+row,CB_GETCURSEL,0,0));if(value.mode>=4)value.value=settingNumber(windowText(GetDlgItem(dialog,203+row)),value.mode==6?0.5:1,value.mode==6?10:999);}
                     const auto numbers=advancedNumbering(dialog);app->inlineSpacing=spacing[0];app->displaySpacing=spacing[1];app->numbering=numbers;
                     app->numbering.custom=IsDlgButtonChecked(dialog,221)==BST_CHECKED;app->chapterNumber=IsDlgButtonChecked(dialog,222)==BST_CHECKED;app->sectionNumber=IsDlgButtonChecked(dialog,223)==BST_CHECKED;
                     app->chapterStyle=static_cast<int>(SendDlgItemMessageW(dialog,224,CB_GETCURSEL,0,0));app->sectionStyle=static_cast<int>(SendDlgItemMessageW(dialog,225,CB_GETCURSEL,0,0));app->equationStyle=static_cast<int>(SendDlgItemMessageW(dialog,226,CB_GETCURSEL,0,0));app->numberEnclosure=static_cast<int>(SendDlgItemMessageW(dialog,227,CB_GETCURSEL,0,0));app->numberSeparator=windowText(GetDlgItem(dialog,228));
-                    app->experimental=options;app->convertOmml=IsDlgButtonChecked(dialog,246)==BST_CHECKED;app->fastConversion=fast;
+                    app->experimental=options;app->convertOmml=IsDlgButtonChecked(dialog,246)==BST_CHECKED;app->setConversionMode(mode);
                     EndDialog(dialog,IDOK);
                 }catch(const std::exception&){MessageBoxW(dialog,L"请检查设置：固定/最小行距为 1–999 磅，多倍为 0.5–10 倍；编号数值为 1–999999 的整数，格式必须包含且仅包含一个 #E 序号。",L"设置有误",MB_OK|MB_ICONWARNING);}return TRUE;
             }
@@ -750,7 +796,7 @@ struct App {
         struct DialogTemplate { DLGTEMPLATE dialog; WORD menu{},windowClass{},title{}; } layout{};
         layout.dialog.style=WS_POPUP|WS_CAPTION|WS_SYSMENU|DS_MODALFRAME;layout.dialog.cx=260;layout.dialog.cy=140;
         require(DialogBoxIndirectParamW(instance,&layout.dialog,window,advancedProc,reinterpret_cast<LPARAM>(this))!=-1,"Open advanced settings");
-        SendMessageW(control(FastConversion),BM_SETCHECK,fastConversion?BST_CHECKED:BST_UNCHECKED,0);
+        refresh();
     }
     GuiAcceptanceView acceptanceView() const {
         return {window,dpi,reverseMode,progressMarquee,task.empty(),run,documents,install,input,output};
@@ -814,6 +860,15 @@ struct App {
         auto app=reinterpret_cast<App*>(data);const int id=GetDlgCtrlID(child);
         const bool dropdown=id==ModeBox||id==FollowSize||id==AddNumbers||(GetParent(child)!=app->window&&(id==201||id==202||(id>=224&&id<=227)));
         const bool choice=id==FastConversion||id==Bracket||id==Dollar||id==OriginalDirectory||id==CustomDirectory||(GetParent(child)!=app->window&&((id>=220&&id<=223)||(id>=241&&id<=244)||id==246));
+        if(id==FastConversion&&IsWindowEnabled(child)){
+            // 三等分点击与拖动直接选择档位；系统 Trackbar 继续处理键盘和可访问操作。
+            if(message==WM_LBUTTONDOWN||(message==WM_MOUSEMOVE&&GetCapture()==child)){
+                RECT bounds{};GetClientRect(child,&bounds);const int x=static_cast<short>(LOWORD(lparam));
+                if(message==WM_LBUTTONDOWN){SetFocus(child);SetCapture(child);}
+                app->setConversionMode(static_cast<ConversionMode>(std::clamp(x*3/std::max(1L,bounds.right),0L,2L)));return 0;
+            }
+            if(message==WM_LBUTTONUP&&GetCapture()==child){ReleaseCapture();return 0;}
+        }
         if(id==QueueList&&message==WM_DROPFILES)return SendMessageW(app->window,message,wparam,lparam);
         if(dropdown&&message==WM_NCCALCSIZE)return 0;
         if((dropdown||id==SizeSpin)&&message==WM_NCPAINT)return 0;
@@ -856,23 +911,16 @@ struct App {
                 app->drawText(dc,label,windowText(child),enabled?RGB(48,65,79):DisabledTextColor,app->bodyText.Get());
                 app->chevron(dc,rect.right-app->px(18),rect.bottom/2,false,enabled?RGB(67,85,98):DisabledTextColor);
             }else if(id==FastConversion){
-                // 保留原生复选框的键盘及可访问状态，只将外观绘制成圆角开关。
+                // 三段标签始终可见；滑块表示当前档位，焦点独立显示。
                 app->updateFastTransition(child);
-                const bool hot=app->hotControl==child&&enabled,pressed=app->pressedControl==child&&enabled;
-                // 用轻微渐变、细边和滑块投影呈现厚度，保持现有青灰配色。
-                auto blend=[position=app->fastPosition](COLORREF off,COLORREF on){return RGB(
-                    static_cast<int>(GetRValue(off)+static_cast<float>(GetRValue(on)-GetRValue(off))*position),
-                    static_cast<int>(GetGValue(off)+static_cast<float>(GetGValue(on)-GetGValue(off))*position),
-                    static_cast<int>(GetBValue(off)+static_cast<float>(GetBValue(on)-GetBValue(off))*position));};
-                const auto top=!enabled?RGB(222,229,234):blend(pressed?RGB(145,162,176):hot?RGB(172,186,198):RGB(166,180,193),pressed?RGB(10,119,125):hot?RGB(25,159,164):RGB(20,150,155));
-                const auto bottom=!enabled?RGB(215,223,230):blend(pressed?RGB(132,151,166):RGB(149,165,179),pressed?RGB(8,109,115):RGB(8,126,133));
-                const auto border=!enabled?RGB(209,219,226):blend(RGB(141,158,172),RGB(10,121,128));
-                app->rounded(dc,rect,top,border,11,bottom);
-                RECT thumb{app->px(2)+static_cast<int>(static_cast<float>(rect.right-app->px(22))*app->fastPosition),app->px(2),0,rect.bottom-app->px(2)};thumb.right=thumb.left+app->px(18);
-                RECT shadow=thumb;OffsetRect(&shadow,0,app->px(1));const auto shade=!enabled?RGB(198,208,217):blend(RGB(124,143,160),RGB(8,111,118));
-                app->rounded(dc,shadow,shade,shade,9);
-                app->rounded(dc,thumb,enabled?RGB(255,255,255):RGB(242,245,247),enabled?RGB(213,223,231):RGB(220,228,234),9,pressed?RGB(226,234,240):RGB(239,244,248));
-                if(GetFocus()==child&&!(SendMessageW(child,WM_QUERYUISTATE,0,0)&UISF_HIDEFOCUS)){RECT focus=rect;InflateRect(&focus,-app->px(1),-app->px(1));app->rounded(dc,focus,CLR_INVALID,RGB(8,84,90),10);}
+                app->rounded(dc,rect,RGB(241,245,247),RGB(213,222,228),7);
+                const int inset=app->px(3);const float segment=static_cast<float>(rect.right-2*inset)/3.0f;
+                RECT thumb{inset+static_cast<LONG>(segment*app->fastPosition),inset,0,rect.bottom-inset};thumb.right=thumb.left+static_cast<LONG>(segment);
+                app->rounded(dc,thumb,enabled?RGB(255,255,255):RGB(232,238,242),enabled?RGB(150,196,199):RGB(213,222,228),5);
+                for(int mode=0;mode<3;++mode){RECT label{static_cast<LONG>(rect.right*mode/3),0,static_cast<LONG>(rect.right*(mode+1)/3),rect.bottom};
+                    const auto color=!enabled?DisabledTextColor:mode==static_cast<int>(app->conversionMode)?RGB(8,116,122):MutedTextColor;
+                    app->drawText(dc,label,conversionModeLabel(static_cast<ConversionMode>(mode)),color,app->bodyText.Get(),true);}
+                if(GetFocus()==child&&!(SendMessageW(child,WM_QUERYUISTATE,0,0)&UISF_HIDEFOCUS)){RECT focus=rect;InflateRect(&focus,-app->px(1),-app->px(1));app->rounded(dc,focus,CLR_INVALID,RGB(8,84,90),6);}
             }else if(choice){
                 const bool selected=SendMessageW(child,BM_GETCHECK,0,0)==BST_CHECKED;
                 const bool delimiter=id==Bracket||id==Dollar,checkbox=(GetWindowLongPtrW(child,GWL_STYLE)&BS_TYPEMASK)==BS_AUTOCHECKBOX;
@@ -899,8 +947,7 @@ struct App {
             if(message==WM_PAINT)EndPaint(child,&painting);return 0;
         }
         const auto result=DefSubclassProc(child,message,wparam,lparam);
-        if(id==FastConversion&&message==BM_SETCHECK)app->startFastTransition(child);
-        // 原生复选框更新焦点提示时可能直接画矩形，立即用圆角开关的完整帧覆盖。
+        // 系统控件更新焦点提示后重画三档外观。
         if(id==FastConversion&&(message==WM_UPDATEUISTATE||message==WM_SETFOCUS||message==WM_KILLFOCUS)){
             RedrawWindow(child,nullptr,nullptr,RDW_INVALIDATE|RDW_UPDATENOW);return result;
         }
@@ -1005,7 +1052,7 @@ struct App {
         card(16,76,middle-24,height-156);card(middle+8,76,width-middle-24,height-156);
         RECT toggle{px(width-318),px(13),px(width-14),px(51)};rounded(dc,toggle,RGB(237,242,245),RGB(222,229,235),7);
         auto line=[&](int x,int y,int x2,int y2){HPEN pen=CreatePen(PS_SOLID,1,RGB(224,231,236));auto old=SelectObject(dc,pen);MoveToEx(dc,px(x),px(y),nullptr);LineTo(dc,px(x2),px(y2));SelectObject(dc,old);DeleteObject(pen);};
-        line(0,62,width,62);line(middle+24,284,width-32,284);line(32,height-126,middle-24,height-126);line(0,height-72,width,height-72);
+        line(0,62,width,62);line(middle+24,320,width-32,320);line(32,height-126,middle-24,height-126);line(0,height-72,width,height-72);
         HPEN dashed=CreatePen(PS_DASH,1,RGB(141,194,201));auto oldPen=SelectObject(dc,dashed);auto oldBrush=SelectObject(dc,GetStockObject(NULL_BRUSH));
         RoundRect(dc,px(32),px(124),px(middle-24),px(180),px(10),px(10));SelectObject(dc,oldPen);SelectObject(dc,oldBrush);DeleteObject(dashed);
         BitBlt(target,0,0,client.right,client.bottom,dc,0,0,SRCCOPY);SelectObject(dc,oldBitmap);DeleteObject(bitmap);DeleteDC(dc);
@@ -1022,7 +1069,7 @@ static LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM wparam,LPARAM
         case WM_CREATE:app->create();return 0;
         case WM_SIZE:app->layout();return 0;
         case WM_DPICHANGED:{app->dpi=HIWORD(wparam);app->createFonts();const auto rect=reinterpret_cast<RECT*>(lparam);SetWindowPos(window,nullptr,rect->left,rect->top,rect->right-rect->left,rect->bottom-rect->top,SWP_NOZORDER|SWP_NOACTIVATE);app->layout();return 0;}
-        case WM_GETMINMAXINFO:{auto info=reinterpret_cast<MINMAXINFO*>(lparam);RECT rect{0,0,app->px(800),app->px(550)};AdjustWindowRectExForDpi(&rect,WS_OVERLAPPEDWINDOW,FALSE,WS_EX_CONTROLPARENT,app->dpi);info->ptMinTrackSize={rect.right-rect.left,rect.bottom-rect.top};return 0;}
+        case WM_GETMINMAXINFO:{auto info=reinterpret_cast<MINMAXINFO*>(lparam);RECT rect{0,0,app->px(800),app->px(574)};AdjustWindowRectExForDpi(&rect,WS_OVERLAPPEDWINDOW,FALSE,WS_EX_CONTROLPARENT,app->dpi);info->ptMinTrackSize={rect.right-rect.left,rect.bottom-rect.top};return 0;}
         case WM_PAINT:app->paint();return 0;
         case WM_PRINTCLIENT:app->paint(reinterpret_cast<HDC>(wparam));return 0;
         case WM_CTLCOLORSTATIC:case WM_CTLCOLOREDIT:{HDC dc=reinterpret_cast<HDC>(wparam);const int id=GetDlgCtrlID(reinterpret_cast<HWND>(lparam));
@@ -1032,9 +1079,10 @@ static LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM wparam,LPARAM
             return reinterpret_cast<LRESULT>(outer?app->background:app->white);}
         case WM_DRAWITEM:app->drawItem(*reinterpret_cast<DRAWITEMSTRUCT*>(lparam));return TRUE;
         case WM_ERASEBKGND:return TRUE;
+        case WM_HSCROLL:if(reinterpret_cast<HWND>(lparam)==app->control(FastConversion)){
+            app->setConversionMode(static_cast<ConversionMode>(SendMessageW(app->control(FastConversion),TBM_GETPOS,0,0)));return 0;}break;
         case WM_COMMAND:{const int id=LOWORD(wparam),notification=HIWORD(wparam);
             if((id==Forward||id==Reverse)&&notification==BN_CLICKED)app->setDirection(id==Reverse);
-            else if(id==FastConversion&&notification==BN_CLICKED&&!app->batchRunning){app->fastConversion=SendMessageW(app->control(FastConversion),BM_GETCHECK,0,0)==BST_CHECKED;app->startFastTransition(app->control(FastConversion));app->refresh();}
             else if((id==Bracket||id==Dollar)&&notification==BN_CLICKED)app->refresh();
             else if(id==Choose&&notification==BN_CLICKED)app->selectFile();
             else if(id==AddFolder&&notification==BN_CLICKED)app->selectDirectory(true);
@@ -1128,10 +1176,10 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show) {
         App app;app.instance=instance;wchar_t executable[32768]{};require(GetModuleFileNameW(nullptr,executable,32768)>0,"GUI executable path");app.executable=executable;
         app.acceptance.configure(argc,argv);
         if(app.acceptance.active()){app.input=app.acceptance.inputs.front();app.reverseMode=app.acceptance.initialReverse;}
-        INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_PROGRESS_CLASS|ICC_UPDOWN_CLASS|ICC_LISTVIEW_CLASSES};require(InitCommonControlsEx(&controls)!=0,"Windows common controls");
+        INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_PROGRESS_CLASS|ICC_UPDOWN_CLASS|ICC_LISTVIEW_CLASSES|ICC_BAR_CLASSES};require(InitCommonControlsEx(&controls)!=0,"Windows common controls");
         WNDCLASSEXW cls{sizeof(cls)};cls.style=CS_HREDRAW|CS_VREDRAW;cls.lpfnWndProc=windowProc;cls.hInstance=instance;cls.hCursor=LoadCursorW(nullptr,IDC_ARROW);
         cls.hIcon=LoadIconW(instance,MAKEINTRESOURCEW(1));cls.hIconSm=static_cast<HICON>(LoadImageW(instance,MAKEINTRESOURCEW(1),IMAGE_ICON,GetSystemMetrics(SM_CXSMICON),GetSystemMetrics(SM_CYSMICON),LR_SHARED));cls.lpszClassName=L"DocxMathTypeBatch.B";require(RegisterClassExW(&cls)!=0,"Register native GUI window");
-        const UINT dpi=GetDpiForSystem();RECT rect{0,0,MulDiv(824,static_cast<int>(dpi),96),MulDiv(560,static_cast<int>(dpi),96)};
+        const UINT dpi=GetDpiForSystem();RECT rect{0,0,MulDiv(824,static_cast<int>(dpi),96),MulDiv(584,static_cast<int>(dpi),96)};
         AdjustWindowRectExForDpi(&rect,WS_OVERLAPPEDWINDOW,FALSE,WS_EX_CONTROLPARENT,dpi);
         HWND window=CreateWindowExW(WS_EX_CONTROLPARENT,cls.lpszClassName,L"DocxMathTypeBatch · 文档公式转换",WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN,
             CW_USEDEFAULT,CW_USEDEFAULT,rect.right-rect.left,rect.bottom-rect.top,nullptr,nullptr,instance,&app);require(window!=nullptr,"Create B dual-column workbench");

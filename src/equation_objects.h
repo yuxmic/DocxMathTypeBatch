@@ -25,9 +25,9 @@ inline std::string diagnosticExcerpt(const std::wstring& source) {
     return wireHex(utf8(excerpt));
 }
 struct NativeAsset { std::vector<unsigned char> equation; std::vector<std::vector<unsigned char>> previews; };
-// 从指定对象 Range 的 Word 原生 Flat OPC 包取资产，扫描不激活 MathType 服务。
-inline NativeAsset rangeNativeAsset(IDispatch* range) {
-    const auto xml = utf8(text(range, L"WordOpenXML"));
+// 复用已取得的 Word 原生 Flat OPC 包，避免同一对象为签名和资产重复导出。
+inline NativeAsset rangeNativeAsset(const std::wstring& package) {
+    const auto xml = utf8(package);
     require(xml.size() < 128 * 1024 * 1024, "Object XML package bounds");
     ComPtr<IStream> stream; check(CreateStreamOnHGlobal(nullptr, TRUE, &stream), "Object XML stream");
     ULONG written{}; check(stream->Write(xml.data(), static_cast<ULONG>(xml.size()), &written), "Write object XML stream");
@@ -67,6 +67,9 @@ inline NativeAsset rangeNativeAsset(IDispatch* range) {
     }
     require(status == S_FALSE && !asset.equation.empty(), "Complete single-object native package");
     return asset;
+}
+inline NativeAsset rangeNativeAsset(IDispatch* range) {
+    return rangeNativeAsset(text(range,L"WordOpenXML"));
 }
 // 一次导出正文 Flat OPC，按正文对象顺序关联关系和原生流，省去逐式导出整个样式包。
 inline std::vector<std::vector<unsigned char>> bodyNativeAssets(IDispatch* document) {
@@ -109,20 +112,31 @@ inline std::vector<std::vector<unsigned char>> bodyNativeAssets(IDispatch* docum
     return result;
 }
 // 厂商书签含 QUOTE 域，解除域后只留下一个 OLE，避免把模板域带进用户文档。
-inline ComPtr<IDispatch> insertBlankEquation(IDispatch* document,IDispatch* range,const std::wstring& install,IDispatch* storyRoot=nullptr,bool fast=false) {
+inline ComPtr<IDispatch> insertBlankEquation(IDispatch* document,IDispatch* range,const std::wstring& install,IDispatch* storyRoot=nullptr,bool fast=false,IDispatch* prepared=nullptr) {
+    ScopedConversionTiming timing(automationTimings,ConversionMetric::TemplateInsert);
     auto content=storyRoot?get(storyRoot,L"Duplicate"):get(document,L"Content");const ScanRangeContext context{document,storyRoot};
     const long start=integer(range,L"Start"),beforeEnd=integer(content.Get(),L"End");
     const auto templatePath=install+L"\\Office Support\\BlankEqn.doc";
-    invoke(range,L"InsertFile",DISPATCH_METHOD,{templatePath.c_str(),L"MTBlankEqn",false,false,false});
+    if(prepared)invoke(range,L"FormattedText",DISPATCH_PROPERTYPUT,{prepared});
+    else invoke(range,L"InsertFile",DISPATCH_METHOD,{templatePath.c_str(),L"MTBlankEqn",false,false,false});
     auto inserted=docRange(context,start,start+integer(content.Get(),L"End")-beforeEnd);
+    if(!prepared){
     auto fields=get(inserted.Get(),L"Fields");
     for(long i=integer(fields.Get(),L"Count");i>0;--i){auto field=collectionItem(fields.Get(),i);const long type=integer(field.Get(),L"Type");
         require(fast||type==35||type==58,"Vendor blank equation field type");if(type==35)invoke(field.Get(),L"Unlink",DISPATCH_METHOD);}
     inserted=docRange(context,start,start+integer(content.Get(),L"End")-beforeEnd);
+    }
     auto shapes=get(inserted.Get(),L"InlineShapes");if(!fast)require(integer(shapes.Get(),L"Count")==1,"Blank template inserts one object only");
     auto shape=collectionItem(shapes.Get(),1);
     if(!fast)require(text(inserted.Get(),L"Text")==text(get(shape.Get(),L"Range").Get(),L"Text"),"Blank template has no extra text");return shape;
 }
+
+// 模板所在的隐藏临时文档只属于本任务；正常结束显式关闭，异常退出仍释放它。
+struct BlankEquationTemplate {
+    ComPtr<IDispatch> document,range;
+    void close(){range.Reset();if(document){invoke(document.Get(),L"Close",DISPATCH_METHOD,{0L});document.Reset();}}
+    ~BlankEquationTemplate(){try{close();}catch(const std::exception& error){std::printf("TEMPLATE_CLOSE_FAILED %s\n",error.what());}}
+};
 
 inline std::wstring sourceSignature(IDispatch* range, bool normalizeObjectId = false) {
     return sourceSignature(text(range,L"WordOpenXML"),normalizeObjectId);

@@ -1,7 +1,7 @@
 # DocxMathTypeBatch · MathType 批量转换器
 
 [![中文图形界面](https://img.shields.io/badge/GUI-中文界面-2563eb)](#三步开始)
-[![正式版本 v0.1.4](https://img.shields.io/badge/release-v0.1.4-2563eb)](https://github.com/yuxmic/DocxMathTypeBatch/releases/latest)
+[![正式版本 v0.1.5](https://img.shields.io/badge/release-v0.1.5-2563eb)](https://github.com/yuxmic/DocxMathTypeBatch/releases/latest)
 [![Windows x64](https://img.shields.io/badge/Windows-10%20%2F%2011%20x64-0078D4)](#运行环境与支持范围)
 [![MIT License](https://img.shields.io/badge/license-MIT-16a34a)](LICENSE)
 
@@ -9,7 +9,7 @@
 
 整理论文、毕业设计或技术报告时，拖入 DOCX，点击“开始转换”即可。默认设置轻松上手，也能按需调整字号、行距和公式编号，或交给 AI Agent Skill 自动处理。
 
-**[立即下载 Windows 中文界面版（ZIP）](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.4/DocxMathTypeBatch-v0.1.4-win-x64.zip)** · [下载 AI Agent Skill](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.4/docx-latex-to-mathtype-skill-v0.2.1.zip) · [使用说明](docs/使用说明.md)
+**[立即下载 Windows 中文界面版（ZIP）](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.5/DocxMathTypeBatch-v0.1.5-win-x64.zip)** · [下载 AI Agent Skill](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.5/docx-latex-to-mathtype-skill-v0.2.2.zip) · [使用说明](docs/使用说明.md)
 
 运行前需安装 **64 位桌面 Word 和完整 MathType**，使用 Windows 10 / 11 x64。本工具免费开源，提供现成 EXE，无需编程或配置开发环境。
 
@@ -47,11 +47,11 @@
 
 ## 三步开始
 
-1. **下载并打开**。解压上方 ZIP，双击 `DocxMathTypeBatch.exe`，进入中文界面。也可[单独下载 EXE](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.4/DocxMathTypeBatch.exe)。
+1. **下载并打开**。解压上方 ZIP，双击 `DocxMathTypeBatch.exe`，进入中文界面。也可[单独下载 EXE](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.5/DocxMathTypeBatch.exe)。
 2. **拖入 Word 文档**。先保存并关闭文档，再拖入一个或多个 `.docx`，也可点击“添加文件夹”。
 3. **点击“开始转换”**。默认设置即可使用，完成后双击列表中的文档打开结果，新公式可在 Word 中双击编辑。
 
-默认转换所有正文，字号和行距跟随原文，右编号和快速转换关闭。需要统一格式时再调整选项。输出重名时自动添加序号。
+默认使用标准模式，转换所有正文，字号和行距跟随原文，不加右编号。三级滑块可选标准／快速／极速；极速专注正文行内、行外的 LaTeX 和 OMML，只保留指定字号及简单右编号，输出未经核验，支持范围见[使用说明](docs/使用说明.md)。输出重名时自动添加序号。
 
 首次运行可能出现 Windows 未签名程序提示。转换期间请避免同时操作 MathType，以免中断转换服务。详细步骤见[使用说明](docs/使用说明.md)。
 
@@ -67,7 +67,9 @@ LaTeX 文本和 Word 原生公式转换后，可继续在 MathType 中编辑。�
 
 ## 实测速度
 
-**100 个 LaTeX 公式，常规模式约 45 秒，快速模式约 22 秒。**
+**极速模式：含图的真实复杂 1015 式文档，12 pt、开启进度和右编号，本机三轮实测 49.325～56.147 秒。** 全部 1015 式成功，生成 649 个连续编号；独立公式后的手动旧号和多余空格、Tab 也可在转换成功后清理。
+
+以下为标准／快速模式的早期合成样本成绩：
 
 | 合成样本                     | 常规模式   | 快速模式   |
 | ------------------------ | ------ | ------ |
@@ -76,6 +78,8 @@ LaTeX 文本和 Word 原生公式转换后，可继续在 MathType 中编辑。�
 | 100 个简单 LaTeX 公式 / 400 段 | 约 45 秒 | 约 22 秒 |
 
 包含 Word 启动、转换、保存和退出清理。常规模式保留逐式及保存后核验，快速模式省略这些核验。实际耗时随公式复杂度、文档和机器环境变化。完整环境、精确计时和核验记录见[实测报告](docs/实测报告.md)。
+
+极速直接将支持的 OMML 结构编译成 LaTeX 后导入 MathType；粗斜体等不能可靠表达的公式整式沿用 MathML 路径。真实样本中分别导入 838 次和 142 次，另有 35 次资产缓存命中。上述三轮使用版本升号前的同一转换代码；简单 1001 式合成样本此前曾用时 31.708 秒，实际速度随公式和机器环境变化。只读输入可正常转换，原件保持只读。详细阶段计时及检查范围见实测报告。
 
 ## 按需调整公式格式
 
@@ -98,10 +102,10 @@ LaTeX 文本和 Word 原生公式转换后，可继续在 MathType 中编辑。�
 
 > 将这份 DOCX 的公式转成 MathType，正文行外公式添加右编号，结果另存为新文件。
 
-1. [下载完整 Skill v0.2.1](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.4/docx-latex-to-mathtype-skill-v0.2.1.zip)，将其中的 `docx-latex-to-mathtype` 文件夹放入所用 Agent 的 Skill 目录并重新加载。
+1. [下载完整 Skill v0.2.2](https://github.com/yuxmic/DocxMathTypeBatch/releases/download/v0.1.5/docx-latex-to-mathtype-skill-v0.2.2.zip)，将其中的 `docx-latex-to-mathtype` 文件夹放入所用 Agent 的 Skill 目录并重新加载。
 2. 向 Agent 提供文档和转换要求。本机需安装 Word、MathType，并支持运行 Windows PowerShell 5.1 或 PowerShell 7 脚本。
 
-完整包内含 v0.1.4 转换器 EXE，可随整个文件夹移动。日常图形界面使用直接下载 Windows 程序包。安装与调用详情见[Agent 使用说明](docs/使用说明.md#使用-agent-自动调用)和[Skill 调用参数](skills/docx-latex-to-mathtype/references/cli.md)。
+完整包内含 v0.1.5 转换器 EXE，可随整个文件夹移动。日常图形界面使用直接下载 Windows 程序包。安装与调用详情见[Agent 使用说明](docs/使用说明.md#使用-agent-自动调用)和[Skill 调用参数](skills/docx-latex-to-mathtype/references/cli.md)。
 
 ## 运行环境与支持范围
 

@@ -3,13 +3,13 @@ name: docx-latex-to-mathtype
 description: 使用包内 DocxMathTypeBatch 将 DOCX 正文 LaTeX、Word 原生公式转换为 MathType，或将 MathType 导出为 LaTeX；按要求处理编号及额外位置。用于 Word 公式转换、补号或重新编号，需要 Windows 本机 Word 和 MathType。
 license: MIT
 metadata:
-  version: "0.2.1"
+  version: "0.2.2"
   cli_contract: "1"
 ---
 
 # DOCX 公式转换
 
-Skill v0.2.1 包内含 `bin/DocxMathTypeBatch.exe`。需要 Windows 本机已安装 64 位桌面 Word 和完整 MathType；脚本兼容 Windows PowerShell 5.1 和 PowerShell 7，不需要 Python。
+Skill v0.2.2 包内含 `bin/DocxMathTypeBatch.exe`。需要 Windows 本机已安装 64 位桌面 Word 和完整 MathType；脚本兼容 Windows PowerShell 5.1 和 PowerShell 7，不需要 Python。
 
 ## 使用包内程序
 

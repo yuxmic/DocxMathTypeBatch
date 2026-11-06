@@ -37,7 +37,8 @@ struct StageProgress {
     StageProgress(const char* name,size_t count,bool reportProgress=false):stage(name),total(count),enabled(reportProgress) {
         if(enabled&&stage&&total){std::printf("UI_STAGE_PROGRESS %s 0 %zu\n",stage,total);lastUpdate=GetTickCount64();}
     }
-    void advance(){++completed;if(completed==1&&stage){
+    // 仅真实处理进展续心跳，界面计时和等待动画不延长阻塞接口的超时。
+    void advance(){taskPulse();++completed;if(completed==1&&stage){
         if(!strcmp(stage,"SCAN_TEXT"))taskTestBoundary(L"SCAN_PROGRESS");
         if(!strcmp(stage,"RESCAN_TEXT"))taskTestBoundary(L"RESCAN_PROGRESS");
     }if(!enabled||!stage||!total)return;const auto now=GetTickCount64();

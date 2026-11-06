@@ -1,4 +1,4 @@
-# Skill v0.2.1 调用约定
+# Skill v0.2.2 调用约定
 
 要求包内 EXE 支持 `CliContractVersion: 1`、报告 `SchemaVersion: 1`。Skill 包内包含已匹配的 `bin/DocxMathTypeBatch.exe`，更新时替换完整包；不包含文档样本、本机配置或日志。
 
@@ -42,7 +42,7 @@
 
 | 字段 | 含义 |
 |---|---|
-| `SkillVersion`、`ApplicationVersion` | 分别为 Skill 0.2.1 与实际包内程序版本，不能混为同一版本 |
+| `SkillVersion`、`ApplicationVersion` | 分别为 Skill 0.2.2 与实际包内程序版本，不能混为同一版本 |
 | `Status`、`ExitCode` | COMPLETE/PARTIAL 配合 0 表示已交付；不能只看退出码 |
 | `VerificationMode` | STANDARD_VERIFIED / FAST_UNVERIFIED；任务未完成为 NOT_COMPLETED |
 | `Targets`、`Succeeded` | 待转换总数与成功数；不逐项返回成功公式 |

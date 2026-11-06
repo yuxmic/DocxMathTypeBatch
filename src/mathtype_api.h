@@ -70,6 +70,7 @@ struct MathTypeApi {
     bool initialized{};
 
     explicit MathTypeApi(const std::wstring& directory) : install(directory) {
+        std::puts("UI_PHASE LOAD_MATHTYPE");
         library = LoadLibraryExW((install + L"\\MathPage\\64\\MathPage.wll").c_str(), nullptr,
                                 LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
         require(library != nullptr, "Load x64 MathPage.wll");
@@ -89,8 +90,8 @@ struct MathTypeApi {
         }
     }
     ~MathTypeApi() {
-        if (initialized) std::printf("MTTermAPI=%ld\n", term());
-        if (library) FreeLibrary(library);
+        if (initialized) {std::puts("UI_PHASE TERMINATING_MATHTYPE");std::printf("MTTermAPI=%ld\n", term());}
+        if (library) {std::puts("UI_PHASE RELEASE_MATHTYPE");FreeLibrary(library);}
     }
 };
 

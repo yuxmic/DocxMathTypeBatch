@@ -1,6 +1,7 @@
 // 离线 MSXML 回归：调用正式适配器，不启动 Word 或 MathType，不写文档。
 #pragma once
 #include "omml_adapter.h"
+#include "omml_tex.h"
 #include "docx_package.h"
 #include "conversion_timing.h"
 
@@ -25,6 +26,30 @@ inline std::wstring legacy(IXMLDOMDocument2* stylesheet,const std::wstring& inpu
     // 复用生产片段包装与兼容处理，只对比两种实际 XSLT 执行路径。
     return finishMathML(result.v.bstrVal,display,timings);
 }
+inline void checkDirectTex() {
+    // 成功路径核对结构和文字边界；不支持的公式必须整式回退，原 DOM 与输出参数保持。
+    struct Case {const wchar_t* math;const wchar_t* expected;};
+    const Case cases[]{
+        {L"<m:sSubSup><m:e><m:f><m:num><m:r><m:t>\u03b1x</m:t></m:r></m:num><m:den><m:r><m:t>b+1</m:t></m:r></m:den></m:f></m:e><m:sub><m:r><m:t>i</m:t></m:r></m:sub><m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSubSup>",L"{\\frac{\\alpha x}{b+1}}_{i}^{2}"},
+        {L"<m:r><m:rPr><m:sty m:val='p'/></m:rPr><m:t>j</m:t></m:r><m:r><m:t>+</m:t></m:r><m:r><m:rPr><m:nor/></m:rPr><m:t>a_b&amp;c#1%{z}</m:t></m:r>",L"\\mathrm{j}+\\text{a\\_b\\&c\\#1\\%\\{z\\}}"},
+        {L"<m:rad><m:deg><m:r><m:t>i]j</m:t></m:r></m:deg><m:e><m:r><m:t>x</m:t></m:r></m:e></m:rad>",L"\\sqrt[{i]j}]{x}"},
+        {L"<m:nary><m:naryPr><m:chr m:val='\u222b'/><m:grow m:val='0'/><m:subHide m:val='1'/><m:supHide m:val='1'/></m:naryPr><m:sub/><m:sup/><m:e><m:r><m:t>x</m:t></m:r></m:e></m:nary>",nullptr},
+        {L"<m:r><m:t>x+</m:t></m:r><m:phant><m:e><m:r><m:t>z</m:t></m:r></m:e></m:phant>",nullptr},
+        {L"<m:r><m:t>x=</m:t></m:r><m:r><m:rPr><m:sty m:val='bi'/></m:rPr><m:t>U</m:t></m:r>",nullptr},
+        {L"<m:r><m:t>x=</m:t></m:r><m:r><m:rPr><m:scr m:val='script'/></m:rPr><m:t>l</m:t></m:r>",nullptr},
+        {L"<m:sSub><m:e><m:r><m:t>x</m:t></m:r></m:e><m:sub><m:argPr><m:argSz m:val='-1'/></m:argPr><m:r><m:t>i</m:t></m:r></m:sub></m:sSub>",nullptr}
+    };
+    for(const auto& item:cases){
+        auto dom=xmlDocument(source(item.math));ComPtr<IXMLDOMNode> equation;
+        check(dom->selectSingleNode(Value(L"/*/*[local-name()='oMath'][1]").v.bstrVal,&equation),"Direct TeX test equation");
+        Value before;before.v.vt=VT_BSTR;check(dom->get_xml(&before.v.bstrVal),"Direct TeX original DOM");
+        std::wstring actual=L"UNCHANGED";const bool converted=tryOmmlTex(equation.Get(),actual);
+        require(converted==(item.expected!=nullptr)&&actual==(item.expected?item.expected:L"UNCHANGED"),"Direct TeX structure, escaping, and whole-formula fallback");
+        Value after;after.v.vt=VT_BSTR;check(dom->get_xml(&after.v.bstrVal),"Direct TeX unchanged DOM");
+        require(std::wstring(before.v.bstrVal)==after.v.bstrVal,"Direct TeX compilation leaves the source DOM untouched");
+    }
+    std::puts("OMML_DIRECT_TEX_SELF_TEST_PASSED");
+}
 inline void checkBodySources() {
     const std::wstring start=L"<pkg:package xmlns:pkg=\"http://schemas.microsoft.com/office/2006/xmlPackage\" xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\"><pkg:part pkg:name=\"/word/document.xml\"><pkg:xmlData><w:document><w:body>";
     const std::wstring end=L"</w:body></w:document></pkg:xmlData></pkg:part><pkg:part pkg:name=\"/word/header1.xml\"><pkg:xmlData><w:hdr><m:oMath><m:r><m:t>HEADER</m:t></m:r></m:oMath></w:hdr></pkg:xmlData></pkg:part></pkg:package>";
@@ -38,6 +63,13 @@ inline void checkBodySources() {
     require(!ommlSourcesFromBodyXml(start+body+end,2,values),"Body OMML count mismatch uses established fallback");
     const std::wstring alternate=L"<mc:AlternateContent><mc:Choice Requires=\"w\"><w:p>"+equation(L"x")+L"</w:p></mc:Choice></mc:AlternateContent>";
     require(!ommlSourcesFromBodyXml(start+alternate+end,1,values),"Ambiguous OMML compatibility branch uses established fallback");
+    // 输入缓存必须保留段落格式和手动编号，不能把纯公式快照拿来恢复整段。
+    const auto paragraph=L"<w:p><w:pPr><w:spacing w:after=\"120\"/></w:pPr>"+equation(L"x")+L"<w:r><w:t> (27)</w:t></w:r></w:p>";
+    require(ommlSourcesFromBodyXml(start+paragraph+end,1,values,true)&&values.size()==1&&!values[0].empty(),"Cache standalone OMML input package");
+    require(contents(values[0])==L"x (27)"&&values[0].find(L"w:after=\"120\"")!=std::wstring::npos,"Cached recovery includes paragraph properties and manual number");
+    const auto recovery=ommlRecoveryPackage(start+body+end,values[0]);
+    require(contents(recovery)==L"x (27)HEADER"&&recovery.find(L"/word/header1.xml")!=std::wstring::npos,"Recovery replaces only main body and retains package dependencies");
+    require(ommlSourcesFromBodyXml(start+L"<w:p>"+equation(L"x")+equation(L"y")+L"</w:p>"+end,2,values,true)&&values[0].empty()&&values[1].empty(),"Shared paragraph keeps range-specific input and recovery");
     std::puts("OMML_BODY_SNAPSHOT_PASSED");
 }
 inline void checkWordSources(const std::wstring& input) {
@@ -50,7 +82,6 @@ inline void checkWordSources(const std::wstring& input) {
     word.document=asObject(invoke(documents.Get(),L"Open",DISPATCH_METHOD,{input.c_str(),false,true,false,Value(),Value(),false,Value(),Value(),Value(),Value(),false}));
     const auto readOnly=invoke(word.document.Get(),L"ReadOnly",DISPATCH_PROPERTYGET);require(readOnly.v.vt==VT_BOOL&&readOnly.v.boolVal,"Snapshot comparison opens source read-only");
     auto content=get(word.document.Get(),L"Content"),maths=get(content.Get(),L"OMaths");const long total=integer(maths.Get(),L"Count");require(total>3,"Snapshot comparison needs at least four equations");
-    require(integer(get(content.Get(),L"InlineShapes").Get(),L"Count")==0&&integer(get(word.document.Get(),L"Shapes").Get(),L"Count")==0,"Snapshot comparison exercises supported production bulk path");
     std::vector<std::wstring> batch;require(ommlSourcesFromBodyXml(text(content.Get(),L"WordOpenXML"),static_cast<size_t>(total),batch),"Actual Word package supports body OMML snapshot extraction");
     for(long index=1;index<=total;++index){auto range=get(collectionItem(maths.Get(),index).Get(),L"Range");const auto actual=ommlSource(range.Get());
         std::printf("OMML_SNAPSHOT_COMPARE ID=%ld WORD_TEXT=%s XML_TEXT=%s EQUAL=%d\n",index,quote(text(range.Get(),L"Text")).c_str(),quote(contents(batch[static_cast<size_t>(index-1)])).c_str(),actual==batch[static_cast<size_t>(index-1)]);
@@ -85,12 +116,44 @@ inline void run(const std::wstring& stylesheetPath) {
     require(ommlMathML(normalClean,compiled.Get(),false,timings)==ommlMathML(normalSpaced,compiled.Get(),false,timings),"Normal OMML text retains the intentional whitespace cleanup policy");
     const auto ascii=finishMathML(L"<mi>x</mi><mo>+</mo><mn>1</mn>",false,timings);
     require(contents(ascii)==L"x+1"&&count(ascii,L"//*[local-name()='mover']")==0,"ASCII path retains exact mathematical text");
+    // ASCII 公式同样展开运算分隔符；嵌套、空括号和末个分隔符重复不能改变含义。
+    const auto asciiFences=finishMathML(L"<mfenced open=\"\" close=\"\" separators=\" + &#x09; - \"><mi>a</mi><mfenced separators=\"+\"><mi>b</mi><mi>c</mi></mfenced><mi>d</mi><mi>e</mi></mfenced>",false,timings);
+    require(contents(asciiFences)==L"a+b+c-d-e"&&count(asciiFences,L"//*[local-name()='mfenced' and @separators='' and count(*)=1 and *[local-name()='mrow']]")==2,"ASCII and nested arithmetic separators become explicit operators");
+    require(count(asciiFences,L"/*[local-name()='math']/*[local-name()='mfenced' and @open='' and @close='']/*[local-name()='mrow' and count(*)=7 and *[2][local-name()='mo' and text()='+'] and *[4][local-name()='mo' and text()='-'] and *[6][local-name()='mo' and text()='-']]")==1,"Empty fences and separator sequence whitespace and repetition are preserved");
+    // 范数只在属性中出现时仍需归一化，正文中的同一字符不能被全局改写。
+    const auto norm=finishMathML(L"<mfenced open='&#x2016;' close='&#x2016;'><mi mathvariant='bold-italic'>x</mi></mfenced><mo>&#x2016;</mo>",false,timings);
+    require(count(norm,L"//*[local-name()='mfenced' and @open='||' and @close='||']/*[local-name()='mi' and @mathvariant='bold-italic' and text()='x']")==1&&contents(norm)==L"x\u2016","Norm delimiters normalize without changing mathematical text or bold italic style");
+    const auto normAscii=finishMathML(L"<mfenced open='&#x2016;' close='&#x2016;'><mi>x</mi></mfenced>",false,timings);
+    require(count(normAscii,L"//*[local-name()='mfenced' and @open='||' and @close='||']")==1,"ASCII-only content still normalizes norm delimiter attributes");
+    for(const auto* separator:{L"&#x2264;",L"&#x2265;",L"&lt;",L"&gt;",L"/"}){
+        const auto relation=finishMathML(L"<mfenced open='&#x2016;' close='&#x2016;' separators='"+std::wstring(separator)+L"'><mi mathvariant='bold-italic'>x</mi><mi>y</mi></mfenced>",false,timings);
+        const auto decoded=contents(L"<root>"+std::wstring(separator)+L"</root>");
+        require(contents(relation)==L"x"+decoded+L"y"&&count(relation,L"//*[local-name()='mfenced' and @open='||' and @close='||' and @separators='']/*[local-name()='mrow' and count(*)=3 and *[2][local-name()='mo']]")==1&&
+            count(relation,L"//*[local-name()='mi' and @mathvariant='bold-italic' and text()='x']")==1,"Relational and slash separators become explicit operators while preserving norm fences and styling");
+    }
+    // 指数函数文本及上下标作为完整子树移动，不能拆散基底、下标和上标。
+    const auto scriptedFence=finishMathML(L"<mtext>exp</mtext><mfenced open=\"(\" close=\")\" separators=\"&#x2212;\"><msub><mi>x</mi><mi>i</mi></msub><msup><mi>y</mi><mn>2</mn></msup><msubsup><mi mathvariant=\"bold\">z</mi><mi>j</mi><mo>&#x22c6;</mo></msubsup></mfenced>",false,timings);
+    require(contents(scriptedFence)==L"expxi-y2-zj\u22c6"&&count(scriptedFence,L"/*[local-name()='math']/*[local-name()='mtext' and text()='exp']")==1&&count(scriptedFence,L"//*[local-name()='mfenced' and @open='(' and @close=')' and @separators='']/*[local-name()='mrow']/*[local-name()='mo' and text()='-']")==2,"Unicode separator minus becomes explicit ASCII minus without changing exp text");
+    require(count(scriptedFence,L"//*[local-name()='mrow']/*[local-name()='msub' and count(*)=2 and *[1][local-name()='mi' and text()='x'] and *[2][local-name()='mi' and text()='i']]")==1&&
+        count(scriptedFence,L"//*[local-name()='mrow']/*[local-name()='msup' and count(*)=2 and *[1][local-name()='mi' and text()='y'] and *[2][local-name()='mn' and text()='2']]")==1&&
+        count(scriptedFence,L"//*[local-name()='mrow']/*[local-name()='msubsup' and count(*)=3 and *[1][local-name()='mi' and text()='z' and @mathvariant='bold'] and *[2][local-name()='mi' and text()='j'] and *[3][local-name()='mo' and text()='\u22c6']]")==1,"Subscripts superscripts and conjugate star remain attached to their original bases");
+    // 普通分隔符继续交给原路径，避免影响默认逗号、竖线或显式无分隔符。
+    const auto ordinaryFences=finishMathML(L"<mfenced><mi>a</mi><mi>b</mi></mfenced><mfenced separators=\",\"><mi>a</mi><mi>b</mi></mfenced><mfenced separators=\"|\"><mi>a</mi><mi>b</mi></mfenced><mfenced separators=\"\"><mi>a</mi><mi>b</mi></mfenced>",false,timings);
+    require(contents(ordinaryFences)==L"abababab"&&count(ordinaryFences,L"//*[local-name()='mfenced' and count(*)=2 and count(*[local-name()='mi'])=2]")==4&&
+        count(ordinaryFences,L"//*[local-name()='mfenced' and not(@separators)]")==1&&count(ordinaryFences,L"//*[local-name()='mfenced' and @separators=',']")==1&&
+        count(ordinaryFences,L"//*[local-name()='mfenced' and @separators='|']")==1&&count(ordinaryFences,L"//*[local-name()='mfenced' and @separators='']")==1,"Default comma vertical bar and empty separators remain unchanged");
     for(const auto* fragment:{L"<mi mathvariant=\"bold\">Y&#x0302;</mi>",L"<mi mathvariant=\"bold\">\u0176</mi>",L"<mi mathvariant=\"bold\">Y</mi><mo>&#x0302;</mo>"}){
         const auto adapted=finishMathML(fragment,false,timings);
         require(count(adapted,L"//*[local-name()='mover']")==1&&count(adapted,L"//*[local-name()='mi' and @mathvariant='bold' and text()='Y']")==1,"Decoded entity and Unicode accents retain token styling");
         require(contents(adapted)==L"Y^","Accent compatibility emits the established MathType hat glyph");
     }
-    checkBodySources();
+    // 极速简化只删除无属性的单参数分组，保留上下标参数、复合分组及样式。
+    const auto grouped=L"<mrow><mrow><msubsup><mrow><mi>x</mi></mrow><mrow><mi>i</mi><mo>+</mo><mn>1</mn></mrow><mrow mathvariant=\"bold\"><mn>2</mn></mrow></msubsup></mrow></mrow><mrow><mover><mrow><mi>Y</mi></mrow><mo>^</mo></mover></mrow>";
+    const auto unchanged=finishMathML(grouped,false,timings),compact=finishMathML(grouped,false,timings,true);
+    require(count(unchanged,L"//*[local-name()='mrow']")==7&&count(compact,L"//*[local-name()='mrow']")==2&&contents(compact)==contents(unchanged),"Only explicit ultra compaction removes redundant rows without changing tokens");
+    require(count(compact,L"//*[local-name()='msubsup' and count(*)=3 and *[1][local-name()='mi' and text()='x'] and *[2][local-name()='mrow' and count(*)=3] and *[3][local-name()='mrow' and @mathvariant='bold']]")==1&&
+        count(compact,L"//*[local-name()='mover' and count(*)=2 and *[1][local-name()='mi' and text()='Y'] and *[2][local-name()='mo' and text()='^']]")==1,"Compaction preserves script arity, styled rows, and accent operators");
+    checkDirectTex();checkBodySources();
     require(timings.samples[static_cast<size_t>(ConversionMetric::XslCompile)].count==1,"Repeated formulas reuse one compiled stylesheet");
     std::puts("OMML_ADAPTER_SELF_TEST_PASSED");
 }

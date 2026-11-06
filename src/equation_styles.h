@@ -58,7 +58,7 @@ inline std::string sizedPreferences(MathTypeApi& api,double points,const std::ws
 
 // 临时空对象只通过厂商书签插入，不触发交互式编辑窗口。
 inline std::vector<unsigned char> emptyEquation(MathTypeApi& api, WordSession& word,
-                                               const std::string* prefs = nullptr, bool display = true,bool fast=false) {
+                                               const std::string* prefs = nullptr, bool display = true,bool fast=false,BlankEquationTemplate* prepared=nullptr) {
     require(word.owned, "Own scratch Word session");
     auto scratch = asObject(invoke(get(word.application.Get(), L"Documents").Get(), L"Add", DISPATCH_METHOD, {Value(), false, Value(), false}));
     ComPtr<IDispatch> object;
@@ -74,8 +74,9 @@ inline std::vector<unsigned char> emptyEquation(MathTypeApi& api, WordSession& w
             require(api.writeBytes(object.Get(),3,styled.data(),static_cast<long>(styled.size()))==0,"Apply task native preferences");}
         auto native = readNative(api, object.Get());
         require(api.close(OLECLOSE_NOSAVE, object.Get()) == 0, "Close empty equation"); active = false;
-        invoke(scratch.Get(), L"Close", DISPATCH_METHOD, {0L});
         invoke(word.document.Get(), L"Activate", DISPATCH_METHOD); // 自定义 Undo 必须绑定任务文档。
+        if(prepared){prepared->range=get(get(shape.Get(),L"Range").Get(),L"FormattedText");prepared->document=std::move(scratch);}
+        else invoke(scratch.Get(), L"Close", DISPATCH_METHOD, {0L});
         return native;
     } catch (...) {
         if (active) require(api.close(OLECLOSE_NOSAVE, object.Get()) == 0, "Close failed empty equation");

@@ -19,6 +19,8 @@ using DocxLinkUpdates = std::map<std::wstring, std::vector<std::wstring>>;
 // 只修改私有副本的 OLE 外链更新方式，正常保存后恢复，不修改 Word 全局选项。
 inline DocxLinkUpdates setDocxLinkUpdates(const std::wstring& path, const DocxLinkUpdates* restore = nullptr) {
     if (restore && restore->empty()) return {};
+    const bool progress=taskShared!=nullptr;
+    if(progress)std::puts(restore?"UI_PHASE RESTORE_LINKS":"UI_PHASE LINK_SETTINGS");
     ComPtr<IOpcFactory> factory; check(CoCreateInstance(__uuidof(OpcFactory),nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&factory)),"Link settings package factory");
     ComPtr<IStream> input; check(factory->CreateStreamOnFile(path.c_str(),OPC_STREAM_IO_READ,nullptr,0,&input),"Read private link settings");
     ComPtr<IOpcPackage> package; check(factory->ReadPackageFromStream(input.Get(),OPC_VALIDATE_ON_LOAD,&package),"Read private package for links");
@@ -26,12 +28,18 @@ inline DocxLinkUpdates setDocxLinkUpdates(const std::wstring& path, const DocxLi
     {
         ComPtr<IOpcPartSet> parts;check(package->GetPartSet(&parts),"Link settings parts");
         ComPtr<IOpcPartEnumerator> entries;check(parts->GetEnumerator(&entries),"Link settings part enumeration");BOOL more{};HRESULT advanced{};
+        std::vector<ComPtr<IOpcPart>> allParts;
         while((advanced=entries->MoveNext(&more))==S_OK&&more){
-            taskPulse();ComPtr<IOpcPart> part;check(entries->GetCurrent(&part),"Link settings current part");
+            ComPtr<IOpcPart> part;check(entries->GetCurrent(&part),"Link settings current part");allParts.push_back(std::move(part));
+        }
+        check(advanced,"Complete linked OLE part enumeration");
+        StageProgress partProgress(restore?"RESTORE_LINK_PARTS":"LINK_PARTS",allParts.size(),progress);
+        for(const auto& part:allParts){
+            taskPulse();
             ComPtr<IOpcPartUri> uri;check(part->GetName(&uri),"Link settings part name");Value name;name.v.vt=VT_BSTR;check(uri->GetAbsoluteUri(&name.v.bstrVal),"Link settings part URI");
             const std::wstring partName=name.v.bstrVal;
-            if(partName.rfind(L"/word/",0)!=0||(partName.size()<4)||(partName.substr(partName.size()-4)!=L".xml"&&partName.substr(partName.size()-4)!=L".vml"))continue;
-            if(restore&&restore->find(partName)==restore->end())continue;
+            if(partName.rfind(L"/word/",0)!=0||(partName.size()<4)||(partName.substr(partName.size()-4)!=L".xml"&&partName.substr(partName.size()-4)!=L".vml")){partProgress.advance();continue;}
+            if(restore&&restore->find(partName)==restore->end()){partProgress.advance();continue;}
             ComPtr<IStream> content;check(part->GetContentStream(&content),"Read XML link settings");
             ComPtr<IXMLDOMDocument2> document;check(CoCreateInstance(__uuidof(DOMDocument60),nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&document)),"System XML link settings reader");
             check(document->put_async(VARIANT_FALSE),"Synchronous link settings XML");check(document->put_preserveWhiteSpace(VARIANT_TRUE),"Keep XML whitespace");
@@ -39,7 +47,7 @@ inline DocxLinkUpdates setDocxLinkUpdates(const std::wstring& path, const DocxLi
             Value source;source.v.vt=VT_UNKNOWN;source.v.punkVal=content.Get();source.v.punkVal->AddRef();VARIANT_BOOL loaded{};
             check(document->load(source.v,&loaded),"Load private XML part");require(loaded!=VARIANT_FALSE,"Valid private XML part");
             ComPtr<IXMLDOMNodeList> links;check(document->selectNodes(Value(L"//*[local-name()='OLEObject' and namespace-uri()='urn:schemas-microsoft-com:office:office' and @Type='Link']").v.bstrVal,&links),"Find linked OLE objects");
-            long count{};check(links->get_length(&count),"Count linked OLE objects");if(!count&&!restore)continue;
+            long count{};check(links->get_length(&count),"Count linked OLE objects");if(!count&&!restore){partProgress.advance();continue;}
             if(restore){require(static_cast<size_t>(count)==restore->at(partName).size(),"Saved linked OLE objects preserved");++restored;}
             for(long index=0;index<count;++index){
                 ComPtr<IXMLDOMNode> node;check(links->get_item(index,&node),"Read linked OLE node");ComPtr<IXMLDOMElement> element;check(node.As(&element),"Linked OLE element");
@@ -53,16 +61,19 @@ inline DocxLinkUpdates setDocxLinkUpdates(const std::wstring& path, const DocxLi
             }
             ULARGE_INTEGER zeroSize{};LARGE_INTEGER zero{};check(content->SetSize(zeroSize),"Replace private XML part");check(content->Seek(zero,STREAM_SEEK_SET,nullptr),"Rewind private XML output");
             check(document->save(source.v),"Write private OLE link settings");
+            partProgress.advance();
         }
-        check(advanced,"Complete linked OLE part enumeration");
     }
     if(restore)require(restored==restore->size(),"All original linked OLE parts preserved");
-    if(!restore&&updates.empty())return updates;
+    if(!restore&&updates.empty()){if(progress)std::puts("UI_PHASE PACKAGE_RELEASE");return updates;}
     ComPtr<IStream> output;check(CreateStreamOnHGlobal(nullptr,TRUE,&output),"Private package rewrite buffer");
+    if(progress)std::puts("UI_PHASE LINK_SETTINGS_SERIALIZE");
     check(factory->WritePackageToStream(package.Get(),OPC_WRITE_DEFAULT,output.Get()),"Write private link settings package");package.Reset();input.Reset();
     LARGE_INTEGER zero{};check(output->Seek(zero,STREAM_SEEK_SET,nullptr),"Rewind private package buffer");
+    if(progress)std::puts("UI_PHASE LINK_SETTINGS_WRITE");
     ComPtr<IStream> destination;check(factory->CreateStreamOnFile(path.c_str(),OPC_STREAM_IO_WRITE,nullptr,0,&destination),"Replace owned private package");
-    ULARGE_INTEGER all{};all.QuadPart=~0ULL;check(output->CopyTo(destination.Get(),all,nullptr,nullptr),"Complete private package rewrite");return updates;
+    ULARGE_INTEGER all{};all.QuadPart=~0ULL;check(output->CopyTo(destination.Get(),all,nullptr,nullptr),"Complete private package rewrite");
+    if(progress)std::puts("UI_PHASE PACKAGE_RELEASE");return updates;
 }
 
 inline void requireDocxZip(const std::wstring& path) {
@@ -132,6 +143,7 @@ inline std::vector<unsigned char> nativePayload(const std::vector<unsigned char>
     return {stream.begin() + header, stream.end()};
 }
 inline PackageState inspectPackage(const std::wstring& path,const char* progressStage=nullptr,bool styleOnly=false,bool progress=false) {
+    if(progress)std::puts("UI_PHASE OPENING_PACKAGE");
     ComPtr<IOpcFactory> factory;
     check(CoCreateInstance(__uuidof(OpcFactory), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)), "Packaging factory");
     ComPtr<IStream> stream;
@@ -160,15 +172,16 @@ inline PackageState inspectPackage(const std::wstring& path,const char* progress
         }
     };
     ComPtr<IOpcRelationshipSet> relations;
-    if(!styleOnly){check(package->GetRelationshipSet(&relations), "Package relationships"); relationships(relations.Get());}
+    if(!styleOnly){if(progress)std::puts("UI_PHASE PACKAGE_RELATIONSHIPS");check(package->GetRelationshipSet(&relations), "Package relationships"); relationships(relations.Get());}
     // 只枚举部件引用获得总数，内容仍各读一次，不为显示进度重复解析文档。
     std::vector<ComPtr<IOpcPart>> allParts;
+    if(progress)std::puts("UI_PHASE PACKAGE_ENUMERATION");
     for (;;) {
         BOOL more{}; check(enumerator->MoveNext(&more), "Next package part"); if (!more) break;
         ComPtr<IOpcPart> part; check(enumerator->GetCurrent(&part), "Current package part");
         allParts.push_back(std::move(part));
     }
-    StageProgress partProgress(progressStage,allParts.size(),progress);
+    StageProgress partProgress(styleOnly?"INPUT_STYLES":progressStage,styleOnly?1:allParts.size(),progress);
     for(const auto& part:allParts) {
         ComPtr<IOpcPartUri> name; check(part->GetName(&name), "Package part URI");
         BSTR raw{}; check(name->GetAbsoluteUri(&raw), "Package part name");
@@ -184,7 +197,7 @@ inline PackageState inspectPackage(const std::wstring& path,const char* progress
                 if(!wcscmp(local,L"name")&&reader->MoveToAttributeByName(L"val",L"http://schemas.openxmlformats.org/wordprocessingml/2006/main")==S_OK){const wchar_t* value{};check(reader->GetValue(&value,nullptr),"Style name");if(!wcscmp(value,L"MTDisplayEquation"))state.displayStyle=true;}}
             check(status,"Complete style definitions");
         }
-        if(styleOnly)return state;
+        if(styleOnly){partProgress.advance();if(progress)std::puts("UI_PHASE PACKAGE_RELEASE");return state;}
         check(part->GetRelationshipSet(&relations), "Part relationships"); relationships(relations.Get());
         if (uri.find(L"/word/media/") == 0) state.media.push_back(std::move(bytes));
         if (uri.find(L"/word/embeddings/") == 0) {
@@ -194,7 +207,8 @@ inline PackageState inspectPackage(const std::wstring& path,const char* progress
         }
         partProgress.advance();
     }
-    return state;
+    if(styleOnly)partProgress.advance();
+    if(progress)std::puts("UI_PHASE PACKAGE_RELEASE");return state;
 }
 inline void requireContains(const std::vector<std::vector<unsigned char>>& after,
                             const std::vector<std::vector<unsigned char>>& before, const char* label) {

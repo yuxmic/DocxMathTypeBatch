@@ -33,6 +33,16 @@
 !/package.ps1
 !/requirements-dev.txt
 !/src/convert_docx.cpp
+!/src/ultra_equation_worker.cpp
+!/src/ultra_conversion.cpp
+!/src/ultra_conversion.h
+!/src/ultra_source.h
+!/src/ultra_assets.h
+!/tests/helpers/create_ultra_fixture.py
+!/tests/helpers/check_ultra_fixture.py
+!/src/conversion_mode.h
+!/tests/native/test_ultra_native.h
+!/tests/try-ultra.ps1
 !/src/app_version.h
 !/src/agent_interface.h
 !/src/app_error.h
@@ -57,6 +67,7 @@
 !/src/numbering_rules.h
 !/src/omml_adapter.cpp
 !/src/omml_adapter.h
+!/src/omml_tex.h
 !/src/scan_docx.cpp
 !/src/scan_file.h
 !/src/task_guard.h

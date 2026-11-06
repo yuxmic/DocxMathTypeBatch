@@ -3,6 +3,7 @@
 #define NOMINMAX
 #include <windows.h>
 #include "app_error.h"
+#include "conversion_timing.h"
 #include <oleauto.h>
 #include <oleidl.h>
 #include <tlhelp32.h>
@@ -64,13 +65,17 @@ static void pump(DWORD milliseconds) {
     } while (taskActiveMilliseconds() < end);
 }
 
+inline ConversionTimings automationTimings;
 static Value invoke(IDispatch* object, const wchar_t* name, WORD flags,
-                    std::initializer_list<Value> arguments = {}) {
+                    std::initializer_list<Value> arguments = {},DISPID* cachedId=nullptr) {
     DISPID id{};
     taskPulse();
     LPOLESTR member = const_cast<wchar_t*>(name);
     // Word 正在加载加载项或处理其他调用时会拒绝 GetIDsOfNames；与 Invoke 一样等待重试。
     HRESULT resolved{};
+    if(cachedId&&*cachedId!=DISPID_UNKNOWN)id=*cachedId;
+    else{
+    ScopedConversionTiming timing(automationTimings,ConversionMetric::ComResolve);
     for (int attempt = 0; attempt != 20; ++attempt) {
         resolved = object->GetIDsOfNames(IID_NULL, &member, 1, LOCALE_USER_DEFAULT, &id);
         if (resolved != RPC_E_CALL_REJECTED && resolved != RPC_E_SERVERCALL_RETRYLATER) break;
@@ -78,6 +83,8 @@ static Value invoke(IDispatch* object, const wchar_t* name, WORD flags,
     }
     if (FAILED(resolved)) std::fwprintf(stderr, L"UNKNOWN_MEMBER %ls\n", name);
     check(resolved, "GetIDsOfNames");
+    if(cachedId)*cachedId=id;
+    }
     std::vector<Value> values(arguments);
     std::reverse(values.begin(), values.end());
     std::vector<VARIANT> raw;
@@ -118,12 +125,12 @@ static ComPtr<IDispatch> asObject(const Value& value) {
     return result;
 }
 
-static ComPtr<IDispatch> get(IDispatch* object, const wchar_t* name) {
-    return asObject(invoke(object, name, DISPATCH_PROPERTYGET));
+static ComPtr<IDispatch> get(IDispatch* object, const wchar_t* name,DISPID* cachedId=nullptr) {
+    return asObject(invoke(object, name, DISPATCH_PROPERTYGET,{},cachedId));
 }
 
-static long integer(IDispatch* object, const wchar_t* name) {
-    auto value = invoke(object, name, DISPATCH_PROPERTYGET);
+static long integer(IDispatch* object, const wchar_t* name,DISPID* cachedId=nullptr) {
+    auto value = invoke(object, name, DISPATCH_PROPERTYGET,{},cachedId);
     require(value.v.vt == VT_I4, "Automation integer type");
     return value.v.lVal;
 }
@@ -260,16 +267,19 @@ struct WordSession {
         if(!linkOptions)std::puts("OWNED_WORD_OPTIONS_UNCHANGED_PASSED");
         // Options 可能持久化到用户设置，关闭会话前恢复，不能把全局偏好留在关闭状态。
         if (linkOptions) {
+            std::puts("UI_PHASE WORD_OPTIONS_RESTORE");
             invoke(linkOptions.Get(), L"UpdateLinksAtOpen", DISPATCH_PROPERTYPUT, {originalUpdateLinks});
             taskLinksRestored();
             linkOptions.Reset();
             std::puts("OWNED_WORD_OPTIONS_RESTORED_PASSED");
         }
         if (document) {
+            std::puts("UI_PHASE CLOSING");
             invoke(document.Get(), L"Close", DISPATCH_METHOD, {0L});
             document.Reset();
         }
         if (owned) {
+            std::puts("UI_PHASE EXITING_WORD");
             const auto started=GetTickCount64();
             invoke(application.Get(), L"Quit", DISPATCH_METHOD, {0L});
             owned = false;
@@ -282,6 +292,7 @@ struct WordSession {
         catch (...) { std::puts("OWNED_WORD_QUIT_FAILED"); }
         // 退出后的代理释放可能等待 Word；单独计时，不改变原有释放责任。
         const auto started=GetTickCount64();
+        if(linkOptions||document||application)std::puts("UI_PHASE WORD_COM_RELEASE");
         linkOptions.Reset();document.Reset();application.Reset();
         std::printf("WORD_COM_RELEASE_MS=%llu\n",GetTickCount64()-started);
     }

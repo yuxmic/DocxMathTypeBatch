@@ -8,7 +8,7 @@ inline int agentDescribe(int argc,wchar_t** argv) {
     }
     std::puts("{\"Application\":\"DocxMathTypeBatch\",\"Version\":\"" DMTB_VERSION "\",\"CliContractVersion\":" DMTB_CLI_CONTRACT ",\"ReportSchemaVersion\":1,"
         "\"Platform\":\"windows-x64\",\"Directions\":[\"ToMathType\",\"ToLatex\"],\"Scopes\":[\"all\",\"inline\",\"display\"],"
-        "\"BodyOmmlDefault\":true,\"OptionalOmmlConversion\":true,\"ExperimentalFastConversion\":true,\"ExperimentalRegions\":[\"tables\",\"textboxes\",\"headers\",\"notes\"],"
+        "\"BodyOmmlDefault\":true,\"OptionalOmmlConversion\":true,\"ExperimentalFastConversion\":true,\"ConversionModes\":[\"Standard\",\"Fast\",\"Ultra\"],\"UltraScope\":\"BODY_LATEX_OMML_FIXED_SIZE\",\"ExperimentalRegions\":[\"tables\",\"textboxes\",\"headers\",\"notes\"],"
         "\"ReportStatuses\":[\"COMPLETE\",\"PARTIAL\"],\"Cancellation\":\"STOP_FILE\",\"Timeout\":\"NO_PROGRESS\"}");return 0;
 }
 inline int agentHelp() {
@@ -24,9 +24,10 @@ inline int agentHelp() {
         "  --skip-omml: preserve Word equations in the body and enabled extra regions; convert LaTeX only.\n"
         "  --experimental-tables --experimental-textboxes --experimental-headers --experimental-notes\n"
         "  --experimental-fast: save without pre/post content, layout or package verification (may contain errors).\n"
+        "  --ultra: body inline/display LaTeX and OMML, fixed size=pt, optional default display numbering; no Word or result verification.\n"
         "OMML is included by default in forward conversion. Reverse always preserves OMML. Extra regions only replace formulas.\n"
         "Scan covers the basic body only. Output/report paths must be new.\n"
-        "Exit 0 requires reading COMPLETE/PARTIAL in the report. FastConversion=true means unverified output.\n"
+        "Exit 0 requires reading COMPLETE/PARTIAL in the report. ConversionMode Fast/Ultra means unverified output.\n"
         "Exit 124: idle timeout; 125: service lost; 126: recovery required; 127: cancelled.\n"
         "Create the stop file to cancel and wait for supervision cleanup.");return 0;
 }

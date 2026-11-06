@@ -540,8 +540,38 @@ static void diagnosticPages(const std::wstring& input,const std::wstring& output
     taskCommit();std::puts("DIAGNOSTIC_PAGES_PASSED");
 }
 
+// 只使用自建小文件验证副本权限及监管清理，不启动 Word 或 MathType。
+static void readonlyCopySelfTest(const std::wstring& directory) {
+    require(CreateDirectoryW(directory.c_str(),nullptr)!=0,"New readonly-copy test directory");
+    const auto source=directory+L"\\source.bin";
+    const char content[]="private copy source";
+    {TaskHandle file(CreateFileW(source.c_str(),GENERIC_WRITE,0,nullptr,CREATE_NEW,FILE_ATTRIBUTE_NORMAL,nullptr));DWORD written{};
+        require(file.value!=INVALID_HANDLE_VALUE&&WriteFile(file.value,content,sizeof(content),&written,nullptr)&&written==sizeof(content),"Create readonly-copy source");}
+    require(SetFileAttributesW(source.c_str(),FILE_ATTRIBUTE_READONLY|FILE_ATTRIBUTE_HIDDEN|FILE_ATTRIBUTE_ARCHIVE)!=0,"Set source test attributes");
+    const auto original=sampleFileBytes(source);const auto attributes=GetFileAttributesW(source.c_str());
+    for(const bool supervised:{false,true}){
+        auto state=std::make_unique<TaskSharedState>();taskShared=supervised?state.get():nullptr;
+        const auto copy=directory+(supervised?L"\\supervised.bin":L"\\direct.bin");taskCopy(source,copy);
+        require(sampleFileBytes(copy)==original&&GetFileAttributesW(copy.c_str())==(attributes&~FILE_ATTRIBUTE_READONLY),"Copy preserves bytes and all other attributes");
+        require(!supervised||(state->files==1&&!wcscmp(state->tracked[0].path,copy.c_str())),"Supervised private copy remains registered");
+        bool rejected{};try{taskCopy(source,copy);}catch(const std::exception&){rejected=true;}
+        require(rejected&&sampleFileBytes(copy)==original,"Existing destination is never overwritten");
+        {TaskHandle file(CreateFileW(copy.c_str(),GENERIC_WRITE,0,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr));const char replacement='X';DWORD written{};
+            require(file.value!=INVALID_HANDLE_VALUE&&WriteFile(file.value,&replacement,1,&written,nullptr)&&written==1,"Private copy can be rewritten");}
+        require(sampleFileBytes(source)==original&&GetFileAttributesW(source.c_str())==attributes,"Original bytes and readonly attributes stay unchanged");
+        require(supervised?taskCleanupFiles(*state):DeleteFileW(copy.c_str())!=0,"Writable private copy can be cleaned");
+        require(GetFileAttributesW(copy.c_str())==INVALID_FILE_ATTRIBUTES,"No private copy remains");taskShared=nullptr;
+    }
+    require(SetFileAttributesW(source.c_str(),FILE_ATTRIBUTE_NORMAL)!=0&&DeleteFileW(source.c_str())!=0&&RemoveDirectoryW(directory.c_str())!=0,"Clean self-created readonly test files");
+    std::puts("READONLY_COPY_SELF_TEST_PASSED DIRECT=1 SUPERVISED=1 ORIGINAL_UNCHANGED=1");
+}
+
 int wmain(int argc, wchar_t** argv) {
     setvbuf(stdout, nullptr, _IONBF, 0);
+    if(argc==3&&std::wstring(argv[1])==L"--readonly-copy-self-test"){
+        try{readonlyCopySelfTest(absolutePath(argv[2]));return 0;}
+        catch(const std::exception& error){taskShared=nullptr;std::printf("READONLY_COPY_SELF_TEST_FAILED %s\n",error.what());return 1;}
+    }
     if(argc==5&&std::wstring(argv[1])==L"--diagnostic-pages")return superviseTask(argc,argv,false);
     if(argc==7&&std::wstring(argv[1])==L"--task-run"&&std::wstring(argv[3])==L"--diagnostic-pages"){
         if(FAILED(CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED)))return 1;int result=1;
