@@ -51,7 +51,11 @@ C++ 批处理支持完整结构化公式跨 Word 段落或软换行；`\\` 后�
 | `\dotsm` | `\cdots` |
 | `\coloneqq`、`\eqqcolon` | 组合关系符 `:=`、`=:`，字距由 MathType 排版 |
 | `\widetilde{…}` | `\tilde{…}`，由 MathType 根据参数生成单字顶饰或宽模板 |
-| `\mathring{…}` | `\overset{\circ}{…}`，使用 MathType 的上方圆圈排版 |
+| `\mathring{…}`、`\ring{…}` | `\overset{\circ}{…}`，使用 MathType 的上方圆圈排版 |
+| `\widebar{…}`、`\overbar{…}` | `\overline{…}`，保留整组覆盖 |
+| `\widecheck{…}`、`\widebreve{…}` | 同形顶饰居中，宽度由 MathType 的可用字形决定 |
+| `\overarc{…}`、`\overparen{…}`、`\wideparen{…}` | MathType 原生上弧模板 |
+| `\enspace`、`\enskip`、`\hspace{…}`、`\kern`、`\mkern` | 将明确写出的长度换成 MathType 可用的数学间距 |
 | `aligned`、`align*`、`split` 环境 | `array`，按实际顶层列数使用 `rl` 交替列格式 |
 | `alignedat`、`alignat*` 环境 | 消费字面的列组数参数，再按实际顶层列数使用 `array` |
 | `gathered`、`gather*` 环境 | 居中的 `array` |
@@ -59,7 +63,7 @@ C++ 批处理支持完整结构化公式跨 Word 段落或软换行；`\\` 后�
 
 `\mathup` 与 `\mathrm` 的别名关系见 [unicode-math 文档](https://mirrors.ctan.org/macros/unicodetex/latex/unicode-math/unicode-math.pdf)。多行结构和点号的用途依据 [amsmath 用户指南](https://texdoc.org/serve/amsldoc/0)，定义等号依据 [mathtools 文档](https://tug.ctan.org/macros/latex/contrib/mathtools/mathtools.pdf)。不同环境统一使用 MathType 的数组排版，保留数学内容、分行和分列，不复制 LaTeX 宏包的精细字距。
 
-规则按完整命令名匹配，`\bmfoo` 和转义的 `\\bm` 保持原样；`\text`、`\mbox`、`\operatorname` 等文字参数内部保持原样。原本已支持的 `\operatorname`、`\dfrac`、`\substack`、`\xrightarrow`、`\mathscr` 等不额外替换。本轮不移除 `\tag`、`\label`，也不将带自动编号的 `align` 当作无编号的 `align*`；自动编号继续通过主界面的原有设置完成。
+规则按完整命令名匹配，`\bmfoo` 和转义的 `\\bm` 保持原样。文字参数内仅适配已识别的双锐音字母，如 `\text{\H{o}}`。需要 MathML 的兼容公式先在独立的临时 MathType 对象中解析，再把最终结构一次写进成品。普通公式直接导入。自动编号继续通过主界面的设置完成。
 
 `\boxed`、`\fbox` 和含 `\&` 的复杂文字在本机仍有未解析红字；没有验证出可靠的等效写法，保持 MathType 的部分解析结果。任意自定义命令仍需具体定义。本程序不增加未解析命令的逐式导出检查，也不因此回滚或丢弃正常转换结果；这是 MathType 原生的[部分解析行为](https://docs.wiris.com/mathtype-7-interface/mathtype-7-ui-basic-usage)。
 
@@ -70,8 +74,22 @@ C++ 批处理支持完整结构化公式跨 Word 段落或软换行；`\\` 后�
 2026-10-28 的本地修复在正文和实验区域共用入口启用以下处理，仅修改导入副本：
 
 - `Ŷ`、`Ȳ`、`Ȭ` 等预组合字母按 Unicode 规范分解为基础字符和已支持顶饰；`Ŷ` 等组合写法也构造成明确的顶饰结构。分解使用 Windows 的 [FoldStringW / MAP_COMPOSITE](https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-foldstringw)，不做兼容字体折叠。
-- LaTeX 中可转成 ASCII 的字母顶饰改写为嵌套命令后再检查字符范围，例如 `Ŷ` → `\hat{Y}`、`Ȭ` → `\bar{\tilde{O}}`。文字参数内部不改写，未适配字符继续保留原式。
+- LaTeX 中可转成 ASCII 的字母顶饰改写为嵌套命令后再检查字符范围，例如 `Ŷ` → `\hat{Y}`、`Ȭ` → `\bar{\tilde{O}}`。数学和文字中的 `Ő/ő/Ű/ű` 使用 MathML 保留字形与文字样式。
 - Word 原生公式在 Office 生成 MathML 后，将顶饰位置的组合符转换为 MathType 能识别的符号码；预组合字母和跨相邻符号节点的组合写法构造成 `mover`。基础字符的字体属性保留，`XŶ` 只装饰最后的 `Y`。
 - 当前顶饰表包含抑扬符、波浪线、横线、短音符、单点至四点、圆圈、钩号、尖音符、重音符及左右/双向箭头。没有改写规则的命令继续交给 MathType 原有解析器。
 
-集中回归验证了 19 个正文/表格公式的页面、实际原生结构及粗体保留，另有 2 个未适配字符样本保留原式。检查使用 `test_tex_compatibility.py accent-fixture/accent-check` 和开发专用的 `native-api-probe --accent-export`；正式正向转换的缓存回显和成功判定保持原有规则。MathType 的短音符原生导出可能包含嵌套 `$`，反向转换会保留该对象并报告 `UNSUPPORTED_OR_INVALID_NATIVE_EXPORT`，其他公式继续导出；集中回归另含 `accent-reverse-check`。宽顶饰模板在本机 PDF 中可能缺失的渲染问题也仍需另行处理。
+反向导出会把厂商给短弧、箭头和下横线生成的嵌套定界符改为普通命令，也会修正上方圆圈出现的双上标。厂商无法导出的公式会保留 MathType 对象。
+
+### Word 原生宽空格和上顶饰
+
+保留普通文字词间空格、数学变量之间有宽度的普通空格和不换行空格。逗号后由 Word 自行处理的普通数学空格交给 MathType 自动排版。U+2001 宽空格使用等宽的 U+2003，U+2009 等已支持的窄空格沿用原生写法，其他明确宽度按 MathType 可用的档位取近似。公式内 Tab 依赖 Word 制表位，欧甘空格 U+1680 有可见字形，U+2061–U+2064 有运算含义。本机 MathType 无法保留这些情况时保留源公式。
+
+标准、快速和极速共用这些规则。Word 的上横线、双横线、上弧、长箭头和居中点饰使用可用的原生结构。覆盖整组的左鱼叉和方括号在本机无法保真时保留原式。可用原生花括号模板表示的整组花括号会继续转换。
+
+直接写入的 Unicode 双横线、倒短弧和单字鱼叉，以及叠在横线或尖帽上的点饰，都按顶饰结构导入。普通文字中的组合上横线保留文字样式。LaTeX 的双锐音字母支持数学变量和文字写法。单字符上方方括号使用 MathType 的固定宽度字形。带宽度参数的 `\overarc` 会保留原式。
+
+普通文字和数学变量中的不换行空格使用显式间距，避免预览出现问号。下标后的空格可以保留。逗号和二元加号旁的显式空格会补回 MathType 默认排版的部分自动间距，实际宽度仍随字号和 MathType 可用档位取近似。Office 为 `sin(x)` 等原生函数生成的应用标记允许导入，原式中单独写入的不可见运算符仍按保真保护处理。
+
+标准和快速模式在 Word 保存工作副本后，会把保留公式内的 Tab 写回 Word 重开时能识别的文本形式。该处理只涉及公式内部，段首 Tab 和旧编号前空格仍按原规则清理。直接在 Word 中再次保存这些原生公式时，Word 仍可能自行丢弃其中的 Tab。
+
+本机用 188 式真实样本加 8 式合成回归运行三档。三档各成功 196 式、生成 38 个连续右编号，原生公式数据均无 U+FFFD 替代字符。核对了宽空格、窄空格、上横线、波浪线、尖帽、倒帽、普通运算符及原件的 45 条下横线。倒帽正向能显示，本机 MathType 的 LaTeX 回导仍可能报错。

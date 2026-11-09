@@ -33,6 +33,11 @@ try{
         if($fast -and ($result.Validation -ne 'SKIPPED_EXPERIMENTAL_FAST' -or $result.PostConversionScans -ne 0 -or $result.WordReopenVerified)){throw '快速模式错误启用了保存后核验。'}
         $trace=[IO.File]::ReadAllText($log)
         if($fast -ne $trace.Contains('FAST_WORD_EXIT_MS=')){throw '快速与常规模式的 Word 收尾路径不符。'}
+        if(-not $reverse){
+            # 此样本正文三式均为同字号行内式，样式应只写入空模板一次。
+            $styles=[regex]::Match($trace,'(?m)^TIMING_DETAIL STYLE_WRITE COUNT=(\d+)')
+            if(-not $styles.Success -or [long]$styles.Groups[1].Value -ne 1){throw '同字号同类型公式仍在重复写入样式。'}
+        }
         # 从输出包独立核对全部区域的对象、公式及表格属性，不仅检查成功计数。
         if($reverse){& python -B -X utf8 $helper check-reverse $source $output}
         else{& python -B -X utf8 $helper check $source $output all $source}

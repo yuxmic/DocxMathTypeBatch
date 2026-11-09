@@ -238,6 +238,14 @@ foreach($manualCase in @(@{Name='manual-latex';Flags=@()},@{Name='manual-latex-f
 if($LASTEXITCODE -ne 0){throw 'LaTeX 手动编号清理或居中失败。'}
 $evidence.Cases+=@{Name='manual-latex';FourDelimiters=$true;ManualNumbersRemoved=$true;ControlsAndUnitsPreserved=$true}
 
+# 原生公式内部的 Tab 经过 Word 保存重开仍须保留，段落级编号空白照常清理。
+& python -B -X utf8 $inputForms formula-tab-fixture $run
+if($LASTEXITCODE -ne 0){throw '公式内 Tab 样本生成失败。'}
+$null=Invoke-LightweightTask 'formula-tab' @('--worker-convert',(Join-Path $run 'formula-tab-input.docx'),(Join-Path $run 'formula-tab.docx'),(Join-Path $run 'formula-tab.json'),'size=12',(Join-Path $run 'stop.flag'),'--numbers','--experimental-tables')
+& python -B -X utf8 $inputForms formula-tab-check $run
+if($LASTEXITCODE -ne 0){throw '公式内 Tab 或手动编号清理回归失败。'}
+$evidence.Cases+=@{Name='formula-tab';WordReopenVerified=$true;ManualNumberRemoved=$true}
+
 # 交换保存包中的两条不同公式，数量和字节多重集均相同，仍必须拒绝错误位置。
 $oldBoundary=$env:DOCX_MATH_FAULT_BOUNDARY;$oldGate=$env:DOCX_MATH_FAULT_GATE
 $swapProcess=$null

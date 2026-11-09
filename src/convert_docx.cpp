@@ -5,6 +5,49 @@
 #include "docx_package.h"
 #include "conversion_timing.h"
 #include "ultra_conversion.h"
+#include <charconv>
+#include <sstream>
+
+// 清单只含 SHA-256 和定长格式的 ASCII 字段；原式以 UTF-8 十六进制与重扫结果比较。
+static std::string readBodyTargets(const std::wstring& path,BodyOptions& options) {
+    TaskHandle file(CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr));
+    LARGE_INTEGER size{};
+    require(file.value!=INVALID_HANDLE_VALUE&&GetFileSizeEx(file.value,&size)&&size.QuadPart>0&&size.QuadPart<=4*1024*1024,"TARGET_SELECTION_INVALID");
+    std::string bytes(static_cast<size_t>(size.QuadPart),'\0');
+    DWORD read{};
+    require(ReadFile(file.value,bytes.data(),static_cast<DWORD>(bytes.size()),&read,nullptr)&&read==bytes.size(),"TARGET_SELECTION_INVALID");
+    std::istringstream input(std::move(bytes));
+    std::string line;
+    const auto next=[&](){
+        if(!std::getline(input,line))return false;
+        if(!line.empty()&&line.back()=='\r')line.pop_back();
+        return true;
+    };
+    const auto hex=[](std::string_view field){
+        return !field.empty()&&field.size()%2==0&&std::all_of(field.begin(),field.end(),[](char c){
+            return (c>='0'&&c<='9')||(c>='A'&&c<='F');
+        });
+    };
+    require(next()&&line.size()==64&&hex(line),"TARGET_SELECTION_INVALID");
+    const auto sha256=line;
+    while(next()){
+        std::string_view remaining=line;
+        const auto take=[&](){
+            const auto at=remaining.find('\t');require(at!=std::string_view::npos,"TARGET_SELECTION_INVALID");
+            const auto field=remaining.substr(0,at);remaining.remove_prefix(at+1);return field;
+        };
+        const auto coordinate=[](std::string_view field){
+            long value{};const auto result=std::from_chars(field.data(),field.data()+field.size(),value);
+            require(result.ec==std::errc()&&result.ptr==field.data()+field.size()&&value>=0,"TARGET_SELECTION_INVALID");return value;
+        };
+        const auto start=coordinate(take()),end=coordinate(take());
+        const auto delimiter=take();
+        require(end>start&&hex(delimiter)&&hex(remaining),"TARGET_SELECTION_INVALID");
+        require(options.targets.emplace(start,BodyTarget{end,std::string(delimiter),std::string(remaining)}).second,"TARGET_SELECTION_INVALID");
+    }
+    require(!options.targets.empty(),"TARGET_SELECTION_INVALID");
+    return sha256;
+}
 
 static void writeNewText(const std::wstring& path, const std::string& contents) {
     HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -22,17 +65,19 @@ static void writeNewText(const std::wstring& path, const std::string& contents) 
 static std::string outcomeReport(const std::wstring& input, const std::wstring& output, const std::wstring& eqp,
                                  const BodyOptions& options,const BodyResult& body) {
     const auto& scan=body.scan;const auto& outcomes=body.outcomes;const auto& experimental=body.experimental;const auto& issues=body.issues;const bool fullReadback=options.selfTest;
-    size_t ready{}, succeeded{}, failed{}, failedUnverified{}, unattempted{};
+    size_t ready{}, succeeded{}, failed{}, failedUnverified{}, unattempted{},rejected{};
     for (size_t index = 0; index < outcomes.size(); ++index) {
-        ready += scan.items[index].ready; succeeded += outcomes[index].status == L"SUCCEEDED";
+        const auto& item=scan.items[index];if(!selectedBodyItem(options,item))continue;
+        ready += item.ready; rejected+=!item.ready&&!item.existingDisplay&&!item.existingReference;
+        succeeded += outcomes[index].status == L"SUCCEEDED";
         failed += failedOutcome(outcomes[index]);failedUnverified+=outcomes[index].status==L"FAILED_UNVERIFIED"; unattempted += outcomes[index].status == L"NOT_ATTEMPTED";
     }
-    const auto existing=std::count_if(scan.items.begin(),scan.items.end(),[](const ScanItem& item){return item.existingDisplay||item.existingReference;});
-    const size_t rejected=outcomes.size()-ready-static_cast<size_t>(existing)+experimental.rejected;
+    rejected+=experimental.rejected;
     ready+=experimental.succeeded+experimental.failed+experimental.unattempted;succeeded+=experimental.succeeded;failed+=experimental.failed;unattempted+=experimental.unattempted;
     failedUnverified+=experimental.failedUnverified;
     const auto status = failed || rejected || unattempted || !issues.empty() || experimental.partial() ? L"PARTIAL" : L"COMPLETE";
     std::string json = "{\n  \"SchemaVersion\":1, \"Application\":\"DocxMathTypeBatch\", \"ApplicationVersion\":\"" DMTB_VERSION "\", \"CliContractVersion\":" DMTB_CLI_CONTRACT ", \"Scope\":"+quote(experimental.enabled?L"BODY_WITH_EXPERIMENTAL_EXTENSIONS":L"MAIN_STORY_BODY_ONLY")+", \"Positions\":"+quote(options.scan.fast?L"WORD_WORKING_COPY_UNVERIFIED":L"WORD_SNAPSHOTS_BEFORE_AND_AFTER")+",\n";
+    if(options.scan.exactTargets)json+="  \"TargetedBodyConversion\":true, \"UnselectedFormulas\":"+std::to_string(scan.items.size()-options.targets.size())+",\n";
     json+="  \"ConversionMode\":\""+std::string(options.scan.fast?"Fast":"Standard")+"\", \"FastConversion\":"+std::string(options.scan.fast?"true":"false")+", \"FailedUnverified\":"+std::to_string(failedUnverified)+",\n";
     json+="  \"ConvertOmml\":"+std::string(!options.reverse&&options.scan.convertOmml?"true":"false")+",\n";
     json += "  \"EquationMode\":"+quote(options.scan.scope==EquationScope::Inline?L"Inline":options.scan.scope==EquationScope::Display?L"Display":L"All")+", \"NumbersAdded\":"+std::to_string(body.numbering.inserted)+",\n";
@@ -61,7 +106,7 @@ static std::string outcomeReport(const std::wstring& input, const std::wstring& 
     StageProgress reportItems("REPORT_ITEMS",outcomes.size()+experimental.items.size(),options.scan.progress);
     size_t written{};for (size_t index = 0; index < outcomes.size(); ++index) {
         const auto& item = scan.items[index]; const auto& result = outcomes[index];
-        if(item.existingDisplay||item.existingReference){reportItems.advance();continue;}
+        if(item.existingDisplay||item.existingReference||!selectedBodyItem(options,item)){reportItems.advance();continue;}
         const auto fullSize=result.native.empty()||scan.reverse?std::string():inspectStyle(result.native).sizes.at(0).second;
         json += (written++?",\n":"")+std::string("    {\"Id\":") + std::to_string(index + 1) + ",\"InitialStart\":" + std::to_string(item.span.start) + ",\"InitialEnd\":" + std::to_string(item.span.end) +
             ",\"FinalStart\":" + std::to_string(result.finalSpan.start) + ",\"FinalEnd\":" + std::to_string(result.finalSpan.end) +
@@ -76,7 +121,8 @@ static std::string outcomeReport(const std::wstring& input, const std::wstring& 
     if(options.scan.progress)std::puts("UI_PHASE REPORT_DETAILS");
     StageProgress details("REPORT_DETAILS",issues.size()+experimental.issues.size()+body.warnings.size()+experimental.warnings.size()+1,options.scan.progress);
     json+="\n  ],\n  \"Issues\":[";size_t issueIndex{};for(const auto& issue:issues){json+=(issueIndex++?",":"")+issue.json(options.scan.fast);details.advance();}for(const auto& issue:experimental.issues){json+=(issueIndex++?",":"")+issue.json(options.scan.fast);details.advance();}
-    json+="],\n  \"LayoutWarningsChecked\":"+std::string(!options.scan.fast&&!options.reverse?"true":"false")+",\n  \"LayoutWarningScope\":\"BODY_STANDALONE_DISPLAY_WIDTH_SINGLE_OR_EQUAL_COLUMNS_AND_CONVERTED_EQUATION_EXACT_LINE_SPACING\",\n  \"Warnings\":[";
+    const auto layoutScope=options.scan.exactTargets?"CONVERTED_EQUATION_EXACT_LINE_SPACING":"BODY_STANDALONE_DISPLAY_WIDTH_SINGLE_OR_EQUAL_COLUMNS_AND_CONVERTED_EQUATION_EXACT_LINE_SPACING";
+    json+="],\n  \"LayoutWarningsChecked\":"+std::string(!options.scan.fast&&!options.reverse?"true":"false")+",\n  \"LayoutWarningScope\":\""+layoutScope+"\",\n  \"Warnings\":[";
     size_t warningIndex{};for(const auto& warning:body.warnings){json+=(warningIndex++?",":"")+warning.json();details.advance();}
     for(const auto& warning:experimental.warnings){json+=(warningIndex++?",":"")+warning.json();details.advance();}
     json+="],\n  \"Experimental\":"+experimental.json(options.scan.fast)+"\n}\n";details.advance();return json;
@@ -120,13 +166,17 @@ int convertMain(int argc, wchar_t** argv) {
     try {
         std::puts("UI_PHASE PREPARING");
         std::wstring installProblem;
-        std::wstring explicitInstall;ExperimentalOptions experimentalOptions;
+        std::wstring explicitInstall,targetList;ExperimentalOptions experimentalOptions;
         for(int i=guiWorker?7:6;i<argc;++i) {
             const std::wstring argument=argv[i];
             if(argument==L"--scope=all")options.scan.scope=EquationScope::All;
             else if(argument==L"--experimental-fast")options.scan.fast=true;
             else if(argument==L"--ultra")ultra=true;
             else if(argument==L"--skip-omml")options.scan.convertOmml=false;
+            else if(argument.rfind(L"--target-list-file=",0)==0){
+                require(targetList.empty()&&argument.size()>19,"TARGET_SELECTION_INVALID");
+                targetList=absolutePath(argument.c_str()+19);
+            }
             else if(argument==L"--experimental-tables")experimentalOptions.tables=true;
             else if(argument==L"--experimental-textboxes")experimentalOptions.textboxes=true;
             else if(argument==L"--experimental-headers")experimentalOptions.headers=true;
@@ -160,6 +210,16 @@ int convertMain(int argc, wchar_t** argv) {
         if(fixedSize){wchar_t* end{};requestedPoints=wcstod(styleArgument.c_str()+5,&end);require(end!=styleArgument.c_str()+5&&!*end&&std::isfinite(requestedPoints)&&requestedPoints>=1&&requestedPoints<=256,"Specified size must be 1..256 pt");}
         const auto eqp = reverse||followSize||fixedSize?styleArgument:absolutePath(argv[5]);
         options.requestedPoints=requestedPoints;
+        std::string targetSourceSha;
+        if(!targetList.empty()){
+            require(guiWorker&&!reverse&&!ultra&&!options.scan.fast&&options.scan.convertOmml&&
+                    options.scan.scope==EquationScope::All&&!experimentalOptions.enabled()&&!options.addRightNumbers&&
+                    !options.inlineSpacing.mode&&!options.displaySpacing.mode&&!options.numbering.custom&&
+                    options.numbering.format==L"(#E1)"&&options.numbering.start==1&&options.numbering.chapter==1&&options.numbering.section==1&&
+                    (followSize||fixedSize),"TARGET_SELECTION_UNSUPPORTED");
+            targetSourceSha=readBodyTargets(targetList,options);
+            options.scan.exactTargets=true;
+        }
         if(ultra){
             require(!options.scan.fast&&!reverse&&fixedSize&&!selfTest&&!stopTest&&!experimentalOptions.enabled()&&options.scan.convertOmml&&options.scan.scope==EquationScope::All,"ULTRA_UNSUPPORTED_SETTINGS");
             require(!options.inlineSpacing.mode&&!options.displaySpacing.mode&&!options.numbering.custom&&options.numbering.format==L"(#E1)"&&options.numbering.start==1&&options.numbering.chapter==1&&options.numbering.section==1,"ULTRA_UNSUPPORTED_SETTINGS");
@@ -176,6 +236,7 @@ int convertMain(int argc, wchar_t** argv) {
         if (!reverse&&!followSize&&!fixedSize) require(GetFileAttributesW(eqp.c_str()) != INVALID_FILE_ATTRIBUTES, "Task EQP required");
         sourceLock = CreateFileW(input.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if(sourceLock==INVALID_HANDLE_VALUE)throw std::runtime_error("Lock source against concurrent writes during copy and conversion (Win32="+std::to_string(GetLastError())+")");
+        if(options.scan.exactTargets)require(lockedSourceSha256(sourceLock)==targetSourceSha,"TARGET_SOURCE_CHANGED");
         const auto suffix = L".work-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
         candidate=output+suffix+L".docx";stagedReport=report+suffix+L".tmp";sizePreferencePath=candidate+L".eqp";
         // 三档共用已登记副本的发布和取消清理，不在极速路径重新实现任务提交协议。
@@ -221,7 +282,7 @@ int convertMain(int argc, wchar_t** argv) {
         const auto originalBytes = options.scan.fast?std::vector<char>():readOriginal();
         std::puts("TIMING_STAGE COPY_AND_LINKS");
         taskCopy(input, candidate); candidateOwned = true;
-        const auto linkUpdates=setDocxLinkUpdates(candidate);
+        const auto linkUpdates=setDocxLinkUpdates(candidate,nullptr,&options.formulaTabs);
         std::puts("UI_PHASE OPENING");
         WordSession word;
         auto documents = get(word.application.Get(), L"Documents");
@@ -242,7 +303,7 @@ int convertMain(int argc, wchar_t** argv) {
         if(!options.scan.fast&&experimentalOptions.enabled()){
             if(experimentalSkip.empty()){
                 // 正文阶段已核验的输出包直接作为实验基线，避免实验分支再整包读取一次已有公式。
-                experimental=convertExperimental(word,api,candidate,experimentalOptions,reverse,eqp==L"dollar",scan.items.size()+1,afterPackage,selfTest,options.scan,timings,body.experimentalSourceLocations);
+                experimental=convertExperimental(word,api,candidate,experimentalOptions,reverse,eqp==L"dollar",scan.items.size()+1,afterPackage,selfTest,options.scan,timings,body.experimentalSourceLocations,options.formulaTabs);
                 // 表格前后的正文片段已核验不变；使用各表格的累计位移，不把多个累计值相加。
                 for(auto& outcome:outcomes){
                     const auto after=std::upper_bound(experimental.bodyPositionShifts.begin(),experimental.bodyPositionShifts.end(),outcome.finalSpan.start,
@@ -259,7 +320,7 @@ int convertMain(int argc, wchar_t** argv) {
         std::puts("UI_PHASE REPORT_BUILD");publish(outcomeReport(input,output,eqp,options,body),selfTest&&!options.scan.fast);
         std::puts("UI_PHASE RESULT_SUMMARY");
         const auto failed = std::count_if(outcomes.begin(), outcomes.end(), failedOutcome);
-        const auto rejected=std::count_if(scan.items.begin(),scan.items.end(),[](const ScanItem& item){return !item.ready&&!item.existingDisplay&&!item.existingReference;});
+        const auto rejected=std::count_if(scan.items.begin(),scan.items.end(),[&](const ScanItem& item){return selectedBodyItem(options,item)&&!item.ready&&!item.existingDisplay&&!item.existingReference;});
         for(const auto& issue:issues)emitProcessingIssue(issue);
         for(const auto& issue:experimental.issues)emitProcessingIssue(issue);
         // 仅在最终文件发布后发送提醒，重建或撤回的中间结果不会留在界面中。

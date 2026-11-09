@@ -1140,11 +1140,14 @@ static LRESULT CALLBACK windowProc(HWND window,UINT message,WPARAM wparam,LPARAM
 }
 
 static int scanWorker(int argc,wchar_t** argv) {
-    if(argc!=4&&argc!=5&&argc!=6)return 2;if(argc>=5&&std::wstring(argv[4])!=L"reverse"&&std::wstring(argv[4])!=L"forward")return 2;
+    const bool exactTargets=argc==7&&std::wstring(argv[4])==L"forward"&&std::wstring(argv[6])==L"--exact-targets";
+    if((argc<4||argc>6)&&!exactTargets)return 2;
+    if(argc>=5&&std::wstring(argv[4])!=L"reverse"&&std::wstring(argv[4])!=L"forward")return 2;
     setvbuf(stdout,nullptr,_IONBF,0);const auto initialized=CoInitializeEx(nullptr,COINIT_APARTMENTTHREADED);if(FAILED(initialized))return 1;
     int code=1;
     try {
-        const auto result=scanReadOnlyFile(absolutePath(argv[2]),absolutePath(argv[3]),argc>=5&&std::wstring(argv[4])==L"reverse"?scanReverseDocument:scanDocument);
+        ScanOptions options;options.exactTargets=exactTargets;
+        const auto result=scanReadOnlyFile(absolutePath(argv[2]),absolutePath(argv[3]),argc>=5&&std::wstring(argv[4])==L"reverse"?scanReverseDocument:scanDocument,options);
         emitGuiScan(result);code=0;
     } catch(const std::exception& error){std::printf("UI_ERROR %s\n",wireHex(error.what()).c_str());}
     CoUninitialize();return code;

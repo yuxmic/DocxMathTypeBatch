@@ -1,6 +1,7 @@
 // 正文 LaTeX 与 OMML 的原生包路径；一次扫描、独立资产、逆序替换。
 #include "ultra_conversion.h"
 #include "equation_styles.h"
+#include "equation_import.h"
 #include "omml_adapter.h"
 #include "omml_tex.h"
 
@@ -25,7 +26,6 @@ ComPtr<IOpcPart> createPart(IOpcFactory* factory,IOpcPartSet* parts,const std::w
 void relationship(IOpcFactory* factory,IOpcRelationshipSet* relations,const std::wstring& id,const wchar_t* kind,const std::wstring& path){auto uri=partUri(factory,path);ComPtr<IOpcRelationship> relation;check(relations->CreateRelationship(id.c_str(),(L"http://schemas.openxmlformats.org/officeDocument/2006/relationships/"+std::wstring(kind)).c_str(),uri.Get(),OPC_URI_TARGET_MODE_INTERNAL,&relation),"Create ultra relationship");}
 void assetPart(IOpcFactory* factory,IOpcPartSet* parts,const std::wstring& path,const wchar_t* type,const std::vector<unsigned char>& bytes){auto part=createPart(factory,parts,path,type);ComPtr<IStream> stream;check(part->GetContentStream(&stream),"Ultra asset stream");ULONG written{};check(stream->Write(bytes.data(),static_cast<ULONG>(bytes.size()),&written),"Write ultra asset");require(written==bytes.size(),"Complete ultra asset");}
 
-#include "ultra_assets.h"
 #include "ultra_source.h"
 long numberWidth(IXMLDOMDocument2* document){require(!select(document,L"//w:instrText[contains(.,'MTEqn')] | //w:fldSimple[contains(@w:instr,'MTEqn')]"),"ULTRA_EXISTING_NUMBERS");auto sections=nodes(document,L"//w:sectPr");require(sections.size()==1,"ULTRA_SINGLE_SECTION_REQUIRED");auto columns=select(sections[0].Get(),L"w:cols");require(!columns||attribute(columns.Get(),L"w:num",L"1")==L"1","ULTRA_SINGLE_COLUMN_REQUIRED");auto page=select(sections[0].Get(),L"w:pgSz"),margin=select(sections[0].Get(),L"w:pgMar");require(page&&margin,"ULTRA_PAGE_SIZE_REQUIRED");return std::stol(attribute(page.Get(),L"w:w"))-std::stol(attribute(margin.Get(),L"w:left",L"0"))-std::stol(attribute(margin.Get(),L"w:right",L"0"))-std::stol(attribute(margin.Get(),L"w:gutter",L"0"));}
 void layout(IXMLDOMDocument2* document,IXMLDOMNode* p,const std::wstring& alignment,long width,IXMLDOMNode* prepared=nullptr){auto props=select(p,L"w:pPr");if(!props){props=importXml(document,L"<w:pPr/>");ComPtr<IXMLDOMNode> first;check(p->get_firstChild(&first),"First paragraph node");check(p->insertBefore(props.Get(),Value(first.Get()).v,nullptr),"Insert paragraph properties");}
@@ -81,20 +81,28 @@ UltraResult convertUltra(MathTypeApi& api,const std::wstring& candidate,const Ul
     std::puts("UI_PHASE CONVERTING");StageProgress progress("PROCESS_FORMULAS",selected.size(),options.progress);
     for(size_t index=0;index<selected.size();++index){checkCancelled(options);const auto& item=selected[index];const Asset* asset{};
         try{
-            const auto source=item.tex?compatibleTex(normalizedTex(item.source)):nodeXml(item.math.Get());
+            const auto source=item.tex?normalizedTex(item.source):nodeXml(item.math.Get());
             const auto cacheKey=std::wstring(item.tex?L"T":L"M")+(item.display?L"D":L"I")+source;auto found=cache.find(cacheKey);
             if(found!=cache.end()){asset=&found->second;++result.cacheHits;}
             else{
-                EquationHost host(timings,blanks[item.display?1:0].Get());
                 bool useTex=item.tex;std::wstring equation=source;
                 if(!item.tex){
                     {ScopedConversionTiming timing(timings,ConversionMetric::OmmlTexPrepare);useTex=tryOmmlTex(item.math.Get(),equation);}
-                    if(useTex){++result.ommlTexImports;equation=compatibleTex(equation);}
+                    if(useTex)++result.ommlTexImports;
                     else{++result.ommlMathmlImports;equation=ommlMathML(source,stylesheet.Get(),item.display,timings,true);}
                 }
-                if(useTex)equation=(item.display?L"\\[":L"$")+equation+(item.display?L"\\]":L"$");
+                CompatibleTexInput tex;
+                if(useTex){
+                    tex=compatibleTexInput(std::move(equation));
+                    equation=(item.display?L"\\[":L"$")+tex.tex+(item.display?L"\\]":L"$");
+                    if(!tex.fixes.empty()){
+                        equation=mathmlFromTex(api,equation,item.display,tex.fixes,timings);
+                        useTex=false;
+                    }
+                }
+                EquationHost host(timings,blanks[item.display?1:0].Get());
                 const auto metric=useTex?ConversionMetric::TexImport:ConversionMetric::MathmlImport;auto& elapsed=timings.samples[static_cast<size_t>(metric)].elapsed;const auto before=elapsed;
-                {ScopedConversionTiming timing(timings,metric);require(api.write(host.object.Get(),useTex?1:2,equation.c_str(),static_cast<long>(equation.size()))==0,"Import ultra equation");}
+                {ScopedConversionTiming timing(timings,metric);require(equation.size()<=LONG_MAX&&api.write(host.object.Get(),useTex?1:2,equation.c_str(),static_cast<long>(equation.size()))==0,"Import ultra equation");}
                 const auto milliseconds=std::chrono::duration<double,std::milli>(elapsed-before).count();
                 if(milliseconds>slowest.back().milliseconds){slowest.back()={index+1,item.bodyBlock,equation.size(),milliseconds,useTex};std::sort(slowest.begin(),slowest.end(),[](const ImportCost& a,const ImportCost& b){return a.milliseconds>b.milliseconds;});}
                 asset=&cache.emplace(cacheKey,host.save(timings)).first->second;

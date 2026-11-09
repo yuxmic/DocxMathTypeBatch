@@ -1,6 +1,6 @@
-# Skill v0.2.2 调用约定
+# Skill v0.2.3 调用约定
 
-要求包内 EXE 支持 `CliContractVersion: 1`、报告 `SchemaVersion: 1`。Skill 包内包含已匹配的 `bin/DocxMathTypeBatch.exe`，更新时替换完整包；不包含文档样本、本机配置或日志。
+要求包内 EXE 支持 `CliContractVersion: 1`、报告 `SchemaVersion: 1`。Skill 包内包含已匹配的 v0.1.6 转换器 `bin/DocxMathTypeBatch.exe`，更新时替换完整包。文档样本、本机配置和日志由用户在本机管理。
 
 ## 程序路径与查询
 
@@ -26,6 +26,7 @@
 | `-DisplayDelimiter bracket/dollar` | 反向行外使用 `\[...\]` 或 `$$...$$`；行内使用 `$...$` |
 | `-Tables`、`-Textboxes`、`-Headers`、`-Notes` | 显式启用四类额外位置，默认关闭 |
 | `-SkipOmml` | 标准或快速正向转换时保留 Word 原生公式，只转换 LaTeX。默认不传 |
+| `-ScanReportPath`、`-TargetId @(2,5)` | 配对传入，只转换本次扫描清单中的指定公式 |
 | `-FastConversion` | 快速模式，通过 Word 转换，跳过转换前内容及语法核验、逐式复查、保存重开及资产核验。默认关闭 |
 | `-UltraConversion` | 极速模式，直接转换正文 LaTeX 和 OMML，不启动 Word，须指定 `-FontSize`。默认关闭 |
 | `-TaskDirectory` | 可选全新任务目录；默认创建本机用户数据下的独立目录 |
@@ -34,6 +35,29 @@
 编号格式支持 `#C1`、`#S1`、`#E1`，末尾可为 `a/A/i/I`，并且仅含一个 `#E`。章、节、起始值作用于目标序列；已有编号保留其原生显示格式。反向不支持字号、右编号和段落行距设置。
 
 额外位置仅转换公式。OMML 默认参与正向转换。用户要求保留 Word 原生公式时，在标准或快速模式传入 `-SkipOmml`，同时作用于正文及启用的额外位置，不计为拒绝或未完成。反向始终保留 OMML。该选项要求 EXE 能力含 `OptionalOmmlConversion: true`，底层参数为 `--skip-omml`，报告 `ConvertOmml` 表示本次有效的正向 OMML 设置。表格或文本框开关需要其父区域也启用。保护、修订和普通域等仍构成边界。LaTeX 文本以 ASCII 为基础，支持顶饰适配的程序可先将 `Ŷ`、`Ŷ` 等写法转换为命令，其余未适配字符保留原文。标准和快速的 OMML 导入使用 Office 原生转换资源。是否成功以本次报告为准。
+
+## 只转换指定公式
+
+`scan.ps1` 支持 `-InputPath`、`-TaskDirectory` 和 `-TimeoutSeconds`。只读扫描成功时，`FINISHED.Status` 为 `SCANNED`，`ReportPath` 指向本机 JSON 清单。若文档受保护，扫描返回 `SKIPPED_PROTECTED_DOCUMENT`。根据 `Items` 的 `Source`、`Kind`、`Paragraph` 和同段的短上下文 `Before/After` 确定目标。ID 对应公式在当前输入中的一次出现，源文档的 `SourceSHA256` 及公式的 Word 范围和源内容会在转换前复核。
+
+```powershell
+# 读取清单，先用源码和上下文确认 ID，再传入所选 ID。
+$scan = & (Join-Path $skillDir 'scripts/scan.ps1') -InputPath $inputDocx |
+    ForEach-Object { $_ | ConvertFrom-Json } | Where-Object Event -eq FINISHED
+if ($scan.Status -ne 'SCANNED') { throw "扫描未完成，状态为 $($scan.Status)" }
+(Get-Content -LiteralPath $scan.ReportPath -Raw -Encoding utf8 | ConvertFrom-Json).Items |
+    Where-Object Status -eq READY | Select-Object Id, Kind, Paragraph, Source, Before, After
+```
+
+选定后再调用转换。下面的 `2,5` 是清单里的 ID，文档中可见的公式编号可用来核对上下文。
+
+```powershell
+& (Join-Path $skillDir 'scripts/convert.ps1') -InputPath $inputDocx -OutputPath $outputDocx -ScanReportPath $scan.ReportPath -TargetId @(2,5)
+```
+
+此入口要求标准正向正文和默认范围 `all`，目标可混选行内、行外、LaTeX 和 OMML。可传固定字号，默认跟随原文。只替换公式本体，保留公式外的文字、空白、手打编号及原段落设置。使用默认行距，关闭额外位置、跳过 OMML 和编号选项。跨段的 LaTeX 不可选。结果返回 `SelectedTargetIds` 与 `UnselectedFormulas`，未选项不计为失败。
+
+`TARGET_SOURCE_CHANGED` 表示文档在扫描后发生变化，`TARGET_SELECTION_MISMATCH` 表示所选位置或源码未通过复核。遇到这两种结果时重新扫描并核对目标。扫描或选择失败时结束本次调用，避免对全篇执行转换。
 
 ## 极速模式
 
@@ -59,7 +83,7 @@
 
 | 字段 | 含义 |
 |---|---|
-| `SkillVersion`、`ApplicationVersion` | 分别为 Skill 0.2.2 与实际包内程序版本，不能混为同一版本 |
+| `SkillVersion`、`ApplicationVersion` | 分别为 Skill 0.2.3 与实际包内程序版本 |
 | `Status`、`ExitCode` | COMPLETE/PARTIAL 配合 0 表示已交付；不能只看退出码 |
 | `ConversionMode` | 完成转换时的 Standard / Fast / Ultra |
 | `VerificationMode` | STANDARD_VERIFIED / FAST_UNVERIFIED / ULTRA_UNVERIFIED。任务未完成为 NOT_COMPLETED |

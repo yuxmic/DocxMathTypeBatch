@@ -6,6 +6,7 @@
 #include "experimental_conversion.h"
 #include "layout_options.h"
 #include "layout_warnings.h"
+#include <map>
 struct ConversionTimings;
 struct ItemOutcome {
     Span finalSpan;
@@ -18,20 +19,36 @@ struct ItemOutcome {
     long nativeOrdinal{};
     Span replacementSpan;
 };
+// 当前目标由调用方维护，只平移它后面的结果范围。
+inline void shiftFollowingOutcomes(std::vector<ItemOutcome>& outcomes,size_t current,long delta){
+    if(!delta)return;
+    for(size_t later=current+1;later<outcomes.size();++later){auto& outcome=outcomes[later];
+        outcome.finalSpan.start+=delta;outcome.finalSpan.end+=delta;
+        outcome.replacementSpan.start+=delta;outcome.replacementSpan.end+=delta;
+    }
+}
 inline bool failedOutcome(const ItemOutcome& item){return item.status==L"FAILED_PRESERVED"||item.status==L"FAILED_UNVERIFIED";}
 
 inline bool displayOutcome(const ItemOutcome& outcome){return outcome.status==L"SUCCEEDED"||outcome.status==L"EXISTING_FORMATTED";}
 inline bool nativeOutcome(const ItemOutcome& outcome){return displayOutcome(outcome)||outcome.status==L"EXISTING_PRESERVED";}
 inline bool changedOutcome(const ItemOutcome& outcome){return displayOutcome(outcome)||outcome.status==L"REFERENCE_UPDATED";}
 
+struct BodyTarget {
+    long end{};
+    std::string delimiterHex,sourceHex;
+};
 struct BodyOptions {
     ScanOptions scan;
-    bool reverse{},addRightNumbers{},selfTest{},abortTest{},stopTest{};
+    bool reverse{},addRightNumbers{},selfTest{},abortTest{},stopTest{},formulaTabs{};
     EquationSpacing inlineSpacing,displaySpacing;
     EquationNumbering numbering;
     double requestedPoints{};
     std::wstring stopFile;
+    std::map<long,BodyTarget> targets;
 };
+inline bool selectedBodyItem(const BodyOptions& options,const ScanItem& item){
+    return !options.scan.exactTargets||options.targets.count(item.span.start)!=0;
+}
 struct NumberingSummary {long inserted{},updated{},referencesUpdated{},addedFields{};};
 struct BodyResult {
     ScanResult scan;

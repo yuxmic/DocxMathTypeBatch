@@ -2,6 +2,7 @@
 #include "experimental_conversion.h"
 #include "omml_adapter.h"
 #include "equation_objects.h"
+#include "equation_import.h"
 #include "mathtype_api.h"
 #include "conversion_timing.h"
 #include "layout_warnings.h"
@@ -9,6 +10,7 @@
 #include <memory>
 #include <set>
 #include <string_view>
+#include <tuple>
 
 namespace {
 struct Region {std::wstring key,label;ComPtr<IDispatch> range;bool main{};std::vector<Span> tables;ComPtr<IDispatch> owner;};
@@ -290,12 +292,21 @@ ExperimentalSourceLocations captureExperimentalSourceLocations(IDispatch* docume
 }
 // 导入文本先准备好；真正写入只在目标文档的单式撤销事务内执行。
 namespace {
-std::wstring prepareInput(WordSession& word,const Target& target,const std::wstring& sourcePackage,ComPtr<IXSLTemplate>& stylesheet,bool fast,ConversionTimings& timings) {
+std::wstring prepareInput(WordSession& word,const Target& target,const std::wstring& sourcePackage,ComPtr<IXSLTemplate>& stylesheet,bool fast,ConversionTimings& timings,short& importKind,std::vector<TexMathMLFix>& fixes) {
+    std::wstring tex;
     if(target.kind==L"OMML"){
-        if(!stylesheet)stylesheet=compileOmmlStylesheet(text(word.application.Get(),L"Path")+L"\\OMML2MML.XSL",timings);
-        return ommlMathML(sourcePackage,stylesheet.Get(),target.item.display,timings);
+        tex=ommlGroupBraceTex(sourcePackage);
+        if(tex.empty()){
+            importKind=2;
+            if(!stylesheet)stylesheet=compileOmmlStylesheet(text(word.application.Get(),L"Path")+L"\\OMML2MML.XSL",timings);
+            return ommlMathML(sourcePackage,stylesheet.Get(),target.item.display,timings);
+        }
+    }else{
+        auto prepared=compatibleTexInput(target.item.inner);
+        tex=std::move(prepared.tex);
+        fixes=std::move(prepared.fixes);
     }
-    const auto tex=compatibleTex(target.item.inner);
+    importKind=1;
     require(fast||std::all_of(tex.begin(),tex.end(),[](wchar_t c){return c<=127;}),"UNSUPPORTED_NON_ASCII_TEX");
     return target.item.display?L"\\["+tex+L"\\]":L"$"+tex+L"$";
 }
@@ -326,7 +337,7 @@ bool experimentalTargetsPresent(IDispatch* document,const std::wstring& path,con
     return false;
 }
 
-static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const std::wstring& path,const ExperimentalOptions& options,bool reverse,bool dollar,size_t firstId,bool selfTest,const std::set<std::wstring>& skipped,std::unique_ptr<ConversionCheckpoint>& checkpoint,const PackageState& bodyPackage,const ScanOptions& scanOptions,ConversionTimings& timings,const ExperimentalSourceLocations& sourceLocations) {
+static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const std::wstring& path,const ExperimentalOptions& options,bool reverse,bool dollar,size_t firstId,bool selfTest,const std::set<std::wstring>& skipped,std::unique_ptr<ConversionCheckpoint>& checkpoint,const PackageState& bodyPackage,const ScanOptions& scanOptions,ConversionTimings& timings,const ExperimentalSourceLocations& sourceLocations,bool formulaTabs) {
     const bool fast=scanOptions.fast;
     ExperimentalResult result;result.options=options;result.enabled=true;
     const auto headers=options.headers?storedHeaders(path,scanOptions.progress):std::vector<HeaderSlot>();
@@ -335,6 +346,11 @@ static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const s
     std::vector<Region> regions;try{regions=collectRegions(word.document.Get(),options,headers,scanOptions.progress);}
     catch(const std::exception& error){throw RegionError(L"*",L"实验区",L"ENUMERATING",error);}
     ComPtr<IXSLTemplate> stylesheet;std::string defaults;bool connected=false;std::vector<Binding> bindings;
+    // 本轮正向额外区域共用纯空白模板，不带入正文字号和排版设置。
+    BlankEquationTemplate blankTemplate;
+    struct FinishedFormula {ComPtr<IDispatch> shape;size_t bindingIndex{};};
+    std::map<std::tuple<short,bool,std::wstring>,FinishedFormula> finishedFormulas;
+    size_t finishedCacheHits{};
     std::map<std::wstring,std::vector<ExperimentalItem>> plans;
     std::wstring activeRegion;const ScanItem* activeItem=nullptr;
     auto failure=[&](const std::wstring& key,const std::wstring& stage,const std::exception& error){
@@ -404,11 +420,33 @@ static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const s
             if(!fast&&!stateReady){committedState=documentState(root,timings);stateReady=true;}
             const auto& beforeState=committedState;const auto& beforeLayout=beforeState.layout;const long rootEnd=integer(root,L"End");
             const auto prefix=fast?std::wstring():text(sliceRange(root,integer(root,L"Start"),item.span.start).Get(),L"Text"),suffix=fast?std::wstring():text(sliceRange(root,item.span.end,rootEnd).Get(),L"Text");
-            auto undo=get(word.application.Get(),L"UndoRecord");bool record=false,active=false,wrote=false;ComPtr<IDispatch> activeObject;NativeAsset removed;std::vector<unsigned char> native;std::wstring output,input;DocumentState currentState;
+            auto undo=get(word.application.Get(),L"UndoRecord");bool record=false,active=false,wrote=false;ComPtr<IDispatch> activeObject;NativeAsset removed;std::vector<unsigned char> native;std::wstring output;DocumentState currentState;
+            short importKind{};
+            std::wstring preparedInput;
+            std::vector<TexMathMLFix> texFixes;
+            auto finished=finishedFormulas.end();
+            ComPtr<IDispatch> finishedText,completedShape;
             try{
                 if(!connected){if(!api.initialized){if(scanOptions.progress)std::puts("UI_PHASE CONNECTING_MATHTYPE");require(api.init(0,10)>0,"Initialize experimental MathType");api.initialized=true;taskMathTypeConnected();}if(!fast)defaults=readDefaultPrefs(api);connected=true;}
                 if(reverse){if(scanOptions.progress)std::puts("UI_PHASE FORMULA_EXPORTING");removed=fast?std::move(target.asset):rangeNativeAsset(sourcePackage);output=exportedInner(exportNativeTex(api,nativePayload(removed.equation)),item.display,fast);output=(item.display?(dollar?L"$$":L"\\["):L"$")+output+(item.display?(dollar?L"$$":L"\\]"):L"$");}
-                else{if(scanOptions.progress)std::puts("UI_PHASE FORMULA_PREPARING");input=prepareInput(word,target,sourcePackage,stylesheet,fast,timings);}
+                else{
+                    if(scanOptions.progress)std::puts("UI_PHASE FORMULA_PREPARING");
+                    preparedInput=prepareInput(word,target,sourcePackage,stylesheet,fast,timings,importKind,texFixes);
+                    const short cacheKind=texFixes.empty()?importKind:3;
+                    finished=finishedFormulas.try_emplace(std::make_tuple(cacheKind,item.display,texFixes.empty()?preparedInput:item.inner)).first;
+                    if(finished->second.shape){
+                        // 只在命中时读取完成对象的范围，首次转换不增加 Word 读取。
+                        auto sourceRange=get(finished->second.shape.Get(),L"Range");
+                        finishedText=get(sourceRange.Get(),L"FormattedText");
+                        if(!fast)native=bindings[finished->second.bindingIndex].native;
+                    }else{
+                        if(!texFixes.empty()){
+                            preparedInput=mathmlFromTex(api,preparedInput,item.display,texFixes,timings);
+                            importKind=2;
+                        }
+                        if(!blankTemplate.range)emptyEquation(api,word,nullptr,true,fast,&blankTemplate);
+                    }
+                }
                 // 首次真正写入前建立检查点；无目标或仅有拒绝项时不复制整份文件。
                 if(!fast&&!checkpoint){if(scanOptions.progress)std::puts("UI_PHASE FORMULA_CHECKPOINT");checkpoint=std::make_unique<ConversionCheckpoint>(path,L".experimental-checkpoint");}
                 invoke(word.document.Get(),L"Activate",DISPATCH_METHOD);invoke(undo.Get(),L"StartCustomRecord",DISPATCH_METHOD,{L"实验性公式替换"});record=true;
@@ -417,13 +455,19 @@ static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const s
                 else{
                     invoke(range.Get(),L"Text",DISPATCH_PROPERTYPUT,{L""});invoke(range.Get(),L"Collapse",DISPATCH_METHOD,{1L});
                     if(scanOptions.progress)std::puts("UI_PHASE FORMULA_INSERTING");
-                    auto shape=insertBlankEquation(word.document.Get(),range.Get(),api.install,root,fast);auto ole=get(shape.Get(),L"OLEFormat");invoke(ole.Get(),L"DoVerb",DISPATCH_METHOD,{2L});activeObject=get(ole.Get(),L"Object");active=true;
-                    const auto empty=fast?std::vector<unsigned char>():readNative(api,activeObject.Get());if(!fast)emptyNative.insert(empty);
-                    if(scanOptions.progress)std::puts("UI_PHASE FORMULA_IMPORTING");
-                    {ScopedConversionTiming timing(timings,target.kind==L"OMML"?ConversionMetric::MathmlImport:ConversionMetric::TexImport);require(api.write(activeObject.Get(),target.kind==L"OMML"?2:1,input.c_str(),static_cast<long>(input.size()))==0,"Experimental equation import");}
-                    if(!fast){if(scanOptions.progress)std::puts("UI_PHASE FORMULA_VERIFYING");native=readNative(api,activeObject.Get());require(native!=empty&&native.size()>empty.size(),"Experimental equation contains native data");}
-                    if(scanOptions.progress)std::puts("UI_PHASE FORMULA_CLOSING");
-                    require(api.close(OLECLOSE_NOSAVE,activeObject.Get())==0,"Close experimental converted equation");active=false;
+                    // 复制范围会在当前目标位置插入新的嵌入对象。
+                    auto shape=insertBlankEquation(word.document.Get(),range.Get(),api.install,root,fast,finishedText?finishedText.Get():blankTemplate.range.Get());
+                    if(!finishedText){
+                        auto ole=get(shape.Get(),L"OLEFormat");invoke(ole.Get(),L"DoVerb",DISPATCH_METHOD,{2L});activeObject=get(ole.Get(),L"Object");active=true;
+                        const auto empty=fast?std::vector<unsigned char>():readNative(api,activeObject.Get());if(!fast)emptyNative.insert(empty);
+                        if(scanOptions.progress)std::puts("UI_PHASE FORMULA_IMPORTING");
+                        {ScopedConversionTiming timing(timings,importKind==2?ConversionMetric::MathmlImport:ConversionMetric::TexImport);
+                        require(preparedInput.size()<=LONG_MAX&&api.write(activeObject.Get(),importKind,preparedInput.c_str(),static_cast<long>(preparedInput.size()))==0,"Experimental equation import");}
+                        if(!fast){if(scanOptions.progress)std::puts("UI_PHASE FORMULA_VERIFYING");native=readNative(api,activeObject.Get());require(native!=empty&&native.size()>empty.size(),"Experimental equation contains native data");}
+                        if(scanOptions.progress)std::puts("UI_PHASE FORMULA_CLOSING");
+                        require(api.close(OLECLOSE_NOSAVE,activeObject.Get())==0,"Close experimental converted equation");active=false;
+                        completedShape=std::move(shape);
+                    }
                 }
                 taskTestBoundary(L"EXPERIMENTAL_REPLACED");
                 require(!regionFault(region.key,target.kind==L"OMML"?L"OMML":L"ITEM"),"Injected experimental formula replacement failure");
@@ -454,7 +498,14 @@ static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const s
                 }
                 report.status=L"SUCCEEDED";++result.succeeded;modified=true;
                 if(!fast)committedState=std::move(currentState);
+                if(finishedText)++finishedCacheHits;
+                else if(completedShape){
+                    finished->second.shape=std::move(completedShape);
+                    if(!fast)finished->second.bindingIndex=bindings.size()-1;
+                }
             }catch(const std::exception& error){if(scanOptions.progress)std::puts("UI_PHASE FORMULA_RECOVERING");ScopedConversionTiming recoveryTiming(timings,ConversionMetric::ExperimentalRecovery);std::printf("EXPERIMENTAL_ITEM_FAILURE %s\n",error.what());if(active)require(api.close(OLECLOSE_NOSAVE,activeObject.Get())==0,"Close failed experimental equation");if(record)invoke(undo.Get(),L"EndCustomRecord",DISPATCH_METHOD);
+                // 撤销或恢复 XML 后，下一式应从当前文档重新建立缓存。
+                finishedFormulas.clear();
                 if(fast?wrote:(text(root,L"Text")!=beforeText||sourceSignature(sliceRange(root,item.span.start,item.span.end).Get(),true)!=beforeXml)){
                     if(target.kind==L"OMML"){
                         auto replacement=sliceRange(root,item.span.start,item.span.end+integer(root,L"End")-rootEnd);invoke(replacement.Get(),L"InsertXML",DISPATCH_METHOD,{sourcePackage.c_str()});
@@ -473,8 +524,11 @@ static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const s
             formulaProgress.advance();
         }
         regionProgress.advance();
-        }catch(const std::exception& error){require(!taskCancelled(),"TASK_CANCELLED");if(fast){result.issues.push_back(failure(region.key,stage,error).issue);emitProcessingIssue(result.issues.back());regionProgress.advance();continue;}if(connected)require(readDefaultPrefs(api)==defaults,"Experimental conversion preserves global MathType preferences");throw failure(region.key,stage,error);}
+        }catch(const std::exception& error){require(!taskCancelled(),"TASK_CANCELLED");if(fast){finishedFormulas.clear();result.issues.push_back(failure(region.key,stage,error).issue);emitProcessingIssue(result.issues.back());regionProgress.advance();continue;}if(connected)require(readDefaultPrefs(api)==defaults,"Experimental conversion preserves global MathType preferences");throw failure(region.key,stage,error);}
     }
+    if(finishedCacheHits)std::printf("EXPERIMENTAL_FORMULA_CACHE_HITS=%zu\n",finishedCacheHits);
+    finishedFormulas.clear();
+    blankTemplate.close();
     if(connected&&!fast){if(scanOptions.progress)std::puts("UI_PHASE VERIFY_PREFERENCES");require(readDefaultPrefs(api)==defaults,"Experimental conversion preserves global MathType preferences");}
     if(fast){if(plans.empty())result.skipped=L"NO_TARGETS";else if(!modified)result.skipped=L"NO_CHANGES";return result;}
     // 没有实验目标：不保存、不重开，直接复用正文阶段已保存并核验的副本。
@@ -525,6 +579,7 @@ static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const s
         if(scanOptions.progress)std::puts("UI_PHASE EXP_CLOSING");
         invoke(word.document.Get(),L"Close",DISPATCH_METHOD,{0L});word.document.Reset();
         if(scanOptions.progress)std::puts("UI_PHASE EXP_REOPENING");
+        if(formulaTabs)restoreSavedOmmlTabs(path);
         word.document=asObject(invoke(documents.Get(),L"Open",DISPATCH_METHOD,{path.c_str(),false,true,false,Value(),Value(),false,Value(),Value(),Value(),Value(),false}));
         std::vector<Region> reopened;try{reopened=collectRegions(word.document.Get(),options,headers,scanOptions.progress);}
         catch(const std::exception& error){throw failure(L"*",L"REOPENING",error);}
@@ -563,17 +618,17 @@ static ExperimentalResult convertPass(WordSession& word,MathTypeApi& api,const s
     std::puts("EXPERIMENTAL_CONVERSION_VERIFIED");return result;
 }
 
-ExperimentalResult convertExperimental(WordSession& word,MathTypeApi& api,const std::wstring& path,const ExperimentalOptions& options,bool reverse,bool dollar,size_t firstId,const PackageState& bodyPackage,bool selfTest,const ScanOptions& scanOptions,ConversionTimings& timings,const ExperimentalSourceLocations& sourceLocations) {
+ExperimentalResult convertExperimental(WordSession& word,MathTypeApi& api,const std::wstring& path,const ExperimentalOptions& options,bool reverse,bool dollar,size_t firstId,const PackageState& bodyPackage,bool selfTest,const ScanOptions& scanOptions,ConversionTimings& timings,const ExperimentalSourceLocations& sourceLocations,bool formulaTabs) {
     const bool fast=scanOptions.fast;
     if(!options.enabled())return {};
     std::unique_ptr<ConversionCheckpoint> checkpoint;std::set<std::wstring> skipped;std::vector<ProcessingIssue> issues;std::vector<ExperimentalItem> preserved;
     if(fast){
-        try{return convertPass(word,api,path,options,reverse,dollar,firstId,selfTest,skipped,checkpoint,bodyPackage,scanOptions,timings,sourceLocations);}
+        try{return convertPass(word,api,path,options,reverse,dollar,firstId,selfTest,skipped,checkpoint,bodyPackage,scanOptions,timings,sourceLocations,formulaTabs);}
         catch(const std::exception& error){require(!taskCancelled(),"TASK_CANCELLED");const std::string reason=error.what();ExperimentalResult result;result.enabled=true;result.options=options;result.issues.push_back({L"*",L"实验区域",L"FAST_CONVERSION",std::wstring(reason.begin(),reason.end()),{-1,0,L"原文页码未知 · 实验区域"}});emitProcessingIssue(result.issues.back());return result;}
     }
     for(;;){
         try{
-            auto result=convertPass(word,api,path,options,reverse,dollar,firstId,selfTest,skipped,checkpoint,bodyPackage,scanOptions,timings,sourceLocations);result.issues=issues;
+            auto result=convertPass(word,api,path,options,reverse,dollar,firstId,selfTest,skipped,checkpoint,bodyPackage,scanOptions,timings,sourceLocations,formulaTabs);result.issues=issues;
             for(auto item:preserved){item.id=firstId+result.items.size();result.unattempted+=item.status==L"NOT_ATTEMPTED";result.rejected+=item.status==L"REJECTED_PRESERVED";result.items.push_back(std::move(item));}
             return result;
         }catch(const RegionError& error){

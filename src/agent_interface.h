@@ -8,7 +8,7 @@ inline int agentDescribe(int argc,wchar_t** argv) {
     }
     std::puts("{\"Application\":\"DocxMathTypeBatch\",\"Version\":\"" DMTB_VERSION "\",\"CliContractVersion\":" DMTB_CLI_CONTRACT ",\"ReportSchemaVersion\":1,"
         "\"Platform\":\"windows-x64\",\"Directions\":[\"ToMathType\",\"ToLatex\"],\"Scopes\":[\"all\",\"inline\",\"display\"],"
-        "\"BodyOmmlDefault\":true,\"OptionalOmmlConversion\":true,\"ExperimentalFastConversion\":true,\"ConversionModes\":[\"Standard\",\"Fast\",\"Ultra\"],\"UltraScope\":\"BODY_LATEX_OMML_FIXED_SIZE\",\"ExperimentalRegions\":[\"tables\",\"textboxes\",\"headers\",\"notes\"],"
+        "\"BodyOmmlDefault\":true,\"OptionalOmmlConversion\":true,\"TargetedBodyConversion\":true,\"ExperimentalFastConversion\":true,\"ConversionModes\":[\"Standard\",\"Fast\",\"Ultra\"],\"UltraScope\":\"BODY_LATEX_OMML_FIXED_SIZE\",\"ExperimentalRegions\":[\"tables\",\"textboxes\",\"headers\",\"notes\"],"
         "\"ReportStatuses\":[\"COMPLETE\",\"PARTIAL\"],\"Cancellation\":\"STOP_FILE\",\"Timeout\":\"NO_PROGRESS\"}");return 0;
 }
 inline int agentHelp() {
@@ -17,11 +17,12 @@ inline int agentHelp() {
         "--describe --json: query identity and CLI contract without starting Word.\n"
         "--worker-convert <input.docx> <new-output.docx> <new-report.json> <paragraph|size=pt> <stop.flag> [options]\n"
         "--worker-reverse <input.docx> <new-output.docx> <new-report.json> <bracket|dollar> <stop.flag> [options]\n"
-        "--worker-scan <input.docx> <new-report.json> <forward|reverse> <stop.flag>\n"
+        "--worker-scan <input.docx> <new-report.json> <forward|reverse> <stop.flag> [--exact-targets]\n"
         "Options: --scope=all|inline|display --numbers --number-custom\n"
         "  --number-format=(#E1) --number-start=1 --number-chapter=1 --number-section=1\n"
         "  --inline-spacing=follow --display-spacing=follow\n"
         "  --skip-omml: preserve Word equations in the body and enabled extra regions; convert LaTeX only.\n"
+        "  --target-list-file=<path>: standard forward body targets from --exact-targets scan; no numbering or paragraph reformatting.\n"
         "  --experimental-tables --experimental-textboxes --experimental-headers --experimental-notes\n"
         "  --experimental-fast: save without pre/post content, layout or package verification (may contain errors).\n"
         "  --ultra: body inline/display LaTeX and OMML, fixed size=pt, optional default display numbering; no Word or result verification.\n"

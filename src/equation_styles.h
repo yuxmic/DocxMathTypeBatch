@@ -71,6 +71,7 @@ inline std::vector<unsigned char> emptyEquation(MathTypeApi& api, WordSession& w
         auto ole = get(shape.Get(), L"OLEFormat"); invoke(ole.Get(), L"DoVerb", DISPATCH_METHOD, {2L});
         object = get(ole.Get(), L"Object"); active = true;
         if(prefs){const auto styled=styledNative(api,readNative(api,object.Get()),*prefs,display);
+            ScopedConversionTiming timing(automationTimings,ConversionMetric::StyleWrite);
             require(api.writeBytes(object.Get(),3,styled.data(),static_cast<long>(styled.size()))==0,"Apply task native preferences");}
         auto native = readNative(api, object.Get());
         require(api.close(OLECLOSE_NOSAVE, object.Get()) == 0, "Close empty equation"); active = false;

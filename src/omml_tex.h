@@ -26,6 +26,7 @@ inline std::wstring group(const std::wstring& item){return L"{"+item+L"}";}
 
 class Compiler {
     bool valid=true;
+    bool groupBrace=false;
     std::wstring reject(){valid=false;return {};}
     bool wordProperties(IXMLDOMNode* properties){
         for(auto& item:children(properties)){
@@ -70,7 +71,8 @@ class Compiler {
         for(auto& item:children(node)){const auto tag=name(item.Get());const auto space=uri(item.Get());
             if(space==wordNamespace&&tag==L"rPr"){if(!wordProperties(item.Get()))return reject();continue;}
             if(space!=mathNamespace)return reject();if(tag==L"rPr")continue;if(tag!=L"t")return reject();input+=text(item.Get());}
-        input.erase(std::remove_if(input.begin(),input.end(),[](wchar_t c){return std::wstring_view(L" \t\r\n\u00a0").find(c)!=std::wstring_view::npos;}),input.end());
+        // TeX 会折叠或忽略部分显式空白，统一交给 MathML 保留间距。
+        if(input.find_first_of(L" \t\r\n")!=std::wstring::npos)return reject();
         const auto sty=value(child(props.Get(),L"sty").Get()),scr=value(child(props.Get(),L"scr").Get());const bool normal=flag(props.Get(),L"nor");
         if(normal){if(!std::all_of(input.begin(),input.end(),[](wchar_t c){return c<128;}))return reject();std::wstring literal;for(wchar_t c:input){if(c==L'\\'||c==L'^'||c==L'~')return reject();if(std::wstring_view(L"{}_%&#$").find(c)!=std::wstring_view::npos)literal+=L'\\';literal+=c;}return L"\\text"+group(literal);}
         if(!has(sty,{L"",L"p",L"i",L"b",L"bi"}))return reject();
@@ -124,7 +126,22 @@ class Compiler {
         if(tag==L"acc"||tag==L"bar"){
             if(!allowed(node,{L"accPr",L"barPr",L"e"}))return {};const auto body=argument(node,L"e");
             if(tag==L"bar"){auto props=properties(node,L"barPr",{L"pos"});const auto pos=value(child(props.Get(),L"pos").Get(),L"bot");if(!has(pos,{L"top",L"bot"}))return reject();return std::wstring(pos==L"top"?L"\\bar":L"\\underline")+group(body);}
-            auto props=properties(node,L"accPr",{L"chr"});auto accent=character(props.Get(),L"chr",L"\u0302");if(accent.size()!=1)return reject();const auto* mark=mathAccent(accent.front());if(!mark)return reject();return std::wstring(mark->tex)+group(body);
+            auto props=properties(node,L"accPr",{L"chr"});auto accent=character(props.Get(),L"chr",L"\u0302");if(accent.size()!=1)return reject();const auto* mark=mathAccent(accent.front());if(!mark||!mark->tex)return reject();
+            auto decorated=body;
+            for(unsigned layer=0;layer<mark->layers;++layer)decorated=std::wstring(mark->tex)+group(decorated);
+            return decorated;
+        }
+        if(tag==L"groupChr"){
+            if(!allowed(node,{L"groupChrPr",L"e"}))return {};
+            auto props=properties(node,L"groupChrPr",{L"chr",L"pos",L"vertJc"});
+            const auto mark=character(props.Get(),L"chr",L"\u23df");
+            const auto position=value(child(props.Get(),L"pos").Get(),L"bot");
+            const auto alignment=value(child(props.Get(),L"vertJc").Get(),L"top");
+            // 保留基底的行内基线。厂商 MathML 导入无法生成可伸缩横花括号。
+            const bool top=mark==L"\u23de"&&position==L"top"&&alignment==L"bot";
+            if(!top&&!(mark==L"\u23df"&&position==L"bot"&&alignment==L"top"))return reject();
+            groupBrace=true;
+            return std::wstring(top?L"\\overbrace":L"\\underbrace")+group(argument(node,L"e"));
         }
         if(tag==L"rad"){
             if(!allowed(node,{L"radPr",L"deg",L"e"}))return {};auto props=properties(node,L"radPr",{L"degHide"});const auto body=argument(node,L"e");
@@ -149,9 +166,9 @@ class Compiler {
         return reject();
     }
 public:
-    bool convert(IXMLDOMNode* equation,std::wstring& result){if(!equation||name(equation)!=L"oMath")return false;auto out=emit(equation);if(!valid||out.empty())return false;result=std::move(out);return true;}
+    bool convert(IXMLDOMNode* equation,std::wstring& result,bool requireGroupBrace){if(!equation||name(equation)!=L"oMath")return false;auto out=emit(equation);if(!valid||out.empty()||(requireGroupBrace&&!groupBrace))return false;result=std::move(out);return true;}
 };
 }
 
-// 调用方必须指定固定字号；不支持的公式不产生部分 TeX，继续走原有 MathML 导入。
-inline bool tryOmmlTex(IXMLDOMNode* equation,std::wstring& tex){return omml_tex_detail::Compiler().convert(equation,tex);}
+// 不支持的公式不产生部分 TeX，继续走原有 MathML 导入。
+inline bool tryOmmlTex(IXMLDOMNode* equation,std::wstring& tex,bool requireGroupBrace=false){return omml_tex_detail::Compiler().convert(equation,tex,requireGroupBrace);}

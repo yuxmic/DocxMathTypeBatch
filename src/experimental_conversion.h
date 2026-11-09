@@ -50,6 +50,6 @@ struct ExperimentalResult {
     std::string json(bool fast=false) const;
 };
 ExperimentalResult convertExperimental(WordSession& word,MathTypeApi& api,const std::wstring& path,
-    const ExperimentalOptions& options,bool reverse,bool dollar,size_t firstId,const PackageState& bodyPackage,bool selfTest,const ScanOptions& scanOptions,ConversionTimings& timings,const ExperimentalSourceLocations& sourceLocations);
+    const ExperimentalOptions& options,bool reverse,bool dollar,size_t firstId,const PackageState& bodyPackage,bool selfTest,const ScanOptions& scanOptions,ConversionTimings& timings,const ExperimentalSourceLocations& sourceLocations,bool formulaTabs);
 // 只读文档上的低成本存在性判断：启用区域内没有任何可转换候选时返回 false。
 bool experimentalTargetsPresent(IDispatch* document,const std::wstring& path,const ExperimentalOptions& options,bool reverse,const ScanOptions& scanOptions);

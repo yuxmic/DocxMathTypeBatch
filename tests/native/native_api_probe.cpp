@@ -3,6 +3,7 @@
 #include "docx_scan.h"
 #include "docx_package.h"
 #include "equation_objects.h"
+#include "body_conversion.h"
 
 // Find 只定位本轮固定小样文本，不是阶段 2 的通用定界符扫描器。
 static ComPtr<IDispatch> findSampleRange(IDispatch* document, const wchar_t* source) {
@@ -642,7 +643,9 @@ int wmain(int argc, wchar_t** argv) {
                     lexicalReason(L"x\\\\%comment")==L"UNSUPPORTED_TEX_COMMENT"&&lexicalReason(L"x\\%+y").empty(),"TeX comments preserved without rejecting escaped percent");
             require(exportedInner("$x\\$+50\\%$",false)==L"x\\$+50\\%","Escaped export delimiters remain valid");
             require(exportedInner("\\[50\\%\\]",true)==L"50\\%"&&exportedInner("$x\\\\\\%$",false)==L"x\\\\\\%","Escaped percent exports stay exact");
-            // 厂商短音符等导出可能夹带嵌套定界符，必须在替换对象前拦住。
+            require(exportedInner("$\\overset{\\lower0.5em\\hbox{$\\smash{\\scriptscriptstyle\\smile}$}}{x}$",false)==L"\\breve{x}","Vendor breve export stays in a single formula");
+            require(exportedInner("\\[\\mathop {x+y}\\limits^^\\circ \\]",true)==L"\\mathop {x+y}\\limits^{\\circ}","Vendor ring export has a single superscript");
+            // 其他嵌套定界符仍在替换对象前拦住。
             for(const auto* tex:{"$x$y$","$x\\[y\\]$","$x\\(y\\)$","$x\\\\$y$","$x%comment$","$x\\\\%comment$"}){
                 bool rejected=false;try{exportedInner(tex,false);}catch(const std::exception&){rejected=true;}
                 require(rejected,"Invalid native export preserved before replacing its object");
@@ -657,6 +660,22 @@ int wmain(int argc, wchar_t** argv) {
             require(parseSpacing(L"multiple:1.25").value==1.25&&parseSpacing(L"exact:24").mode==4,"Spacing modes and values");
             EquationNumbering testNumber;testNumber.format=L"[#CI.#Sa-#EA]";testNumber.chapter=4;testNumber.section=2;
             const auto parts=numberParts(testNumber,28);require(parts.before==L"[IV.b-"&&parts.digits==L"BB"&&parts.after==L"]","Number format tokens and alphabetic boundary");
+            // 坐标平移只影响当前目标之后的两类范围，覆盖增删文字及零变化。
+            std::vector<ItemOutcome> shifted(4);
+            shifted[0].finalSpan={10,12};shifted[0].replacementSpan={9,13};
+            shifted[1].finalSpan={20,22};shifted[1].replacementSpan={19,23};
+            shifted[2].finalSpan={30,32};shifted[2].replacementSpan={29,33};
+            shifted[3].finalSpan={40,42};shifted[3].replacementSpan={39,43};
+            const auto originalOutcomes=shifted;
+            auto sameRanges=[](const ItemOutcome& a,const ItemOutcome& b){return a.finalSpan.start==b.finalSpan.start&&a.finalSpan.end==b.finalSpan.end&&a.replacementSpan.start==b.replacementSpan.start&&a.replacementSpan.end==b.replacementSpan.end;};
+            for(const long delta:{5L,-3L,0L}){
+                shifted=originalOutcomes;shiftFollowingOutcomes(shifted,1,delta);
+                require(sameRanges(shifted[0],originalOutcomes[0])&&sameRanges(shifted[1],originalOutcomes[1]),"Coordinate shift preserves preceding and current outcomes");
+                require(shifted[2].finalSpan.start==30+delta&&shifted[2].finalSpan.end==32+delta&&shifted[2].replacementSpan.start==29+delta&&shifted[2].replacementSpan.end==33+delta,"Coordinate shift applies positive, negative and zero deltas to following ranges");
+                require(shifted[3].finalSpan.start==40+delta&&shifted[3].finalSpan.end==42+delta&&shifted[3].replacementSpan.start==39+delta&&shifted[3].replacementSpan.end==43+delta,"Coordinate shift reaches every following outcome");
+            }
+            shifted=originalOutcomes;shiftFollowingOutcomes(shifted,3,7);
+            require(sameRanges(shifted[0],originalOutcomes[0])&&sameRanges(shifted[1],originalOutcomes[1])&&sameRanges(shifted[2],originalOutcomes[2])&&sameRanges(shifted[3],originalOutcomes[3]),"Last outcome has no following ranges to shift");
             // 编号识别保持原有域类型、大小写和序列边界，扫描与更新使用同一规则。
             require(nativeNumberField(51,L" MACROBUTTON MTPlaceRef \\* MERGEFORMAT ")&&!nativeNumberField(12,L"MACROBUTTON MTPlaceRef"),"Native number requires its macrobutton field type");
             require(nativeSequenceField(12,L" SEQ MTChap \\r 4 ",L"MTChap")&&!nativeSequenceField(12,L" SEQ MTChapExtra \\r 4 ")&&!nativeSequenceField(51,L" SEQ MTEqn "),"Native sequence names and field types stay exact");

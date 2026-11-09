@@ -124,7 +124,7 @@ struct NativeNumberingSession {
             documentEnd=integer(get(document,L"Content").Get(),L"End");
             const long delta=documentEnd-beforeEnd;
             outcome.replacementSpan.end+=delta;
-            for(size_t later=i+1;later<outcomes.size();++later){outcomes[later].finalSpan.start+=delta;outcomes[later].finalSpan.end+=delta;outcomes[later].replacementSpan.start+=delta;outcomes[later].replacementSpan.end+=delta;}
+            shiftFollowingOutcomes(outcomes,i,delta);
             require(!conversionFault(L"DOCX_MATH_BODY_FAULT",L"*",L"NUMBERING"),"Injected numbering update failure");
             taskTestBoundary(L"NUMBERING_WRITTEN");
             progress.advance();
@@ -147,7 +147,7 @@ struct NativeNumberingSession {
             const auto updated=invoke(field.Get(),L"Update",DISPATCH_METHOD);require(updated.v.vt==VT_BOOL&&updated.v.boolVal!=VARIANT_FALSE,"MathType number reference updated without error");
             documentEnd=integer(get(document,L"Content").Get(),L"End");
             const long delta=documentEnd-before;outcome.replacementSpan.end+=delta;outcome.status=L"REFERENCE_UPDATED";++summary.referencesUpdated;
-            for(size_t later=i+1;later<outcomes.size();++later){outcomes[later].finalSpan.start+=delta;outcomes[later].finalSpan.end+=delta;outcomes[later].replacementSpan.start+=delta;outcomes[later].replacementSpan.end+=delta;}
+            shiftFollowingOutcomes(outcomes,i,delta);
             referenceProgress.advance();
         }
         if(verify){

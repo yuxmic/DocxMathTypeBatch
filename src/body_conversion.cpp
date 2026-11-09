@@ -2,11 +2,13 @@
 #include "body_conversion.h"
 #include "body_numbering.h"
 #include "equation_styles.h"
+#include "equation_import.h"
 #include "omml_adapter.h"
 #include "scan_file.h"
 #include "conversion_timing.h"
 #include <map>
 #include <set>
+#include <tuple>
 
 namespace {
 // 控制台信号属于进程边界；正文策略和结果均为任务内状态。
@@ -211,6 +213,12 @@ static ItemOutcome failedPreserved(const ScanItem& item,const std::exception& er
     const std::string message=error.what();std::printf("ITEM_PREPARATION_PRESERVED %s\n",message.c_str());
     return {item.span,L"FAILED_PRESERVED",std::wstring(message.begin(),message.end())};
 }
+struct FinishedBodyEquations {
+    // 按字号、行内／行外、导入格式和完整输入定位本轮已成功的对象。
+    const std::vector<ItemOutcome>& outcomes;
+    std::map<std::tuple<double,bool,short,std::wstring>,size_t> sources;
+    size_t hits{};
+};
 class BodyConversion {
     const BodyOptions& options;
     ConversionTimings& timings;
@@ -335,7 +343,8 @@ class BodyConversion {
     }
     ItemOutcome convertOne(MathTypeApi& api, WordSession& word, const ScanItem& item,
                                   const std::vector<unsigned char>& empty,DisplayLayout& displayLayout,ComPtr<IXSLTemplate>& stylesheet,bool selfTest, bool abortTest,
-                                  long beforeEnd,long& resultingEnd,IDispatch* blankTemplate,const std::wstring* cachedSource=nullptr,const std::wstring* cachedPackage=nullptr) {
+                                  long beforeEnd,long& resultingEnd,IDispatch* blankTemplate,double points,size_t index,FinishedBodyEquations& finished,
+                                  const std::wstring* cachedSource=nullptr,const std::wstring* cachedPackage=nullptr) {
         if(scanOptions.progress)std::puts("UI_PHASE FORMULA_SOURCE");
         auto document = word.document.Get();
         ComPtr<IDispatch> range,shapes,undo;long count{};const long end=beforeEnd;std::wstring body,sourceXml,sourcePackage,prefix,suffix;
@@ -366,13 +375,30 @@ class BodyConversion {
             const bool omml=item.ommlOrdinal!=0;
             if(scanOptions.progress)std::puts("UI_PHASE FORMULA_PREPARING");
             require(!(selfTest && item.source == L"$beta_2$"), "Injected preparation failure");
-            const auto inner=omml?std::wstring():compatibleTex(item.inner);
+            const auto tex=omml?CompatibleTexInput{ommlGroupBraceTex(sourcePackage),{}}:compatibleTexInput(item.inner);
+            const auto& inner=tex.tex;
             require(options.scan.fast||omml||std::all_of(inner.begin(),inner.end(),[](wchar_t c){return c<=127;}),"UNSUPPORTED_NON_ASCII_TEX");
-            if(omml&&!stylesheet)stylesheet=compileOmmlStylesheet(text(word.application.Get(),L"Path")+L"\\OMML2MML.XSL",timings);
-            const auto input=omml?ommlMathML(sourcePackage,stylesheet.Get(),item.display,timings):(item.display?L"\\["+inner+L"\\]":L"$"+inner+L"$");
+            bool mathml=omml&&inner.empty();
+            if(mathml&&!stylesheet)stylesheet=compileOmmlStylesheet(text(word.application.Get(),L"Path")+L"\\OMML2MML.XSL",timings);
+            auto input=mathml?ommlMathML(sourcePackage,stylesheet.Get(),item.display,timings):(item.display?L"\\["+inner+L"\\]":L"$"+inner+L"$");
+            const short cacheKind=mathml?2:tex.fixes.empty()?1:3;
+            auto key=std::make_tuple(points,item.display,cacheKind,tex.fixes.empty()?input:item.inner);
+            const auto found=finished.sources.find(key);
+            const auto* cached=found==finished.sources.end()?nullptr:&finished.outcomes[found->second];
+            ComPtr<IDispatch> formatted;
+            if(cached){
+                // 使用随倒序替换更新的真实范围，避免保留可能被文档编辑失效的 Word 对象句柄。
+                const auto span=cached->finalSpan;
+                formatted=get(docRange(document,span.start,span.end).Get(),L"FormattedText");
+            }else if(!tex.fixes.empty()){
+                input=mathmlFromTex(api,input,item.display,tex.fixes,timings);
+                mathml=true;
+            }
+            // 精确选择只替换公式本体，行外类型仍用于 MathType 导入和样式。
+            const bool leadingTab=item.display&&!options.scan.exactTargets;
             // 是否拆段按当前段落重算：同段后面的公式可能已经拆段，不能沿用扫描提示。
             bool splitBefore{},splitAfter{};
-            if(item.display){
+            if(leadingTab){
                 auto paragraphs=get(range.Get(),L"Paragraphs");
                 const long paragraphCount=integer(paragraphs.Get(),L"Count");
                 auto firstRange=get(collectionItem(paragraphs.Get(),1).Get(),L"Range");
@@ -381,34 +407,46 @@ class BodyConversion {
                 splitBefore=!whitespaceOnly(text(docRange(document,para.start,item.span.start).Get(),L"Text"));
                 splitAfter=!whitespaceOnly(text(docRange(document,item.span.end,para.end).Get(),L"Text"));
             }
-            const bool leadingTab=item.display;
             // 两个 Tab 与源码一次替换；对象插在中间，段尾预留右对齐位置供原生按钮插入编号。
             // OMML 先替换为对象，离开原生公式区域后再补 Tab，避免破坏可撤销的公式结构。
-            invoke(range.Get(), L"Text", DISPATCH_PROPERTYPUT, {item.display&&!omml?L"\t\t":L""});
-            if(item.display&&!omml)invoke(range.Get(),L"SetRange",DISPATCH_METHOD,{item.span.start+1,item.span.start+1});else invoke(range.Get(),L"Collapse",DISPATCH_METHOD,{1L});
+            invoke(range.Get(), L"Text", DISPATCH_PROPERTYPUT, {leadingTab&&!omml?L"\t\t":L""});
+            if(leadingTab&&!omml)invoke(range.Get(),L"SetRange",DISPATCH_METHOD,{item.span.start+1,item.span.start+1});else invoke(range.Get(),L"Collapse",DISPATCH_METHOD,{1L});
             require(!(selfTest && item.source == L"$split_1+split_2$"), "Injected creation failure");
             if(scanOptions.progress)std::puts("UI_PHASE FORMULA_INSERTING");
-            auto shape=insertBlankEquation(document,range.Get(),api.install,nullptr,options.scan.fast,blankTemplate);
-            {ScopedConversionTiming timing(automationTimings,ConversionMetric::ObjectActivate);
+            // 成品范围来自正在编辑的文档，快速模式也核对仅复制一个对象及其范围。
+            auto shape=insertBlankEquation(document,range.Get(),api.install,nullptr,options.scan.fast&&!cached,cached?formatted.Get():blankTemplate);
+            if(!cached){
+                ScopedConversionTiming timing(automationTimings,ConversionMetric::ObjectActivate);
                 auto ole=get(shape.Get(),L"OLEFormat");invoke(ole.Get(),L"DoVerb",DISPATCH_METHOD,{2L});object=get(ole.Get(),L"Object");active=true;}
-            {ScopedConversionTiming timing(automationTimings,ConversionMetric::StyleWrite);
-                require(api.writeBytes(object.Get(),3,empty.data(),static_cast<long>(empty.size()))==0,"Apply isolated equation preferences");}
+            // 字号和行内／行外样式已写入模板，复制后不再逐式重新写入。
             taskTestBoundary(L"NATIVE_STYLE_WRITTEN");
-            if(scanOptions.progress)std::puts("UI_PHASE FORMULA_IMPORTING");
-            {ScopedConversionTiming timing(timings,omml?ConversionMetric::MathmlImport:ConversionMetric::TexImport);
-                require(input.size()<=LONG_MAX&&api.write(object.Get(),omml?2:1,input.c_str(),static_cast<long>(input.size()))==0,omml?"Import OMML into new object":"Write TeX into new object");}
-            if(!options.scan.fast&&scanOptions.progress)std::puts("UI_PHASE FORMULA_VERIFYING");
-            auto native=options.scan.fast?std::vector<unsigned char>():readNative(api,object.Get());
-            if(!options.scan.fast){require(native!=empty&&native.size()>empty.size(),"New equation contains native content");requireStyle(inspectStyle(native),inspectStyle(empty));}
-            if(scanOptions.progress)std::puts("UI_PHASE FORMULA_CLOSING");
-            require(api.close(OLECLOSE_NOSAVE,object.Get())==0,"Close converted equation");active=false;
-            if(scanOptions.progress)std::puts("UI_PHASE FORMULA_LAYOUT");
-            if(omml&&item.display){auto inserted=get(shape.Get(),L"Range");const long finish=integer(inserted.Get(),L"End"),start=integer(inserted.Get(),L"Start");
+            if(!cached){
+                if(scanOptions.progress)std::puts("UI_PHASE FORMULA_IMPORTING");
+                ScopedConversionTiming timing(timings,mathml?ConversionMetric::MathmlImport:ConversionMetric::TexImport);
+                require(input.size()<=LONG_MAX&&api.write(object.Get(),mathml?2:1,input.c_str(),static_cast<long>(input.size()))==0,
+                        omml?"Import OMML into new object":"Write TeX into new object");
+            }
+            std::vector<unsigned char> native;
+            if(!options.scan.fast){
+                if(scanOptions.progress)std::puts("UI_PHASE FORMULA_VERIFYING");
+                if(cached){
+                    native=nativePayload(rangeNativeAsset(get(shape.Get(),L"Range").Get()).equation);
+                    require(native==cached->native,"Copied equation preserves native content");
+                }else native=readNative(api,object.Get());
+                require(native!=empty&&native.size()>empty.size(),"New equation contains native content");
+                requireStyle(inspectStyle(native),inspectStyle(empty));
+            }
+            if(active){
+                if(scanOptions.progress)std::puts("UI_PHASE FORMULA_CLOSING");
+                require(api.close(OLECLOSE_NOSAVE,object.Get())==0,"Close converted equation");active=false;
+            }
+            if(scanOptions.progress&&!options.scan.exactTargets)std::puts("UI_PHASE FORMULA_LAYOUT");
+            if(omml&&leadingTab){auto inserted=get(shape.Get(),L"Range");const long finish=integer(inserted.Get(),L"End"),start=integer(inserted.Get(),L"Start");
                 invoke(docRange(document,finish,finish).Get(),L"InsertBefore",DISPATCH_METHOD,{L"\t"});
                 invoke(docRange(document,start,start).Get(),L"InsertBefore",DISPATCH_METHOD,{L"\t"});}
             auto shapeRange = get(shape.Get(), L"Range");
             if (splitAfter) {
-                const long position = integer(shapeRange.Get(), L"End")+(item.display?1:0);
+                const long position = integer(shapeRange.Get(), L"End")+(leadingTab?1:0);
                 invoke(docRange(document, position, position).Get(), L"InsertBefore", DISPATCH_METHOD, {L"\r"});
             }
             if (splitBefore) {
@@ -416,7 +454,7 @@ class BodyConversion {
                 invoke(docRange(document, position, position).Get(), L"InsertBefore", DISPATCH_METHOD, {L"\r"});
             }
             if(splitBefore||splitAfter)shapeRange = get(shape.Get(), L"Range");
-            if (item.display) {
+            if (leadingTab) {
                 displayLayout.apply(shapeRange.Get(),&sourceXml);
                 // 段前段后继续继承，保留旧设置以便按需恢复。
                 // invoke(format.Get(), L"SpaceBefore", DISPATCH_PROPERTYPUT, {0L});
@@ -424,7 +462,7 @@ class BodyConversion {
                 if(!options.scan.fast)requireDisplayLayout(document, shapeRange.Get());
             }
             const auto& spacing=item.display?options.displaySpacing:options.inlineSpacing;
-            if(spacing.mode){
+            if(spacing.mode&&!options.scan.exactTargets){
                 auto format=get(shapeRange.Get(),L"ParagraphFormat");
                 const long rules[]={0,0,1,2,4,3,5};
                 invoke(format.Get(),L"LineSpacingRule",DISPATCH_PROPERTYPUT,{rules[spacing.mode]});
@@ -436,7 +474,7 @@ class BodyConversion {
             require(!conversionFault(L"DOCX_MATH_BODY_FAULT",std::to_wstring(item.paragraph),L"RECOVERY"),"Injected body replacement failure");
             require(!(selfTest && item.source == L"$$cell_2$$"), "Injected layout failure");
             std::wstring replaced;
-            if(!options.scan.fast)replaced = (splitBefore ? std::wstring(L"\r") : L"") + (leadingTab?L"\t":L"") + text(shapeRange.Get(), L"Text") + (item.display?L"\t":L"") + (splitAfter ? L"\r" : L"");
+            if(!options.scan.fast)replaced = (splitBefore ? std::wstring(L"\r") : L"") + (leadingTab?L"\t":L"") + text(shapeRange.Get(), L"Text") + (leadingTab?L"\t":L"") + (splitAfter ? L"\r" : L"");
             const long afterEnd = integer(get(document, L"Content").Get(), L"End"), replacementEnd = item.span.end + afterEnd - end;
             // Word.Text 在空单元格处随 Range 边界出现不同末尾标记，不能拼接不同 Range.Text 比较全文。
             // 相同逻辑范围分别核对前后正文，再核对被替换区间，保持真实 Word 坐标而非字符串下标。
@@ -450,7 +488,10 @@ class BodyConversion {
                                   information(shapeRange.Get(), 16) == item.column, "New equation remains in original cell");
             if(recordOpen){invoke(undo.Get(), L"EndCustomRecord", DISPATCH_METHOD); recordOpen = false;}
             ItemOutcome outcome{bounds(shapeRange.Get()), L"SUCCEEDED", L"", std::move(native), static_cast<long>(splitBefore) + static_cast<long>(splitAfter)};
-            outcome.outputText=replaced;outcome.replacementSpan={item.span.start,replacementEnd};resultingEnd=afterEnd;return outcome;
+            outcome.outputText=replaced;outcome.replacementSpan={item.span.start,replacementEnd};
+            if(cached)++finished.hits;else finished.sources.emplace(std::move(key),index);
+            resultingEnd=afterEnd;
+            return outcome;
         } catch (const std::exception& error) {
             const auto message = std::string(error.what());
             if(scanOptions.progress)std::puts("UI_PHASE FORMULA_RECOVERING");
@@ -572,6 +613,7 @@ class BodyConversion {
         std::puts("TIMING_STAGE SAVED_SCAN");
         if(scanOptions.progress)std::puts("UI_PHASE RESCANNING");
         const auto after = scanDocumentText(document,true,true,false,before.bodyOmml,scanOptions,scanOptions.saved?&numbers.saved:nullptr);
+        require(!options.scan.exactTargets||after.paragraphs==before.paragraphs,"Exact conversion preserves paragraph count");
         require(numbers.fields(document,&after.fieldSnapshots) == fields, "Existing non-embedded field code and results unchanged");
         const auto succeeded = std::count_if(outcomes.begin(), outcomes.end(), [](const ItemOutcome& item) { return item.status == L"SUCCEEDED"; });
         long removedMath{};for(size_t i=0;i<outcomes.size();++i)removedMath+=before.items[i].ommlOrdinal&&outcomes[i].status==L"SUCCEEDED";
@@ -616,7 +658,7 @@ class BodyConversion {
             require(integer(get(shapeRange.Get(), L"InlineShapes").Get(), L"Count") == 1, "Converted target has exactly one OLE");
             require(saved.classType == L"Equation.DSMT4", "Saved new object is editable MathType");
             // 旧行外段落允许保留原生编号；扫描已核对边界，编号仍由普通域快照逐项核验。
-            if (item.display&&!options.addRightNumbers&&!item.existingDisplay) requireDisplayLayout(document, shapeRange.Get());
+            if (item.display&&!options.addRightNumbers&&!item.existingDisplay&&!options.scan.exactTargets) requireDisplayLayout(document, shapeRange.Get());
             if (item.row) require(information(shapeRange.Get(), 12) && information(shapeRange.Get(), 13) == item.row &&
                                   information(shapeRange.Get(), 16) == item.column, "Saved new OLE remains in original cell");
             const double width=number(shape.Get(),L"Width"),height=number(shape.Get(),L"Height");
@@ -626,7 +668,7 @@ class BodyConversion {
                 try{
                 appendFixedLineSpacingWarning(shapeRange.Get(),height,context,*layoutWarnings);
                 // 成功行外式已经由本流程拆为独占段落；编号仍在同一段，不估算其占宽。
-                if(item.display&&!item.row){
+                if(item.display&&!item.row&&!options.scan.exactTargets){
                     const long section=information(shapeRange.Get(),2);
                     if(layoutWidths.find(section)==layoutWidths.end()){
                         auto page=get(collectionItem(get(document,L"Sections").Get(),section).Get(),L"PageSetup");
@@ -683,6 +725,8 @@ public:
         auto& afterPackage=result.package;auto& experimental=result.experimental;
         size_t& total=result.total;size_t& completed=result.completed;size_t& succeeded=result.succeeded;
         const bool reverse=options.reverse,selfTest=options.selfTest,abortTest=options.abortTest,stopTest=options.stopTest,guiWorker=scanOptions.progress;
+        const bool exact=options.scan.exactTargets;
+        const auto selected=[&](const ScanItem& item){return selectedBodyItem(options,item);};
         const bool followSize=!reverse&&eqp==L"paragraph",fixedSize=!reverse&&eqp.rfind(L"size=",0)==0;
         const double requestedPoints=options.requestedPoints;
         auto documents=get(word.application.Get(),L"Documents");
@@ -700,11 +744,26 @@ public:
         // 原生资产只缓存本轮快速反向选中的对象，重建副本后重新扫描。
         std::map<long,NativeAsset> reverseAssets;
         std::puts("UI_PHASE SCANNING");
-        scan = reverse ? scanReverseDocumentWithAssets(word.document.Get(),scanOptions,options.scan.fast?&reverseAssets:nullptr) : scanDocumentText(word.document.Get(),true,!options.scan.fast,!options.scan.fast||options.addRightNumbers,true,scanOptions,nullptr,!options.scan.fast);
+        const bool includeExisting=!exact&&(!options.scan.fast||options.addRightNumbers);
+        scan = reverse ? scanReverseDocumentWithAssets(word.document.Get(),scanOptions,options.scan.fast?&reverseAssets:nullptr) : scanDocumentText(word.document.Get(),true,!options.scan.fast,includeExisting,true,scanOptions,nullptr,!options.scan.fast);
         // 两种模式均复用扫描状态拒绝不可编辑输入，不再单独读取修订属性。
         require(!scan.tracksChanges,"Disable revision tracking in source before batch conversion");
         require(!scan.protectedDocument,"Protected document cannot be converted");
+        if(exact){
+            // 用当前扫描的真实范围、类型及原文确认选择，再允许转换。
+            size_t matched{};
+            for(const auto& item:scan.items){
+                const auto found=options.targets.find(item.span.start);
+                if(found==options.targets.end())continue;
+                const auto& target=found->second;
+                require(item.ready&&item.span.end==target.end&&wireHex(utf8(item.delimiter))==target.delimiterHex&&
+                        wireHex(utf8(item.source))==target.sourceHex,"TARGET_SELECTION_MISMATCH");
+                ++matched;
+            }
+            require(matched&&matched==options.targets.size(),"TARGET_SELECTION_MISMATCH");
+        }
         if(options.addRightNumbers)numbers.includeReferences(word.document.Get(),scan);
+        total=static_cast<size_t>(std::count_if(scan.items.begin(),scan.items.end(),[&](const ScanItem& item){return selected(item)&&item.ready;}));
         for(auto& item:scan.items)if(item.position.sourceStart<0)item.position.sourceStart=item.span.start;
         if(!positionsCaptured){
             ScopedConversionTiming timing(timings,ConversionMetric::SourceLocations);
@@ -717,8 +776,10 @@ public:
             StageProgress positionProgress("SOURCE_POSITIONS",scan.items.size(),guiWorker);
             // 快速模式保留原文段号与坐标，不逐式查询仅供诊断使用的页码。
             for(auto& item:scan.items){require(!isStopping(),"TASK_CANCELLED");
-                if(options.scan.fast)item.position={item.position.sourceStart,0,(item.paragraph>0?L"原文第 "+std::to_wstring(item.paragraph)+L" 段":L"原文字符位置 "+std::to_wstring(item.position.sourceStart))+L" · 正文"};
-                else item.position=originalSourcePosition(word.document.Get(),item.position.sourceStart,L"正文",paginated);
+                if(selected(item)){
+                    if(options.scan.fast)item.position={item.position.sourceStart,0,(item.paragraph>0?L"原文第 "+std::to_wstring(item.paragraph)+L" 段":L"原文字符位置 "+std::to_wstring(item.position.sourceStart))+L" · 正文"};
+                    else item.position=originalSourcePosition(word.document.Get(),item.position.sourceStart,L"正文",paginated);
+                }
                 originalPositions.push_back(item.position);positionProgress.advance();}
             result.experimentalSourceLocations=captureExperimentalSourceLocations(word.document.Get(),input,experimentalOptions,reverse,scanOptions,paginated);
             positionsCaptured=true;
@@ -729,10 +790,15 @@ public:
                 else item.position.location=L"原文页码未知 · 正文";
             }
         }
-        if (guiWorker) emitGuiScan(scan);
+        if(guiWorker){
+            if(exact){
+                const auto inlines=std::count_if(scan.items.begin(),scan.items.end(),[&](const ScanItem& item){return selected(item)&&!item.display;});
+                std::printf("UI_SCAN_COUNTS %ld %zu %td 0\n",scan.existingMathType,total,inlines);
+            }else emitGuiScan(scan);
+        }
         // 识别拒绝项在初始化接口前发送，后续整份任务失败时也能显示逐式中文原因。
         if(guiWorker)for(size_t index=0;index<scan.items.size();++index){const auto& item=scan.items[index];
-            if(!item.ready&&!item.existingDisplay&&!item.existingReference)std::printf("UI_ITEM_REJECTED %zu %ld %ld %ld %s %s %s\n",index+1,item.paragraph,item.span.start,item.span.end,diagnosticExcerpt(item.source).c_str(),wireHex(utf8(item.reason)).c_str(),wireHex(utf8(item.position.location)).c_str());
+            if(selected(item)&&!item.ready&&!item.existingDisplay&&!item.existingReference)std::printf("UI_ITEM_REJECTED %zu %ld %ld %ld %s %s %s\n",index+1,item.paragraph,item.span.start,item.span.end,diagnosticExcerpt(item.source).c_str(),wireHex(utf8(item.reason)).c_str(),wireHex(utf8(item.position.location)).c_str());
         }
         if(!options.scan.fast)std::puts("UI_PHASE SNAPSHOT_STRUCTURE");
         if(options.addRightNumbers&&!options.scan.fast)for(const auto& item:scan.items)if(item.existingDisplay||item.existingReference)numbers.remember(word.document.Get(),item.span);
@@ -746,14 +812,14 @@ public:
         const auto fastInputs=cacheOmml?prepareOmmlInputs(word.document.Get(),timings,guiWorker):OmmlInputCache();
         const long sourceEnd=fastInputs.sources.empty()?0:integer(get(word.document.Get(),L"Content").Get(),L"End");
         std::puts("UI_PHASE INITIALIZING");
-        const bool needsMathType=std::any_of(scan.items.begin(),scan.items.end(),[](const ScanItem& item){return item.ready;});
+        const bool needsMathType=total>0;
         if(needsMathType&&!api.initialized){if(guiWorker)std::puts("UI_PHASE CONNECTING_MATHTYPE");require(api.init(0,10)>0,"MathType initialization");api.initialized=true;taskMathTypeConnected();}
         if(needsMathType&&guiWorker)std::puts("UI_PHASE READING_PREFERENCES");
         const auto prefs = reverse||followSize||fixedSize||!needsMathType ? std::string() : loadPrefs(api, eqp), globalPrefs = needsMathType&&!options.scan.fast?readDefaultPrefs(api):std::string();
-        std::vector<unsigned char> naturalEmpty;BlankEquationTemplate blankTemplate;
-        if(!reverse&&std::any_of(scan.items.begin(),scan.items.end(),[](const ScanItem& item){return item.ready;})){if(guiWorker)std::puts("UI_PHASE PREPARING_TEMPLATE");naturalEmpty=emptyEquation(api,word,nullptr,true,options.scan.fast,&blankTemplate);}
         std::map<double,std::string> sizePrefs;
         std::map<std::pair<double,bool>,std::vector<unsigned char>> emptyStyles;
+        std::map<std::pair<double,bool>,BlankEquationTemplate> blankTemplates;
+        FinishedBodyEquations finished{outcomes,{}};
         // 正文按目标之间的不变片段只读取一次，独立构造预期结果，避免逐式读取全文。
         std::vector<std::wstring> bodyGaps;long previousEnd{};
         std::wstring originalBody;
@@ -771,22 +837,28 @@ public:
         require(originalBody==text(get(word.document.Get(),L"Content").Get(),L"Text"),"Independent body snapshot uses exact Word text ranges");
         }
         outcomes.clear();
-        for (const auto& item : scan.items){outcomes.push_back({item.span, item.ready ? L"NOT_ATTEMPTED" : item.existingDisplay?L"EXISTING_PENDING":item.existingReference?L"REFERENCE_PRESERVED":L"REJECTED_PRESERVED", item.reason, {}, 0});outcomes.back().replacementSpan=item.span;}
+        for(const auto& item:scan.items){
+            const auto status=!selected(item)?L"SKIPPED_BY_SELECTION":
+                item.ready?L"NOT_ATTEMPTED":item.existingDisplay?L"EXISTING_PENDING":
+                item.existingReference?L"REFERENCE_PRESERVED":L"REJECTED_PRESERVED";
+            outcomes.push_back({item.span,status,item.reason,{},0});
+            outcomes.back().replacementSpan=item.span;
+        }
         auto expectedText=[&](){std::wstring body;for(size_t i=0;i<scan.items.size();++i)body+=bodyGaps[i]+(changedOutcome(outcomes[i])?outcomes[i].outputText:scan.items[i].source);return body+bodyGaps.back();};
         const bool existingDisplays=std::any_of(scan.items.begin(),scan.items.end(),[](const ScanItem& item){return item.existingDisplay;});
         std::vector<std::vector<unsigned char>> existingAssets;
         if(existingDisplays&&!options.scan.fast){std::puts("UI_PHASE SNAPSHOT_OBJECTS");existingAssets=bodyNativeAssets(word.document.Get());}
         DisplayLayout displayLayout{word.document.Get(),originalPackage.displayStyle,options.addRightNumbers,options.numbering};
         ComPtr<IXSLTemplate> ommlStylesheet;
-        total = static_cast<size_t>(std::count_if(scan.items.begin(), scan.items.end(), [](const ScanItem& item) { return item.ready; }));completed=0;
+        completed=0;
         if (!guiWorker && !taskShared) require(SetConsoleCtrlHandler(requestStop, TRUE) != 0, "Install safe stop handler");
         std::puts("UI_PHASE CONVERTING");
         // 新旧公式共用处理进度；原转换计数继续用于结果和日志。
-        const auto processTotal=static_cast<size_t>(std::count_if(scan.items.begin(),scan.items.end(),[](const ScanItem& item){return item.ready||item.existingDisplay;}));
+        const auto processTotal=static_cast<size_t>(std::count_if(scan.items.begin(),scan.items.end(),[&](const ScanItem& item){return selected(item)&&(item.ready||item.existingDisplay);}));
         StageProgress processProgress("PROCESS_FORMULAS",processTotal,guiWorker&&existingDisplays);
         for (size_t index = scan.items.size(); index-- > 0;) {
             const auto& item = scan.items[index];
-            if(item.existingReference)continue;
+            if(!selected(item)||item.existingReference)continue;
             if(std::any_of(skippedBody.begin(),skippedBody.end(),[&](const ScanItem& skipped){return skipped.span.start==item.span.start&&skipped.span.end==item.span.end&&skipped.source==item.source;})){
                 outcomes[index].reason=L"BODY_RANGE_SKIPPED";
                 if(item.existingDisplay){auto shape=collectionItem(get(docRange(word.document.Get(),item.span.start,item.span.end).Get(),L"InlineShapes").Get(),1);auto range=get(shape.Get(),L"Range");outcomes[index].finalSpan=bounds(range.Get());outcomes[index].native=existingAssets.empty()?nativePayload(rangeNativeAsset(range.Get()).equation):existingAssets.at(static_cast<size_t>(item.existingNativeOrdinal-1));outcomes[index].status=L"EXISTING_PRESERVED";}
@@ -811,7 +883,9 @@ public:
                 if(emptyStyles.find(key)==emptyStyles.end()) {
                     if(guiWorker)std::puts("UI_PHASE FORMULA_STYLE");
                     if(points!=0&&sizePrefs.find(points)==sizePrefs.end())sizePrefs[points]=sizedPreferences(api,points,sizePreferencePath,sizePreferenceOwned);
-                    emptyStyles[key]=styledNative(api,naturalEmpty,points==0?prefs:sizePrefs.at(points),item.display);
+                    // 每种字号及行内／行外类型各留一份已设样式的独立空模板。
+                    const auto& preferences=points==0?prefs:sizePrefs.at(points);
+                    emptyStyles[key]=emptyEquation(api,word,&preferences,item.display,options.scan.fast,&blankTemplates[key]);
                 }
                 }catch(const std::exception& error){outcomes[index]=failedPreserved(item,error);}
                 const std::wstring* cachedSource=nullptr;
@@ -821,19 +895,20 @@ public:
                     const auto& source=fastInputs.sources.at(static_cast<size_t>(item.ommlOrdinal-1));
                     if(!source.empty()&&item.span.start==scan.paragraphStarts[paragraph]&&item.span.end==end-1)cachedSource=&source;
                 }
-                if(outcomes[index].status!=L"FAILED_PRESERVED")outcomes[index]=convertOne(api,word,item,emptyStyles.at(key),displayLayout,ommlStylesheet,selfTest,abortTest,beforeEnd,resultingEnd,blankTemplate.range.Get(),cachedSource,cachedSource?fastInputs.packages.at(static_cast<size_t>(item.ommlOrdinal-1)).get():nullptr);
+                if(outcomes[index].status!=L"FAILED_PRESERVED")outcomes[index]=convertOne(api,word,item,emptyStyles.at(key),displayLayout,ommlStylesheet,selfTest,abortTest,beforeEnd,resultingEnd,blankTemplates.at(key).range.Get(),points,index,finished,cachedSource,cachedSource?fastInputs.packages.at(static_cast<size_t>(item.ommlOrdinal-1)).get():nullptr);
             }
             }catch(const std::exception& error){if(abortTest)throw;require(!isStopping(),"TASK_CANCELLED");
                 if(options.scan.fast){const std::string message=error.what();outcomes[index]={item.span,L"FAILED_UNVERIFIED",std::wstring(message.begin(),message.end())};}
                 else{if(needsMathType)require(readDefaultPrefs(api)==globalPrefs,"Global MathType defaults unchanged");throw BodyRangeError(item,error);}}
-            if(!displayOutcome(outcomes[index]))outcomes[index].replacementSpan=outcomes[index].finalSpan;
+            if(!displayOutcome(outcomes[index])){
+                // 失败恢复可能重建 Word 对象，后续只引用重新转换成功的来源。
+                finished.sources.clear();
+                outcomes[index].replacementSpan=outcomes[index].finalSpan;
+            }
             // 只复用单式成功后的真实末端；失败和恢复路径仍读取当前文档，避免沿用失败前坐标。
             const long delta = (resultingEnd>=0?resultingEnd:integer(get(word.document.Get(), L"Content").Get(), L"End")) - beforeEnd;
             // 前面的替换只移动已经处理过的后方坐标；当前及更前方目标仍使用刚重扫的原位置。
-            for (size_t later = index + 1; later < outcomes.size(); ++later) {
-                outcomes[later].finalSpan.start += delta; outcomes[later].finalSpan.end += delta;
-                outcomes[later].replacementSpan.start+=delta;outcomes[later].replacementSpan.end+=delta;
-            }
+            shiftFollowingOutcomes(outcomes,index,delta);
             if(item.existingDisplay){if(guiWorker)std::puts("UI_ITEM_END");processProgress.advance();continue;}
             const auto itemState=outcomes[index].status==L"SUCCEEDED"?"SUCCEEDED":outcomes[index].status==L"FAILED_UNVERIFIED"?"FAILED_UNVERIFIED":"FAILED_PRESERVED";
             std::printf("CONVERT_PROGRESS %zu/%zu ID=%zu START=%ld STATUS=%s\n", ++completed, total, index + 1, item.span.start,
@@ -843,7 +918,9 @@ public:
             processProgress.advance();
             if (stopTest && completed == 3) {InterlockedExchange(&stopRequested, 1);if(taskShared)InterlockedExchange(&taskShared->cancelRequested,1);} // 自检同样丢弃结果。
         }
-        blankTemplate.close();
+        if(!reverse)std::printf("BODY_FINISHED_CACHE_HITS=%zu\n",finished.hits);
+        finished.sources.clear();
+        for(auto& entry:blankTemplates)entry.second.close();
         if (!guiWorker && !taskShared) require(SetConsoleCtrlHandler(requestStop, FALSE) != 0, "Remove safe stop handler");
         require(!isStopping(),"TASK_CANCELLED");
         // 成功的正文 OMML 从保留清单移除，其余公式仍逐式核对内容和顺序。
@@ -854,23 +931,26 @@ public:
         if(options.addRightNumbers)for(size_t i=0;i<outcomes.size();++i)if(scan.items[i].display&&displayOutcome(outcomes[i])){hasNumberingTargets=true;break;}
         if(hasNumberingTargets){
             if(guiWorker)std::puts("UI_PHASE NUMBER_PREPARING");
+            auto reportNumberingFailure=[&](const std::exception& error){const std::string reason=error.what();issues.push_back({L"numbering",L"正文编号及交叉引用",L"NUMBERING",std::wstring(reason.begin(),reason.end()),{-1,0,L"正文编号及交叉引用（涉及多个位置）"}});emitProcessingIssue(issues.back());};
             if(options.scan.fast){
                 try{numbers.apply(word.document.Get(),scan,outcomes,false);}
-                catch(const std::exception& error){require(!isStopping(),"TASK_CANCELLED");const std::string reason=error.what();issues.push_back({L"numbering",L"正文编号及交叉引用",L"NUMBERING",std::wstring(reason.begin(),reason.end()),{-1,0,L"正文编号及交叉引用（涉及多个位置）"}});emitProcessingIssue(issues.back());}
+                catch(const std::exception& error){require(!isStopping(),"TASK_CANCELLED");reportNumberingFailure(error);}
             }else{
             // 连续编号和 REF 必须一起成功；只在启用编号时保存一个阶段检查点。
             std::puts("UI_PHASE VERIFYING");
-            validateBeforeSave(word.document.Get(),scan,outcomes,expectedText(),tables,fields,maths);
+            const auto bodyBefore=expectedText();
+            validateBeforeSave(word.document.Get(),scan,outcomes,bodyBefore,tables,fields,maths);
             bindShapeOrdinals(word.document.Get(),outcomes);ordinalsBound=true;std::puts("UI_PHASE NUMBER_CHECKPOINT");invoke(word.document.Get(),L"Save",DISPATCH_METHOD);
-            ConversionCheckpoint checkpoint(candidate,L".numbering-checkpoint");const auto beforeNumbering=outcomes;auto numbersBefore=numbers;numbersBefore.freeze();const auto bodyBefore=expectedText();
+            ConversionCheckpoint checkpoint(candidate,L".numbering-checkpoint");const auto beforeNumbering=outcomes;auto numbersBefore=numbers;numbersBefore.freeze();
             try{numbers.apply(word.document.Get(),scan,outcomes,true);}
-            catch(const std::exception& error){require(!isStopping(),"TASK_CANCELLED");const std::string reason=error.what();
+            catch(const std::exception& error){require(!isStopping(),"TASK_CANCELLED");
                 if(guiWorker)std::puts("UI_PHASE NUMBER_RECOVERING");
                 displayLayout.style.Reset();displayLayout.formats.clear();numbers.tracked.clear();invoke(word.document.Get(),L"Close",DISPATCH_METHOD,{0L});word.document.Reset();checkpoint.restore(candidate);
+                if(options.formulaTabs)restoreSavedOmmlTabs(candidate);
                 outcomes=beforeNumbering;numbers=numbersBefore;numbers.summary={};
                 word.document=asObject(invoke(documents.Get(),L"Open",DISPATCH_METHOD,{candidate.c_str(),false,false,false,Value(),Value(),false,Value(),Value(),Value(),Value(),false}));
                 displayLayout.document=word.document.Get();scanOptions.saved=true;validateDocument(api,word.document.Get(),scan,outcomes,bodyBefore,tables,fields,maths,true,false);scanOptions.saved=false;
-                issues.push_back({L"numbering",L"正文编号及交叉引用",L"NUMBERING",std::wstring(reason.begin(),reason.end()),{-1,0,L"正文编号及交叉引用（涉及多个位置）"}});emitProcessingIssue(issues.back());std::puts("NUMBERING_CHECKPOINT_RESTORED");
+                reportNumberingFailure(error);std::puts("NUMBERING_CHECKPOINT_RESTORED");
             }
             }
         }
@@ -892,7 +972,7 @@ public:
         if(options.scan.fast&&experimentalOptions.enabled()){
             std::puts("UI_EXPERIMENTAL_PHASE PREPARING");
             // 快速模式沿用已打开的工作副本；页眉引用从只读原件读取，避免与 Word 的文件锁冲突。
-            experimental=convertExperimental(word,api,input,experimentalOptions,reverse,eqp==L"dollar",scan.items.size()+1,originalPackage,selfTest,scanOptions,timings,result.experimentalSourceLocations);
+            experimental=convertExperimental(word,api,input,experimentalOptions,reverse,eqp==L"dollar",scan.items.size()+1,originalPackage,selfTest,scanOptions,timings,result.experimentalSourceLocations,options.formulaTabs);
         }
         std::puts("UI_PHASE SAVING");
         taskTestBoundary(L"BEFORE_SAVE");
@@ -901,6 +981,7 @@ public:
         else numbers.tracked.clear();
         std::puts("UI_PHASE CLOSING_WORK_COPY");
         invoke(word.document.Get(), L"Close", DISPATCH_METHOD, {0L}); word.document.Reset();
+        if(options.formulaTabs)restoreSavedOmmlTabs(candidate);
         taskTestBoundary(L"SAVED_DOCUMENT");
         succeeded = static_cast<size_t>(std::count_if(outcomes.begin(), outcomes.end(), [](const ItemOutcome& item) { return item.status == L"SUCCEEDED"; }));
         if(!options.scan.fast){

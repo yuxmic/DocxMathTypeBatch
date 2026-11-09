@@ -69,14 +69,16 @@ inline bool manualEquationNumber(const std::wstring& value) {
     return digit;
 }
 
-struct MathAccent {wchar_t mark,symbol;const wchar_t* tex;};
+struct MathAccent {wchar_t mark,symbol;const wchar_t* tex;unsigned layers=1;};
 inline const MathAccent* mathAccent(wchar_t mark) {
     // 组合码用于识别原文，symbol 采用 MathType 原生导入能识别的顶饰码。
     static const MathAccent accents[]={
         {0x0300,L'`',L"\\grave"},{0x0301,0x00b4,L"\\acute"},{0x0302,L'^',L"\\hat"},
-        {0x0303,L'~',L"\\tilde"},{0x0304,L'-',L"\\bar"},{0x0306,0x2323,L"\\breve"},
+        {0x0303,L'~',L"\\tilde"},{0x0304,L'-',L"\\bar"},{0x0305,L'-',L"\\bar"},{0x0306,0x2323,L"\\breve"},
         {0x0307,0x0307,L"\\dot"},{0x0308,0x0308,L"\\ddot"},{0x030a,0x2218,L"\\overset{\\circ}"},
-        {0x030c,0x02c7,L"\\check"},{0x20db,0x20db,L"\\dddot"},{0x20dc,0x20dc,L"\\ddddot"},
+        {0x030b,0x02dd,nullptr},{0x030c,0x02c7,L"\\check"},{0x0311,0x2322,nullptr},
+        {0x033f,L'-',L"\\overline",2},{0x20d0,0x21bc,nullptr},{0x20d1,0x21c0,nullptr},
+        {0x20db,0x20db,L"\\dddot"},{0x20dc,0x20dc,L"\\ddddot"},
         {0x20d6,0x2190,L"\\overleftarrow"},{0x20d7,0x2192,L"\\vec"},{0x20e1,0x2194,L"\\overleftrightarrow"}
     };
     for(const auto& accent:accents)if(accent.mark==mark)return &accent;
@@ -90,19 +92,105 @@ inline std::wstring decomposedMathCharacter(wchar_t character) {
     if(count>1&&std::all_of(buffer+1,buffer+count,[](wchar_t c){return mathAccent(c)!=nullptr;}))return std::wstring(buffer,count);
     return std::wstring(1,character);
 }
-inline std::wstring compatibleTex(std::wstring value) {
+enum class TexMathMLFixKind { Accent, MathLetter, TextLetter, Space };
+struct TexMathMLFix {
+    TexMathMLFixKind kind;
+    std::wstring marker, value;
+};
+struct CompatibleTexInput {
+    std::wstring tex;
+    std::vector<TexMathMLFix> fixes;
+};
+
+// 数学间距仅接收显式长度。相对字号交给 MathType，避免把 em 固定为正文磅数。
+inline std::wstring texSpaceWidth(const std::wstring& value,size_t& finish,const std::wstring& command) {
+    const bool grouped=command==L"hspace";
+    auto i=finish;
+    if(grouped&&i<value.size()&&value[i]==L'*')++i;
+    while(i<value.size()&&iswspace(value[i]))++i;
+    if(grouped){
+        if(i==value.size()||value[i++]!=L'{')return {};
+        while(i<value.size()&&iswspace(value[i]))++i;
+    }
+    const auto first=i;
+    if(i<value.size()&&(value[i]==L'-'||value[i]==L'+'))++i;
+    const auto digit=[&]{return i<value.size()&&value[i]>=L'0'&&value[i]<=L'9';};
+    const auto start=i;
+    while(digit())++i;
+    auto digits=i-start;
+    if(i<value.size()&&value[i]==L'.'){
+        const auto decimal=++i;
+        while(digit())++i;
+        digits+=i-decimal;
+    }
+    if(!digits)return {};
+    const auto number=value.substr(first,i-first);
+    while(i<value.size()&&iswspace(value[i]))++i;
+    const auto unit=value.substr(i,2);
+    if(command==L"mkern"?unit!=L"mu":(unit!=L"em"&&unit!=L"ex"&&unit!=L"pt"&&unit!=L"pc"&&unit!=L"in"&&unit!=L"cm"&&unit!=L"mm"))return {};
+    i+=2;
+    if(grouped){
+        while(i<value.size()&&iswspace(value[i]))++i;
+        if(i==value.size()||value[i++]!=L'}')return {};
+    }
+    finish=i;
+    return number+unit;
+}
+
+inline wchar_t texDoubleAcuteLetter(wchar_t base) {
+    switch(base){case L'O':return 0x0150;case L'o':return 0x0151;case L'U':return 0x0170;case L'u':return 0x0171;default:return 0;}
+}
+inline wchar_t texDoubleAcuteArgument(const std::wstring& value,size_t& finish) {
+    auto i=finish;
+    while(i<value.size()&&iswspace(value[i]))++i;
+    if(i==value.size())return 0;
+    const bool grouped=value[i]==L'{';
+    // 空格或花括号必须结束控制词，避免把 \Ho 当成 \H o。
+    if(grouped)++i;
+    else if(i==finish)return 0;
+    if(i==value.size())return 0;
+    const auto letter=texDoubleAcuteLetter(value[i++]);
+    if(!letter||(grouped&&(i==value.size()||value[i++]!=L'}')))return 0;
+    finish=i;
+    return letter;
+}
+inline bool texHasDoubleAcute(wchar_t letter) {
+    return letter==0x0150||letter==0x0151||letter==0x0170||letter==0x0171;
+}
+inline std::wstring compatibleTex(std::wstring value,std::vector<TexMathMLFix>* fixes=nullptr) {
     if (value.find(L'\\') == std::wstring::npos&&std::all_of(value.begin(),value.end(),[](wchar_t c){return c<128;})) return value;
     struct Alignment { size_t begin{}, length{}, columns{1}, maximum{1}; int environment{}, braces{}; bool centered{}; };
     struct Replacement { size_t start{}, length{}; std::wstring text; };
     std::vector<Alignment> aligned;
     std::vector<Replacement> replacements;
     int environment{}, braces{};
+    std::wstring markerPrefix;
+    // 标记仅出现在临时导入对象中，且不与公式中的现有文字冲突。
+    const auto marker=[&](TexMathMLFixKind kind,std::wstring payload){
+        if(fixes->empty()){
+            markerPrefix=L"DocxMathTypeCompatMarker";
+            while(value.find(markerPrefix)!=std::wstring::npos)markerPrefix+=L'X';
+        }
+        auto name=markerPrefix+std::to_wstring(fixes->size())+L"End";
+        fixes->push_back({kind,name,std::move(payload)});
+        if(kind==TexMathMLFixKind::TextLetter)return name;
+        auto placement=L"\\overset{\\text{"+name+L"}}";
+        if(kind!=TexMathMLFixKind::Accent)placement+=L"{x}";
+        return placement;
+    };
     // 按完整控制序列匹配，不能把 \bmfoo 或转义的 \\bm 当作 \bm。
     const std::pair<const wchar_t*,const wchar_t*> aliases[]={
         {L"bm",L"\\boldsymbol"},{L"textnormal",L"\\text"},{L"textup",L"\\text"},{L"textmd",L"\\text"},
         {L"mathup",L"\\mathrm"},{L"lvert",L"\\vert"},{L"rvert",L"\\vert"},
         {L"mleft",L"\\left"},{L"mright",L"\\right"},{L"dotsc",L"\\ldots"},{L"dotsm",L"\\cdots"},{L"dotso",L"\\ldots"},
-        {L"coloneqq",L":="},{L"eqqcolon",L"=:"},{L"widetilde",L"\\tilde"},{L"mathring",L"\\overset{\\circ}"}
+        {L"coloneqq",L":="},{L"eqqcolon",L"=:"},{L"widetilde",L"\\tilde"},{L"mathring",L"\\overset{\\circ}"},
+        {L"widebar",L"\\overline"},{L"overbar",L"\\overline"},{L"ring",L"\\overset{\\circ}"},
+        {L"widecheck",L"\\check"},{L"widebreve",L"\\breve"},
+        {L"enspace",L"\\:\\;"},{L"enskip",L"\\:\\;"}
+    };
+    const std::pair<const wchar_t*,wchar_t> mathmlAccents[]={
+        {L"overarc",L'\u2322'},{L"overparen",L'\u2322'},{L"wideparen",L'\u2322'},{L"overbracket",L'\u23b4'},
+        {L"overleftharpoon",L'\u21bc'},{L"overrightharpoon",L'\u21c0'}
     };
     for (size_t i = 0; i < value.size(); ++i) {
         auto topLevel = [&] { return !aligned.empty() && environment == aligned.back().environment && braces == aligned.back().braces; };
@@ -154,12 +242,62 @@ inline std::wstring compatibleTex(std::wstring value) {
             if(finish==i+1){++i;continue;}
             const auto command=value.substr(i+1,finish-i-1);
             for(const auto& alias:aliases)if(command==alias.first){replacements.push_back({i,finish-i,alias.second});break;}
-            // 文字参数保持原样，里面形似数学命令的文本不能再次改写。
+            if(fixes){
+                for(const auto& accent:mathmlAccents)if(command==accent.first){
+                    if(command==L"overbracket"||command==L"overarc"){
+                        auto after=finish;
+                        while(after<value.size()&&iswspace(value[after]))++after;
+                        require(after==value.size()||value[after]!=L'[',
+                                command==L"overbracket"?"UNSUPPORTED_TEX_BRACKET_OPTIONS":"UNSUPPORTED_TEX_ARC_OPTIONS");
+                    }
+                    replacements.push_back({i,finish-i,marker(TexMathMLFixKind::Accent,std::wstring(1,accent.second))});
+                    break;
+                }
+                if(command==L"hspace"||command==L"kern"||command==L"mkern"){
+                    const auto width=texSpaceWidth(value,finish,command);
+                    require(!width.empty(),"UNSUPPORTED_TEX_SPACING");
+                    std::wstring space;
+                    if(width==L"1em")space=L"\\quad ";
+                    else if(width==L"2em")space=L"\\qquad ";
+                    else if(width==L"0.5em"||width==L".5em")space=L"\\:\\;";
+                    else if(width==L"1mu")space=L"\\,";
+                    else if(command==L"mkern")space=marker(TexMathMLFixKind::Space,std::to_wstring(wcstod(width.c_str(),nullptr)/18)+L"em");
+                    else space=marker(TexMathMLFixKind::Space,width);
+                    replacements.push_back({i,finish-i,std::move(space)});
+                }
+                if(command==L"H")
+                    if(const auto letter=texDoubleAcuteArgument(value,finish))
+                        replacements.push_back({i,finish-i,marker(TexMathMLFixKind::MathLetter,std::wstring(1,letter))});
+            }
+            // 保持文字参数的数学命令原样，只兼容其中的双锐音字母。
             if(command==L"text"||command==L"mbox"||command==L"operatorname"||command==L"textnormal"||command==L"textup"||command==L"textmd"){
                 size_t argument=finish;while(argument<value.size()&&iswspace(value[argument]))++argument;
                 if(command==L"operatorname"&&argument<value.size()&&value[argument]==L'*'){++argument;while(argument<value.size()&&iswspace(value[argument]))++argument;}
                 if(argument<value.size()&&value[argument]==L'{'){
-                    int depth=1;for(size_t j=argument+1;j<value.size();++j){if(value[j]==L'\\'&&j+1<value.size()){++j;continue;}if(value[j]==L'{')++depth;else if(value[j]==L'}'&&--depth==0){finish=j+1;break;}}
+                    int depth=1;
+                    for(size_t j=argument+1;j<value.size();++j){
+                        if(value[j]==L'\\'&&j+1<value.size()){
+                            if(fixes&&value[j+1]==L'H'){
+                                auto after=j+2;
+                                if(const auto letter=texDoubleAcuteArgument(value,after)){
+                                    replacements.push_back({j,after-j,marker(TexMathMLFixKind::TextLetter,std::wstring(1,letter))});
+                                    j=after-1;continue;
+                                }
+                            }
+                            ++j;continue;
+                        }
+                        if(fixes){
+                            if(texHasDoubleAcute(value[j]))
+                                replacements.push_back({j,1,marker(TexMathMLFixKind::TextLetter,value.substr(j,1))});
+                            else if(j+1<value.size()&&value[j+1]==0x030b)
+                                if(const auto letter=texDoubleAcuteLetter(value[j])){
+                                    replacements.push_back({j,2,marker(TexMathMLFixKind::TextLetter,std::wstring(1,letter))});
+                                    ++j;continue;
+                                }
+                        }
+                        if(value[j]==L'{')++depth;
+                        else if(value[j]==L'}'&&--depth==0){finish=j+1;break;}
+                    }
                 }
             }
             i=finish-1;continue;
@@ -169,7 +307,15 @@ inline std::wstring compatibleTex(std::wstring value) {
             const auto base=atom.front();std::wstring marks=atom.substr(1);size_t finish=i+1;
             while(finish<value.size()&&mathAccent(value[finish]))marks+=value[finish++];
             if(!marks.empty()) {
-                atom.assign(1,base);for(const auto mark:marks)atom=std::wstring(mathAccent(mark)->tex)+L"{"+atom+L"}";
+                if(!fixes&&std::any_of(marks.begin(),marks.end(),[](wchar_t c){return !mathAccent(c)->tex;}))continue;
+                if(fixes&&texHasDoubleAcute(value[i])){
+                    atom=marker(TexMathMLFixKind::MathLetter,value.substr(i,1));marks.erase(0,1);
+                }else atom.assign(1,base);
+                for(const auto mark:marks){
+                    const auto accent=mathAccent(mark);
+                    const auto command=accent->tex?std::wstring(accent->tex):marker(TexMathMLFixKind::Accent,std::wstring(1,accent->symbol));
+                    for(unsigned layer=0;layer<accent->layers;++layer)atom=command+L"{"+atom+L"}";
+                }
                 replacements.push_back({i,finish-i,std::move(atom)});i=finish-1;continue;
             }
         }
@@ -182,6 +328,12 @@ inline std::wstring compatibleTex(std::wstring value) {
     return value;
 }
 
+inline CompatibleTexInput compatibleTexInput(std::wstring value) {
+    CompatibleTexInput input;
+    input.tex=compatibleTex(std::move(value),&input.fixes);
+    return input;
+}
+
 inline std::wstring exportedInner(const std::string& value, bool display,bool fast=false) {
     require(fast||std::all_of(value.begin(), value.end(), [](unsigned char c) {return c < 128;}), "UNSUPPORTED_NON_ASCII_EXPORT");
     std::wstring tex(value.begin(), value.end());
@@ -191,6 +343,30 @@ inline std::wstring exportedInner(const std::string& value, bool display,bool fa
     require(tex.size() >= open.size() + close.size() && tex.substr(0, open.size()) == open &&
             tex.substr(tex.size() - close.size()) == close, "Native export delimiter matches true equation type");
     auto inner = tex.substr(open.size(), tex.size() - open.size() - close.size());
+    // 厂商为短顶饰生成带 $ 的盒子。改成等价单参数命令，正文仍只包含一对公式定界符。
+    const std::pair<std::wstring_view, std::wstring_view> accents[] = {
+        {L"\\leftarrow",L"\\overleftarrow"},{L"\\leftrightarrow",L"\\overleftrightarrow"},
+        {L"\\leftharpoonup",L"\\overleftharpoon"},{L"\\rightharpoonup",L"\\overrightharpoon"},
+        {L"\\smile",L"\\breve"},{L"\\frown",L"\\wideparen"}
+    };
+    auto replaceAccent = [&](const std::wstring& box,std::wstring_view command) {
+        for (size_t at=0;(at=inner.find(box,at))!=std::wstring::npos;) {
+            const auto argument=inner.find_first_not_of(L" \t",at+box.size());
+            if(argument!=std::wstring::npos&&inner[argument]==L'{'){
+                inner.replace(at,argument-at,command);
+                at+=command.size();
+            }else at+=box.size();
+        }
+    };
+    for(const auto& accent:accents)
+        replaceAccent(L"\\overset{\\lower0.5em\\hbox{$\\smash{\\scriptscriptstyle"+std::wstring(accent.first)+L"}$}}",accent.second);
+    replaceAccent(L"\\underset{\\raise0.3em\\hbox{$\\smash{\\scriptscriptstyle-}$}}",L"\\underline");
+    for(size_t at=0;(at=inner.find(L"\\limits^^\\circ ",at))!=std::wstring::npos;){
+        constexpr std::wstring_view malformed=L"\\limits^^\\circ ";
+        constexpr std::wstring_view corrected=L"\\limits^{\\circ}";
+        inner.replace(at,malformed.size(),corrected);
+        at+=corrected.size();
+    }
     require(lexicalReason(inner,fast).empty(), "UNSUPPORTED_OR_INVALID_NATIVE_EXPORT");
     // 嵌套定界符会让保存后的扫描拆出多个公式，导出前拒绝以便只保留当前对象。
     for(size_t i=0;!fast&&i<inner.size();++i){

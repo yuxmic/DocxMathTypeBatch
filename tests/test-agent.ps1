@@ -74,7 +74,7 @@ try{
         try{Assert-Agent ($process.WaitForExit(5000) -and $process.ExitCode -eq $entry[2]) '轻量入口失败或弹窗阻塞'}finally{$process.Dispose()}
     }
     $description=Get-Content -LiteralPath (Join-Path $run 'describe.jsonl') -Raw|ConvertFrom-Json
-    Assert-Agent ($description.Version -eq '0.1.5' -and $description.CliContractVersion -eq 1 -and $description.BodyOmmlDefault -and $description.OptionalOmmlConversion) '程序版本或接口能力不符'
+    Assert-Agent ($description.Version -eq '0.1.6' -and $description.CliContractVersion -eq 1 -and $description.BodyOmmlDefault -and $description.OptionalOmmlConversion) '程序版本或接口能力不符'
     $wordAfter=@(Get-Process WINWORD -ErrorAction SilentlyContinue|Select-Object -ExpandProperty Id)
     Assert-Agent (-not @($wordAfter|Where-Object{$_ -notin $wordBefore}).Count) '能力查询启动了 Word'
     $evidence.Cases+=@{Name='native-query-help-and-errors';Status='PASSED';WordNotStarted=$true}
@@ -96,7 +96,7 @@ public static class AgentArgumentCheck {
     foreach($shell in @($shell5,$shell7)){
         $tag=if($shell -eq $shell5){'ps51'}else{'ps7'}
         $result=Invoke-AgentScript ($tag+'-bundled') $shell 'connect.ps1' @()
-        Assert-Agent ($result.SkillVersion -eq '0.2.2' -and $result.ExecutablePath -eq (Join-Path $skill 'bin/DocxMathTypeBatch.exe')) 'Skill 版本不符或未直接使用包内程序'
+        Assert-Agent ($result.SkillVersion -eq '0.2.3' -and $result.ExecutablePath -eq (Join-Path $skill 'bin/DocxMathTypeBatch.exe')) 'Skill 版本不符或未直接使用包内程序'
     }
     $portableFolder=Join-Path $run '独立程序 中文 & 空格';[void][IO.Directory]::CreateDirectory($portableFolder)
     $portable=Join-Path $portableFolder '转换器 已重命名.exe';Copy-Item -LiteralPath $exe -Destination $portable

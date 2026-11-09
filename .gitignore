@@ -54,12 +54,14 @@
 !/src/docx_scan.h
 !/src/equation_objects.h
 !/src/equation_styles.h
+!/src/equation_import.h
 !/src/experimental_conversion.cpp
 !/src/experimental_conversion.h
 !/src/gui.cpp
 !/src/gui_acceptance.h
 !/src/gui_support.h
 !/src/latex_rules.h
+!/src/tex_mathml.h
 !/src/layout_options.h
 !/src/layout_warnings.h
 !/src/mathtype_api.h
@@ -81,6 +83,7 @@
 !/skills/docx-latex-to-mathtype/scripts/common.ps1
 !/skills/docx-latex-to-mathtype/scripts/connect.ps1
 !/skills/docx-latex-to-mathtype/scripts/convert.ps1
+!/skills/docx-latex-to-mathtype/scripts/scan.ps1
 !/skills/docx-latex-to-mathtype/references/cli.md
 !/tests/test-agent.ps1
 !/tests/helpers/audit_docx.py

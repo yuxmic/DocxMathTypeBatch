@@ -20,6 +20,7 @@ struct ScanOptions {
     bool fast{},saved{},progress{};
     bool capturePoints{true};
     bool convertOmml{true};
+    bool exactTargets{};
 };
 inline bool selectedEquation(bool display,EquationScope scope=EquationScope::All) {
     return scope == EquationScope::All || (display ? scope == EquationScope::Display : scope == EquationScope::Inline);
@@ -252,7 +253,8 @@ inline void addItem(const ScanRangeContext& document, Span span, Span inner, Tok
         if (kind == TokenKind::RepairedBracketOpen && !item.display) { item.ready = false; item.reason = L"UNSAFE_MISSING_DELIMITER"; }
     }
     if (!selectedEquation(item.display,document.options.scope)) return;
-    if(item.ready&&item.display&&!paragraphText.empty()){
+    // 精确选择共用行外判断，但不把相邻空白或手动尾号划进替换范围。
+    if(item.ready&&item.display&&!paragraphText.empty()&&!document.options.exactTargets){
         // 外侧空白仅在当前安全片段内扩展，不能吞掉空结果域或空白内容控件。
         if(manualNumber)item.span=manualSpan;
         else{auto paragraphs=get(range.Get(),L"Paragraphs");auto first=get(collectionItem(paragraphs.Get(),1).Get(),L"Range");auto last=get(collectionItem(paragraphs.Get(),integer(paragraphs.Get(),L"Count")).Get(),L"Range");
@@ -501,8 +503,8 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
             const bool manual=leadingOnly&&manualEquationNumber(context.substr(at+nativeText.size()))&&
                 std::none_of(protectedRanges.begin(),protectedRanges.end(),[&](Span block){return block.start<limits.end&&block.end>limits.start&&(block.start!=span.start||block.end!=span.end);})&&
                 std::none_of(ommlExcluded.begin(),ommlExcluded.end(),[&](Span block){return block.start<limits.end&&block.end>limits.start;});
-            if(manual){item.display=true;item.span={limits.start,limits.end-1};}
-            else if(item.display){
+            if(manual){item.display=true;if(!options.exactTargets)item.span={limits.start,limits.end-1};}
+            else if(item.display&&!options.exactTargets){
                 if(whitespaceOnly(text(docRange(document,limits.start,span.start).Get(),L"Text"))&&whitespaceOnly(text(docRange(document,span.end,limits.end).Get(),L"Text"))){
                     item.span={limits.start,limits.end-1};
                     // OMML 的段外空白同样不能跨过已记录的域和控件边界。
@@ -513,6 +515,10 @@ inline ScanResult scanDocumentText(IDispatch* document, bool paragraphContext,bo
             item.source=item.span.start==span.start&&item.span.end==span.end?std::move(nativeText):text(docRange(document,item.span.start,item.span.end).Get(),L"Text");result.items.push_back(std::move(item));
             ommlProgress.advance();
         }
+    }
+    // 跨段公式换为单个对象会移除原有段落标记。
+    if(options.exactTargets)for(auto& item:result.items)if(item.ready&&item.source.find(L'\r')!=std::wstring::npos){
+        item.ready=false;item.reason=L"EXACT_MULTIPLE_PARAGRAPHS";
     }
     if(options.progress)std::puts(options.saved?"UI_PHASE RESCAN_ORDERING":"UI_PHASE SCAN_ORDERING");
     std::sort(result.items.begin(), result.items.end(), [](const ScanItem& a, const ScanItem& b) { return a.span.start < b.span.start; });

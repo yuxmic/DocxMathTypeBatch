@@ -1,5 +1,7 @@
 // 独立 MathType 对象工厂：只复用已保存的空模板，不复用活动对象。
 #pragma once
+#include "mathtype_api.h"
+#include "conversion_timing.h"
 class EquationSite final : public IOleClientSite {
     ULONG references{1};
 public:
@@ -14,7 +16,7 @@ public:
     HRESULT STDMETHODCALLTYPE RequestNewObjectLayout() override{return E_NOTIMPL;}
 };
 struct Asset {std::vector<unsigned char> ole,preview;long cx{},cy{},baselineHalfPoints{};};
-long previewBaseline(const std::vector<unsigned char>& bytes){
+inline long previewBaseline(const std::vector<unsigned char>& bytes){
     // 厂商 WMF 的 MathType/0 注释以 1/16 pt 给出底边至基线距离；Word 使用带符号的半磅。
     auto word=[&](size_t at){unsigned short value{};memcpy(&value,bytes.data()+at,2);return value;};
     for(size_t at=40;at+6<=bytes.size();){
@@ -27,7 +29,7 @@ long previewBaseline(const std::vector<unsigned char>& bytes){
     throw std::runtime_error("Vendor preview has no equation baseline");
 }
 struct UltraServiceError : std::runtime_error {UltraServiceError():std::runtime_error("MATHTYPE_SERVICE_DISCONNECTED") {}};
-void checkOle(HRESULT status,const char* label){
+inline void checkOle(HRESULT status,const char* label){
     if(status==RPC_E_DISCONNECTED||status==RPC_E_SERVER_DIED||status==RPC_E_SERVER_DIED_DNE||status==CO_E_OBJNOTCONNECTED||status==HRESULT_FROM_WIN32(RPC_S_SERVER_UNAVAILABLE))throw UltraServiceError();
     check(status,label);
 }
@@ -52,7 +54,7 @@ struct EquationHost {
         return asset;
     }
 };
-ComPtr<IStorage> styledStorage(MathTypeApi& api,const std::vector<unsigned char>& native,ConversionTimings& timings){
+inline ComPtr<IStorage> styledStorage(MathTypeApi& api,const std::vector<unsigned char>& native,ConversionTimings& timings){
     EquationHost host(timings);{
         ScopedConversionTiming timing(timings,ConversionMetric::StyleWrite);
         require(api.writeBytes(host.object.Get(),3,native.data(),static_cast<long>(native.size()))==0,"Prepare styled ultra template");

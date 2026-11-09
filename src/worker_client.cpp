@@ -43,6 +43,14 @@ static std::wstring reasonText(const std::wstring& reason) {
     if (reason == L"UNSAFE_MISSING_DELIMITER") return L"公式缺少起始反斜杠，且不满足安全补全条件，请补齐定界符";
     if (reason == L"UNSUPPORTED_LINE_BREAK") return L"公式内含换行，原文保留";
     if (reason == L"UNSUPPORTED_NON_ASCII_TEX") return L"公式内容含非 ASCII 字符，原文保留";
+    if (reason == L"UNSUPPORTED_TEX_MATHML_COMPATIBILITY") return L"MathType 无法完整保留该公式的符号或间距，原公式保留";
+    if (reason == L"OMML_UNSUPPORTED_STRETCHY_BRACKET" || reason == L"UNSUPPORTED_TEX_BRACKET_WIDTH") return L"MathType 无法保留覆盖整组的括号，原公式保留";
+    if (reason == L"OMML_UNSUPPORTED_STRETCHY_HARPOON" || reason == L"UNSUPPORTED_TEX_HARPOON_WIDTH") return L"MathType 无法保留覆盖整组的左鱼叉，原公式保留";
+    if (reason == L"UNSUPPORTED_TEX_ARC_OPTIONS") return L"MathType 无法保留上弧的自定义宽度，原公式保留";
+    if (reason == L"OMML_UNSUPPORTED_INVISIBLE_OPERATOR") return L"MathType 无法保留公式中的不可见运算符，原公式保留";
+    if (reason == L"OMML_UNSUPPORTED_JOINING_CONTROL") return L"公式包含可能影响字符连写的控制符，原公式保留";
+    if (reason == L"OMML_UNSUPPORTED_TAB_STOP") return L"公式包含依赖 Word 制表位的 Tab，原公式保留";
+    if (reason == L"OMML_UNSUPPORTED_OGHAM_SPACE") return L"MathType 无法保留欧甘空格的可见字形，原公式保留";
     if (reason == L"STOP_REQUESTED") return L"已安全停止，尚未转换";
     if (reason == L"UNSUPPORTED_NON_ASCII_EXPORT") return L"导出内容含当前不支持的非 ASCII 字符，原对象保留";
     if (reason == L"UNSUPPORTED_OR_INVALID_NATIVE_EXPORT") return L"导出内容为空、含换行或无法校验，原对象保留";

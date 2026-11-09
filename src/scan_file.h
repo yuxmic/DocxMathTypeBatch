@@ -3,11 +3,42 @@
 #include "docx_scan.h"
 #include "docx_package.h"
 
-inline void writeReport(const std::wstring& path, const std::wstring& input, const ScanResult& result) {
+using ScanContexts = std::vector<std::pair<std::wstring,std::wstring>>;
+
+inline ScanContexts readExactContexts(IDispatch* document,const ScanResult& result) {
+    ScanContexts contexts(result.items.size());
+    if(contexts.empty())return contexts;
+    const long documentEnd=integer(get(document,L"Content").Get(),L"End");
+    constexpr long contextLength=48;
+    auto excerpt=[&](long start,long end){
+        if(start==end)return std::wstring();
+        auto value=text(docRange(document,start,end).Get(),L"Text");
+        // 片段边缘可能截断 UTF-16 代理对，去掉不完整的半个字符。
+        if(!value.empty()&&value.front()>=0xDC00&&value.front()<=0xDFFF)value.erase(value.begin());
+        if(!value.empty()&&value.back()>=0xD800&&value.back()<=0xDBFF)value.pop_back();
+        return value;
+    };
+    for(size_t i=0;i<result.items.size();++i){
+        require(!taskCancelled(),"TASK_CANCELLED");taskPulse();
+        const auto& item=result.items[i];
+        const auto paragraph=static_cast<size_t>(item.paragraph-1);
+        const long begin=result.paragraphStarts.at(paragraph);
+        const long end=(paragraph+1<result.paragraphStarts.size()?result.paragraphStarts[paragraph+1]:documentEnd)-1;
+        // 从同段 Word 范围取上下文，不用文本下标推算公式坐标。
+        if(item.span.start<begin||item.span.end>end)continue;
+        contexts[i]={excerpt(item.span.start-std::min(contextLength,item.span.start-begin),item.span.start),
+                     excerpt(item.span.end,item.span.end+std::min(contextLength,end-item.span.end))};
+    }
+    return contexts;
+}
+
+inline void writeReport(const std::wstring& path, const std::wstring& input, const ScanResult& result,
+                        const std::string& sourceSha256={},const ScanContexts& contexts={}) {
     const auto ready = std::count_if(result.items.begin(), result.items.end(), [](const ScanItem& item) { return item.ready; });
     std::string json = "{\n  \"Input\": " + quote(input) + ",\n  \"Scope\": \"MAIN_STORY_BODY_ONLY\",\n";
     json += "  \"Status\": \"" + std::string(result.protectedDocument ? "SKIPPED_PROTECTED_DOCUMENT" : "SCANNED") + "\",\n";
     json += "  \"SchemaVersion\": 1, \"ReadOnly\": true, \"Positions\": \"WORD_MAIN_STORY_SNAPSHOT\",\n";
+    if(!sourceSha256.empty())json+="  \"ExactTargets\":true, \"SourceSHA256\":\""+sourceSha256+"\",\n";
     if (result.reverse) json += "  \"Direction\":\"REVERSE\", \"MathTypeTypeSource\":\"READ_ONLY_EQUATION_NATIVE\",\n";
     json += "  \"Validation\": \"BOUNDARIES_AND_BASIC_SYNTAX_ONLY\", \"MustRescanBeforeConvert\": true,\n";
     // 整篇保护时没有扫描，计数为未知，不能以 0 冒充检测结果。
@@ -25,7 +56,11 @@ inline void writeReport(const std::wstring& path, const std::wstring& input, con
             "\",\"TableStart\":" + std::to_string(item.tableStart) + ",\"Row\":" + std::to_string(item.row) + ",\"Column\":" + std::to_string(item.column) +
             ",\"Delimiter\":" + quote(item.delimiter) + ",\"Display\":" + (item.display ? "true" : "false") +
             ",\"Status\":\"" + (item.ready ? "READY" : "REJECTED") + "\",\"Reason\":" + quote(item.reason) +
-            ",\"Source\":" + quote(item.source) + ",\"Inner\":" + quote(item.inner) + "}" + (index + 1 == result.items.size() ? "\n" : ",\n");
+            ",\"Source\":" + quote(item.source) + ",\"Inner\":" + quote(item.inner);
+        if(!sourceSha256.empty())json+=",\"Kind\":"+quote(item.ommlOrdinal?L"OMML":L"LATEX")+
+            ",\"FormulaStart\":"+std::to_string(item.span.start)+",\"FormulaEnd\":"+std::to_string(item.span.end)+
+            ",\"Before\":"+quote(contexts.at(index).first)+",\"After\":"+quote(contexts.at(index).second);
+        json+=index+1==result.items.size()?"}\n":"},\n";
     }
     json += "  ]\n}\n";
     // CREATE_NEW 防止覆盖任何已存在的清单；关闭失败或短写入不宣布通过。
@@ -50,6 +85,7 @@ inline ScanResult scanReadOnlyFile(const std::wstring& input, const std::wstring
     try {
         // 在只读共享锁内检查输入，避免检查后被替换成加密文件而触发 Word 对话框。
         requireDocxZip(input);
+        const auto sourceSha256=options.exactTargets?lockedSourceSha256(source):std::string();
         taskCopy(input, copy); owned = true;setDocxLinkUpdates(copy);
         WordSession word;
         auto documents = get(word.application.Get(), L"Documents");
@@ -64,12 +100,13 @@ inline ScanResult scanReadOnlyFile(const std::wstring& input, const std::wstring
         require(readOnly.v.vt == VT_BOOL && readOnly.v.boolVal != VARIANT_FALSE, "Scan document opened read-only");
         const auto before = text(get(word.document.Get(), L"Content").Get(), L"Text");
         auto result = scanner(word.document.Get(),options);
+        const auto contexts=options.exactTargets?readExactContexts(word.document.Get(),result):ScanContexts();
         require(text(get(word.document.Get(), L"Content").Get(), L"Text") == before, "Scanning leaves Word text unchanged");
         word.shutdown();
         require(DeleteFileW(copy.c_str()) != 0, "Remove owned scan copy"); owned = false;
         require(CloseHandle(source) != 0, "Release scan source lock"); source = INVALID_HANDLE_VALUE;
         const auto staged=report+L".work-"+std::to_wstring(GetCurrentProcessId());taskReservePrivatePath(staged);
-        writeReport(staged, input, result);taskMove(staged,report);
+        writeReport(staged, input, result,sourceSha256,contexts);taskMove(staged,report);
         taskCommit();
         return result;
     } catch (...) {

@@ -308,10 +308,47 @@ def manual_omml_recovery_check(folder):
     print('MANUAL_OMML_RECOVERY_PASSED')
 
 
+def formula_tab_fixture(folder):
+    """用真正的公式内 Tab 和段落级旧编号覆盖两类边界。"""
+    document = Document()
+    math_ns = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
+    paragraph = document.add_paragraph('left ')
+    paragraph._p.append(parse_xml(
+        f'<m:oMath xmlns:m="{math_ns}"><m:r><m:rPr><m:nor/></m:rPr>'
+        '<m:t xml:space="preserve">if&#x9;x</m:t></m:r></m:oMath>'))
+    paragraph.add_run(' right')
+    document.add_paragraph('\t  \\[x+1\\]  \t  (71)  ')
+    paragraph = document.add_paragraph()
+    paragraph._p.append(parse_xml(
+        f'<m:oMathPara xmlns:m="{math_ns}"><m:oMath><m:r>'
+        '<m:t xml:space="preserve">x,&#x9;y</m:t></m:r></m:oMath></m:oMathPara>'))
+    document.add_table(rows=1, cols=1).cell(0, 0).text = '$z+3$'
+    document.save(folder / 'formula-tab-input.docx')
+
+
+def formula_tab_check(folder):
+    """在标准核验通过的成品包里确认两个公式 Tab 和新编号都实际存在。"""
+    from native_number_text import native_visible_numbers
+
+    report = json.loads((folder / 'formula-tab.json').read_text(encoding='utf-8-sig'))
+    assert report['WordReopenVerified'] and report['FailedPreserved'] == 2, report
+    assert report['Succeeded'] == 2 and report['NumbersAdded'] == 1, report
+    assert report['Experimental']['Succeeded'] == 1, report
+    output = Document(folder / 'formula-tab.docx')
+    first, numbered, last = output.paragraphs[:3]
+    assert first.text == 'left  right', first.text
+    assert ''.join(first._p.xpath('.//m:oMath//m:t/text()')) == 'if\tx'
+    assert ''.join(last._p.xpath('.//m:oMath//m:t/text()')) == 'x,\ty'
+    assert len(numbered._p.xpath('./w:r/w:tab')) == 2 and '(71)' not in numbered.text
+    assert native_visible_numbers(output.element) == ['(1)']
+    print('OMML_FORMULA_TAB_REOPEN_PASSED')
+
+
 if __name__ == '__main__':
     mode, directory = sys.argv[1:3]
     {'fixture': fixture, 'check': check, 'shared-fixture': shared_fixture, 'shared-check': shared_check,
      'boundary-fixture': boundary_fixture, 'boundary-check': boundary_check, 'fast-check': fast_check,
      'manual-omml-fixture': manual_omml_fixture, 'manual-omml-check': lambda path: manual_equation_check(path, 'omml'),
      'manual-latex-fixture': manual_latex_fixture, 'manual-latex-check': lambda path: manual_equation_check(path, 'latex'),
-     'manual-omml-recovery-check': manual_omml_recovery_check}[mode](Path(directory))
+     'manual-omml-recovery-check': manual_omml_recovery_check,
+     'formula-tab-fixture': formula_tab_fixture, 'formula-tab-check': formula_tab_check}[mode](Path(directory))

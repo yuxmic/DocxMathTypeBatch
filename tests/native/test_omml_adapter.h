@@ -37,6 +37,13 @@ inline void checkDirectTex() {
         {L"<m:r><m:t>x+</m:t></m:r><m:phant><m:e><m:r><m:t>z</m:t></m:r></m:e></m:phant>",nullptr},
         {L"<m:r><m:t>x=</m:t></m:r><m:r><m:rPr><m:sty m:val='bi'/></m:rPr><m:t>U</m:t></m:r>",nullptr},
         {L"<m:r><m:t>x=</m:t></m:r><m:r><m:rPr><m:scr m:val='script'/></m:rPr><m:t>l</m:t></m:r>",nullptr},
+        {L"<m:r><m:t>a,\u2001b</m:t></m:r>",nullptr},
+        {L"<m:r><m:t>x y</m:t></m:r>",nullptr},
+        {L"<m:r><m:rPr><m:nor/></m:rPr><m:t>if x</m:t></m:r>",nullptr},
+        {L"<m:acc><m:accPr><m:chr m:val='\u203e'/></m:accPr><m:e><m:r><m:t>P</m:t></m:r></m:e></m:acc>",nullptr},
+        {L"<m:acc><m:accPr><m:chr m:val='\u030b'/></m:accPr><m:e><m:r><m:t>P</m:t></m:r></m:e></m:acc>",nullptr},
+        {L"<m:acc><m:accPr><m:chr m:val='\u033f'/></m:accPr><m:e><m:r><m:t>x+y</m:t></m:r></m:e></m:acc>",L"\\overline{\\overline{x+y}}"},
+        {L"<m:groupChr><m:groupChrPr><m:chr m:val='\u23de'/><m:pos m:val='top'/><m:vertJc m:val='bot'/></m:groupChrPr><m:e><m:r><m:t>x+y</m:t></m:r></m:e></m:groupChr>",L"\\overbrace{x+y}"},
         {L"<m:sSub><m:e><m:r><m:t>x</m:t></m:r></m:e><m:sub><m:argPr><m:argSz m:val='-1'/></m:argPr><m:r><m:t>i</m:t></m:r></m:sub></m:sSub>",nullptr}
     };
     for(const auto& item:cases){
@@ -109,11 +116,67 @@ inline void run(const std::wstring& stylesheetPath) {
         require(count(actual,item.expectedNode)>0,"Adapter preserves expected mathematical structure");
         require(count(actual,display?L"/*[local-name()='math' and @display='block']":L"/*[local-name()='math' and @display='inline']")==1,"Adapter preserves display mode");
     }
-    const auto clean=source(L"<m:r><m:t>x+1</m:t></m:r>"),dirty=source(L"<m:r><m:t xml:space=\"preserve\"> \tx\u00a0+1\n </m:t></m:r>"),original=dirty;
-    require(ommlMathML(clean,compiled.Get(),false,timings)==ommlMathML(dirty,compiled.Get(),false,timings)&&dirty==original,"Adapter removes import whitespace without changing recovery XML");
-    // 普通文本同样清理显式空白，避免厂商导入产生空白占位符；此为产品兼容约定。
-    const auto normalClean=source(L"<m:r><m:rPr><m:nor/></m:rPr><m:t>forallx</m:t></m:r>"),normalSpaced=source(L"<m:r><m:rPr><m:nor/></m:rPr><m:t xml:space=\"preserve\">for all x</m:t></m:r>");
-    require(ommlMathML(normalClean,compiled.Get(),false,timings)==ommlMathML(normalSpaced,compiled.Get(),false,timings),"Normal OMML text retains the intentional whitespace cleanup policy");
+    const auto spaced=source(L"<m:r><m:t xml:space=\"preserve\">x y, z&#x00a0;+&#x2002;1</m:t></m:r>"),original=spaced;
+    const auto explicitSpaces=ommlMathML(spaced,compiled.Get(),false,timings);
+    require(contents(explicitSpaces)==L"xy,z+1"&&
+        count(explicitSpaces,L"//*[local-name()='mspace']")==3&&spaced==original,"Adapter preserves explicit math spacing without changing recovery XML");
+    // 普通文字保留词间空格，较窄的不换行空格用对应宽度保留。
+    const auto normalSpaced=source(L"<m:r><m:rPr><m:nor/></m:rPr><m:t xml:space=\"preserve\">if x&#x202f;y</m:t></m:r>");
+    const auto normalMath=ommlMathML(normalSpaced,compiled.Get(),false,timings);
+    require(contents(normalMath)==L"ifxy"&&count(normalMath,L"//*[local-name()='mtext']")==3&&
+        count(normalMath,L"//*[local-name()='mspace' and @width='0.2002em']")==1,"Normal OMML text preserves word and narrow no-break spacing");
+    const auto wordFunction=ommlMathML(source(L"<m:func><m:fName><m:r><m:rPr><m:nor/></m:rPr><m:t>sin</m:t></m:r></m:fName><m:e><m:r><m:t>x</m:t></m:r></m:e></m:func>"),compiled.Get(),false,timings);
+    require(contents(wordFunction)==L"sin\u2061x","Office-generated function application remains importable");
+    const struct {const wchar_t* token;const char* reason;} guardedSpaces[]{
+        {L"f&#x2061;x","OMML_UNSUPPORTED_INVISIBLE_OPERATOR"},
+        {L"a&#x2063;b","OMML_UNSUPPORTED_INVISIBLE_OPERATOR"},
+        {L"x&#x1680;y","OMML_UNSUPPORTED_OGHAM_SPACE"},
+        {L"x&#x9;y","OMML_UNSUPPORTED_TAB_STOP"}
+    };
+    for(const auto& item:guardedSpaces)try{
+        ommlMathML(source((L"<m:r><m:t>"+std::wstring(item.token)+L"</m:t></m:r>").c_str()),compiled.Get(),false,timings);
+        require(false,"Unsupported spacing or operator must preserve the source formula");
+    }catch(const std::runtime_error& error){
+        require(std::string_view(error.what())==item.reason,"Report unsupported spacing or operator explicitly");
+    }
+    // 连续宽空格保留间距，横线和折线只在原顶饰结构中适配。
+    const auto unicodeInput=source(
+        L"<m:r><m:t>a,\u2001\u2001b\u2009c+v\u2212~^\u203e</m:t></m:r>"
+        L"<m:acc><m:accPr><m:chr m:val='\u203e'/></m:accPr><m:e><m:r><m:t>P</m:t></m:r></m:e></m:acc>"
+        L"<m:acc><m:accPr><m:chr m:val='\u0305'/></m:accPr><m:e><m:r><m:t>Q</m:t></m:r></m:e></m:acc>"
+        L"<m:acc><m:accPr><m:chr m:val='\u02dc'/></m:accPr><m:e><m:r><m:t>x</m:t></m:r></m:e></m:acc>"
+        L"<m:acc><m:accPr><m:chr m:val='\u02c6'/></m:accPr><m:e><m:r><m:t>y</m:t></m:r></m:e></m:acc>"
+        L"<m:acc><m:accPr><m:chr m:val='\u02c7'/></m:accPr><m:e><m:r><m:t>z</m:t></m:r></m:e></m:acc>");
+    const auto unicodeMath=ommlMathML(unicodeInput,compiled.Get(),false,timings);
+    require(contents(unicodeMath)==L"a,\u2003\u2003b\u2009c+v\u2212~^\u203eP-Q-x~y^z\u02c7","MathML normalizes explicit spacing and accents without changing ordinary symbols");
+    require(count(unicodeMath,L"//*[local-name()='mover' and @accent='true' and count(*)=2 and *[1][local-name()='mrow'] and *[2][local-name()='mi' or local-name()='mo']]")==5,"MathML keeps explicit accents attached to their original bases");
+    const auto accents=finishMathML(
+        L"<mover><mrow><mi>x</mi><mo>+</mo><mi>y</mi></mrow><mo>&#x20DB;</mo></mover>"
+        L"<mover><mi>z</mi><mo>&#x033F;</mo></mover><mover><mi>t</mi><mo>&#x27F6;</mo></mover>"
+        L"<mover><mi>p</mi><mo>&#x23DC;</mo></mover><mi>q&#x0305;</mi>",false,timings);
+    require(contents(accents)==L"x+y...z--t\u2192p\u2322q-"&&
+        count(accents,L"//*[local-name()='mover' and *[1][local-name()='mover']]")==1,"MathML retains grouped dots, double bars, long arrows, wide arcs and literal combining overlines");
+    const auto stacked=ommlMathML(source(
+        L"<m:r><m:t>x\u033f+y\u0311+z\u20d0+t\u20d1+p\u0305\u0307+q\u0305\u0308+\u0176\u0308</m:t></m:r>"
+        L"<m:r><m:rPr><m:nor/></m:rPr><m:t>a\u0305 if \u0176</m:t></m:r>"),compiled.Get(),false,timings);
+    require(contents(stacked)==L"x--+y\u2322+z\u21bc+t\u21c0+p-.+q-..+Y^..a-if\u0176"&&
+        count(stacked,L"//*[local-name()='mover' and *[1][local-name()='mover']]")==4&&
+        count(stacked,L"//*[local-name()='mover']/*[1][local-name()='mtext' and text()='a']")==1,
+        "Stacked literal accents keep order, dot count and normal text style");
+    const auto singleBracket=finishMathML(L"<mover><mrow><mi>x</mi></mrow><mo>&#x23B4;</mo></mover>",false,timings);
+    require(contents(singleBracket)==L"x\u23b4","Single-character upper bracket stays attached");
+    try{
+        finishMathML(L"<mover><mrow><mi>x</mi><mi>y</mi></mrow><mo>&#x23B4;</mo></mover>",false,timings);
+        require(false,"Unsupported wide bracket must preserve the source formula");
+    }catch(const std::runtime_error& error){
+        require(std::string_view(error.what())=="OMML_UNSUPPORTED_STRETCHY_BRACKET","Report unsupported wide bracket explicitly");
+    }
+    try{
+        finishMathML(L"<mover><mrow><mi>x</mi><mi>y</mi></mrow><mo>&#x20D0;</mo></mover>",false,timings);
+        require(false,"Unsupported wide left harpoon must preserve the source formula");
+    }catch(const std::runtime_error& error){
+        require(std::string_view(error.what())=="OMML_UNSUPPORTED_STRETCHY_HARPOON","Report unsupported wide left harpoon explicitly");
+    }
     const auto ascii=finishMathML(L"<mi>x</mi><mo>+</mo><mn>1</mn>",false,timings);
     require(contents(ascii)==L"x+1"&&count(ascii,L"//*[local-name()='mover']")==0,"ASCII path retains exact mathematical text");
     // ASCII 公式同样展开运算分隔符；嵌套、空括号和末个分隔符重复不能改变含义。

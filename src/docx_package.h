@@ -5,9 +5,39 @@
 #include <msopc.h>
 #include <msxml6.h>
 #include <xmllite.h>
+#include <wincrypt.h>
 #include <cstring>
 #include <map>
 #include <set>
+
+// 在同一把原件只读锁内绑定扫描和转换，计算后将句柄归零供后续读取。
+inline std::string lockedSourceSha256(HANDLE source) {
+    struct Digest {
+        HCRYPTPROV provider{};
+        HCRYPTHASH hash{};
+        ~Digest(){if(hash)CryptDestroyHash(hash);if(provider)CryptReleaseContext(provider,0);}
+    } digest;
+    require(CryptAcquireContextW(&digest.provider,nullptr,nullptr,PROV_RSA_AES,CRYPT_VERIFYCONTEXT|CRYPT_SILENT)!=0,
+            "Open SHA-256 provider");
+    require(CryptCreateHash(digest.provider,CALG_SHA_256,0,0,&digest.hash)!=0,"Create source SHA-256");
+    LARGE_INTEGER zero{};
+    require(SetFilePointerEx(source,zero,nullptr,FILE_BEGIN)!=0,"Rewind locked source for SHA-256");
+    BYTE block[64*1024];
+    for(;;){
+        require(!taskCancelled(),"TASK_CANCELLED");taskPulse();
+        DWORD read{};
+        require(ReadFile(source,block,static_cast<DWORD>(sizeof(block)),&read,nullptr)!=0,"Read locked source for SHA-256");
+        if(!read)break;
+        require(CryptHashData(digest.hash,block,read,0)!=0,"Update source SHA-256");
+    }
+    BYTE bytes[32];DWORD size=static_cast<DWORD>(sizeof(bytes));
+    require(CryptGetHashParam(digest.hash,HP_HASHVAL,bytes,&size,0)!=0&&size==sizeof(bytes),"Read source SHA-256");
+    require(SetFilePointerEx(source,zero,nullptr,FILE_BEGIN)!=0,"Rewind locked source after SHA-256");
+    constexpr char digits[]="0123456789ABCDEF";
+    std::string result;result.reserve(64);
+    for(const auto value:bytes){result+=digits[value>>4];result+=digits[value&15];}
+    return result;
+}
 
 inline ComPtr<IXMLDOMDocument2> xmlDocument(const std::wstring& xml) {
     ComPtr<IXMLDOMDocument2> dom;check(CoCreateInstance(__uuidof(DOMDocument60),nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&dom)),"Experimental XML reader");
@@ -17,7 +47,7 @@ inline ComPtr<IXMLDOMDocument2> xmlDocument(const std::wstring& xml) {
 }
 using DocxLinkUpdates = std::map<std::wstring, std::vector<std::wstring>>;
 // 只修改私有副本的 OLE 外链更新方式，正常保存后恢复，不修改 Word 全局选项。
-inline DocxLinkUpdates setDocxLinkUpdates(const std::wstring& path, const DocxLinkUpdates* restore = nullptr) {
+inline DocxLinkUpdates setDocxLinkUpdates(const std::wstring& path, const DocxLinkUpdates* restore = nullptr, bool* formulaTabs = nullptr) {
     if (restore && restore->empty()) return {};
     const bool progress=taskShared!=nullptr;
     if(progress)std::puts(restore?"UI_PHASE RESTORE_LINKS":"UI_PHASE LINK_SETTINGS");
@@ -46,6 +76,11 @@ inline DocxLinkUpdates setDocxLinkUpdates(const std::wstring& path, const DocxLi
             check(document->put_resolveExternals(VARIANT_FALSE),"Disable XML external resolution");check(document->setProperty(Value(L"ProhibitDTD").v.bstrVal,Value(true).v),"Disable XML DTD");
             Value source;source.v.vt=VT_UNKNOWN;source.v.punkVal=content.Get();source.v.punkVal->AddRef();VARIANT_BOOL loaded{};
             check(document->load(source.v,&loaded),"Load private XML part");require(loaded!=VARIANT_FALSE,"Valid private XML part");
+            if(formulaTabs&&!*formulaTabs){
+                ComPtr<IXMLDOMNode> tab;
+                check(document->selectSingleNode(Value(L"//*[local-name()='t' and namespace-uri()='http://schemas.openxmlformats.org/officeDocument/2006/math' and contains(.,'\t')]").v.bstrVal,&tab),"Find literal OMML tabs");
+                *formulaTabs=static_cast<bool>(tab);
+            }
             ComPtr<IXMLDOMNodeList> links;check(document->selectNodes(Value(L"//*[local-name()='OLEObject' and namespace-uri()='urn:schemas-microsoft-com:office:office' and @Type='Link']").v.bstrVal,&links),"Find linked OLE objects");
             long count{};check(links->get_length(&count),"Count linked OLE objects");if(!count&&!restore){partProgress.advance();continue;}
             if(restore){require(static_cast<size_t>(count)==restore->at(partName).size(),"Saved linked OLE objects preserved");++restored;}

@@ -1,19 +1,19 @@
 ---
 name: docx-latex-to-mathtype
-description: 使用包内 DocxMathTypeBatch 将 DOCX 正文 LaTeX、Word 原生公式转换为 MathType，或将 MathType 导出为 LaTeX。支持标准、快速和极速，按所选模式处理编号及额外位置。需要 Windows 本机 Word 和 MathType。
+description: 使用包内 DocxMathTypeBatch 将 DOCX 正文 LaTeX、Word 原生公式转换为 MathType，或将 MathType 导出为 LaTeX。支持标准、快速和极速，以及按扫描清单选择指定正文公式。需要 Windows 本机 Word 和 MathType。
 license: MIT
 metadata:
-  version: "0.2.2"
+  version: "0.2.3"
   cli_contract: "1"
 ---
 
 # DOCX 公式转换
 
-Skill v0.2.2 包内含 `bin/DocxMathTypeBatch.exe`。需要 Windows 本机已安装 64 位桌面 Word 和完整 MathType；脚本兼容 Windows PowerShell 5.1 和 PowerShell 7，不需要 Python。
+Skill v0.2.3 包内含 v0.1.6 转换器 `bin/DocxMathTypeBatch.exe`。需要 Windows 本机已安装 64 位桌面 Word 和完整 MathType。脚本兼容 Windows PowerShell 5.1 和 PowerShell 7，不需要 Python。
 
 ## 使用包内程序
 
-直接运行 `scripts/convert.ps1`。它自动按相对路径调用包内 EXE，先检查文件身份和 `--describe --json` 接口，再启动受监管的 `--worker-convert` / `--worker-reverse`。整个 Skill 调用无界面，不打开程序 GUI。
+直接运行 `scripts/convert.ps1`。它自动按相对路径调用包内 EXE，先检查文件身份和 `--describe --json` 接口，再启动受监管的 `--worker-convert` / `--worker-reverse`。只转换指定公式时，先用 `scripts/scan.ps1` 获取清单。整个 Skill 调用无界面，不打开程序 GUI。
 
 无需单独下载、查找或连接 EXE，不搜索注册表、PATH 或外部安装位置。只在排查包内身份/接口时运行无参数的 `scripts/connect.ps1`；无需转换前重复执行。返回 `EXECUTABLE_NOT_FOUND` 时重新解压完整包。移动后仍按相对路径使用，更新时替换完整包。
 
@@ -35,6 +35,12 @@ Skill v0.2.2 包内含 `bin/DocxMathTypeBatch.exe`。需要 Windows 本机已安
 ```
 
 普通正文的行外显示布局由程序统一处理。只有用户明确要求额外位置时才传入 `-Tables`、`-Textboxes`、`-Headers`、`-Notes`；这些区域仅替换公式，不参与字号、段落或右编号。页眉中的表格需要同时使用 `-Headers -Tables`。行内/行外筛选也约束已启用的额外区域。
+
+### 只转换指定公式
+
+用户要求只转换某几个公式时，用 `scan.ps1 -InputPath` 只读扫描。读取返回的 `ReportPath`，通过 `Source`、`Paragraph`、`Before` 和 `After` 核对位置。相同内容出现多次时，用上下文区分，位置仍不明确时先请用户指明。只选择状态为 `READY` 的 `Id`。
+
+将同一输入、`-ScanReportPath` 和选中的 `-TargetId` 传给 `convert.ps1`。此入口使用标准模式，只正向替换正文选中的 LaTeX 或 Word 原生公式，保留其它公式、原段落设置及公式外的 Tab、空格和编号。文档保存过修改后重新扫描。调用示例及限制见 [references/cli.md](references/cli.md#只转换指定公式)。
 
 ### 选择转换模式
 
